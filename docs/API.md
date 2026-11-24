@@ -7076,19 +7076,21 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   `strength`, `branch`, `levelFrames`, `spreadDb`, `p10Dbfs`, `periodicShare`,
   `burstFrames`, `loudPitchShare`, `topSpreadDb`, `loudLevelDbfs`; null when the
   recorder passed none), plus `tone` (since 2026-11-23): the sub-audible tone the
-  file was sent with, as the recorder's CTCSS detector measured it over the
-  file's activity: `{ "kind": "ctcss", "hz": 88.5 }` (a standard tone,
-  67.0-254.1 Hz), or null when it measured at least 1 s of the activity, no
-  part of it held a CTCSS tone and its sub-audible band (about 40-400 Hz) held
-  no energy (under 1% of each half-second block's power): in practice only an
-  almost silent audio path, since voice and receiver noise fill that band. Absent
-  when it could not tell: it measured less, part of the audio held a tone it could
-  not settle on (a toned over joined to an untoned one, or diluted by
-  squelch-tail noise), or the band held energy no CTCSS tone won (a DCS code, a
-  broken-up tone, an untoned voice); and absent on older files. So an untoned
-  voice recording normally reads absent, not null. A DCS form,
-  `{ "kind": "dcs", "code": "023" }` (three octal digits), is reserved: the
-  recorder measures no DCS today, and a DCS-coded file reads absent. Null for older files, any other kind, and a sidecar that
+  file was sent with, as the recorder's own CTCSS detector and DCS decoder
+  measured it over the file's activity (both hear the same audio, low-passed at
+  300 Hz): `{ "kind": "dcs", "code": "023", "polarity": "normal" }` when its DCS
+  decoder confirmed a standard code over at least 0.75 s (read as the live path
+  reads it: an inverted 023 is 047 normal; DCS wins when both answer), else
+  `{ "kind": "ctcss", "hz": 88.5 }` (a standard tone, 67.0-254.1 Hz) when its
+  CTCSS detector settled on one, or null when its detectors analysed at least
+  1 s (CTCSS) and 0.75 s (DCS) of the file's own audio and nothing tone-like was
+  heard: no half-second block voted for or leaned on a CTCSS tone, no two
+  consecutive DCS words matched, and DCS word hits stayed at chance (fewer than
+  2, or fewer than one per 3 s analysed; noise hits about once per 13 s). Absent
+  when it measured less, when a tone or DCS word was heard but did not settle (a
+  weak or broken-up tone, a DCS code too broken to confirm, a toned over joined
+  to an untoned one), or when the file was kept for its own tone; and absent on
+  older files. A reader accepts a DCS tone without `polarity`. Null for older files, any other kind, and a sidecar that
   is missing, larger than 2 KiB, malformed or of another operation; the file is
   served the same either way.
 - `frequencyHz` of a scanner recording is its channel frequency: the frequency

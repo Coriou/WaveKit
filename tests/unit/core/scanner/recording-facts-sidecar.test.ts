@@ -34,6 +34,9 @@ import {
 	RECORDING_FACTS_MAX_BYTES,
 	RecordingFactsSchema,
 	DCS_MEASURED_MIN_SAMPLES,
+	DCS_CHANCE_HIT_SECONDS,
+	DCS_LONE_HIT_SECONDS,
+	DCS_LONE_HITS_MIN,
 	DCS_PARTIAL_WORDS,
 	TONE_MEASURED_MIN_BLOCKS,
 	factsFitFolder,
@@ -49,7 +52,11 @@ import {
 } from "../../../../src/core/scanner/store/recording-operation.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 import { gaussian, mulberry32 } from "../audio-tones/synth.js"
-import { dcsDeviation, voicePitchDeviation } from "./wideband-nfm-fixtures.js"
+import {
+	brokenDcsDeviation,
+	dcsDeviation,
+	voicePitchDeviation,
+} from "./wideband-nfm-fixtures.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
 import type { AnalogHandle } from "../../../../src/core/scanner/store/analog-operations.js"
 import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
@@ -483,6 +490,7 @@ describe("recordingFactsBytes bounds", () => {
 			partialBlocks: 0,
 			dcsSamples: DCS_MEASURED_MIN_SAMPLES,
 			dcsChain: 0,
+			dcsLoneHits: 0,
 			dcs: null,
 			ownTone: false,
 		}
@@ -500,17 +508,27 @@ describe("recordingFactsBytes bounds", () => {
 			expect(DCS_PARTIAL_WORDS).toBe(2)
 		})
 
-		it("a settled CTCSS tone always wins, a DCS code too", () => {
-			const both = { ...quiet, dcs: code }
-			expect(toneFactOf(88.5, both)).toEqual({
-				tone: { kind: "ctcss", hz: 88.5 },
+		it("a confirmed DCS code wins over a settled CTCSS tone; the settled tone wins otherwise", () => {
+			expect(toneFactOf(88.5, { ...quiet, dcs: code })).toEqual({
+				tone: { kind: "dcs", code: "023", polarity: "normal" },
 			})
+			// Under the DCS sample minimum the code is no answer: the CTCSS tone.
+			expect(
+				toneFactOf(88.5, {
+					...quiet,
+					dcs: code,
+					dcsSamples: DCS_MEASURED_MIN_SAMPLES - 1,
+				}),
+			).toEqual({ tone: { kind: "ctcss", hz: 88.5 } })
 			expect(toneFactOf(88.5, null)).toEqual({
 				tone: { kind: "ctcss", hz: 88.5 },
 			})
 			expect(toneFactOf(88.5, { ...quiet, ctcssBlocks: 0 })).toEqual({
 				tone: { kind: "ctcss", hz: 88.5 },
 			})
+			expect(
+				toneFactOf(88.5, { ...quiet, dcsLoneHits: 50, ownTone: true }),
+			).toEqual({ tone: { kind: "ctcss", hz: 88.5 } })
 		})
 
 		it("a confirmed DCS code beats a CTCSS that did not settle, at its sample minimum and not below", () => {
@@ -579,6 +597,45 @@ describe("recordingFactsBytes bounds", () => {
 			).toEqual({ tone: null })
 		})
 
+		it("lone DCS word hits: absent from 2 and one per 3 s analysed, null below either bound", () => {
+			expect(DCS_LONE_HITS_MIN).toBe(2)
+			expect(DCS_LONE_HIT_SECONDS).toBe(3)
+			// About four times the chance rate of one hit per 13 s.
+			expect(DCS_CHANCE_HIT_SECONDS / DCS_LONE_HIT_SECONDS).toBeGreaterThan(4)
+			const at = (dcsLoneHits: number, seconds: number) =>
+				toneFactOf(null, {
+					...quiet,
+					dcsSamples: seconds * 8000,
+					dcsLoneHits,
+				})
+			// 0.75 s and 3 s analysed: the minimum of 2 binds.
+			expect(at(1, 0.75)).toEqual({ tone: null })
+			expect(at(2, 0.75)).toEqual({})
+			expect(at(1, 3)).toEqual({ tone: null })
+			expect(at(2, 3)).toEqual({})
+			// 6 s: 2 hits are one per 3 s, exactly at the rate.
+			expect(at(1, 6)).toEqual({ tone: null })
+			expect(at(2, 6)).toEqual({})
+			// 60 s: the rate binds, 20 hits (exactly one per 3 s) and not 19.
+			expect(at(19, 60)).toEqual({ tone: null })
+			expect(at(20, 60)).toEqual({})
+			// One sample past 60 s: 20 hits fall just under one per 3 s.
+			expect(
+				toneFactOf(null, {
+					...quiet,
+					dcsSamples: 60 * 8000 + 1,
+					dcsLoneHits: 20,
+				}),
+			).toEqual({ tone: null })
+			expect(
+				toneFactOf(null, {
+					...quiet,
+					dcsSamples: 60 * 8000 + 1,
+					dcsLoneHits: 21,
+				}),
+			).toEqual({})
+		})
+
 		it("a file kept for its own tone is never null", () => {
 			expect(toneFactOf(null, { ...quiet, ownTone: true })).toEqual({})
 		})
@@ -591,6 +648,7 @@ describe("recordingFactsBytes bounds", () => {
 				expect(toneFactOf(null, { ...quiet, votedBlocks: n })).toEqual({})
 				expect(toneFactOf(null, { ...quiet, partialBlocks: n })).toEqual({})
 				expect(toneFactOf(null, { ...quiet, dcsChain: n })).toEqual({})
+				expect(toneFactOf(null, { ...quiet, dcsLoneHits: n })).toEqual({})
 			}
 		})
 	})
@@ -602,6 +660,7 @@ describe("recordingFactsBytes bounds", () => {
 		partialBlocks: bank.partialBlockCount(),
 		dcsSamples: dcs.sampleCount(),
 		dcsChain: dcs.longestChain(),
+		dcsLoneHits: dcs.loneHitCount(),
 		dcs: dcs.result(),
 		ownTone,
 	})
@@ -841,24 +900,81 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		120_000,
 	)
 
-	// Random NRZ at 134.4 bps (modelled, no valid code word): no CTCSS tone wins or leans on a
-	// block and no two consecutive DCS words match, so it reads as no tone. A DCS code too broken
-	// to hold two consecutive words reads the same: the disclosed limit of "No tone heard".
-	it("a DCS-like random NRZ over: no code word chains, null", async () => {
-		const bits = mulberry32(19)
-		const levels: number[] = []
-		const nrz = (t: number): number => {
-			const bit = Math.floor(t * 134.4)
-			while (levels.length <= bit) levels.push(bits() < 0.5 ? -500 : 500)
-			return levels[bit]!
-		}
+	// A DCS 023 too broken to chain two words (modelled: one bit in 20 flipped, 5% bit errors):
+	// the decoder confirms nothing and never matches two consecutive words, but its clean 23-bit
+	// windows hit far above chance: tone-like, so absent, never "No tone heard".
+	it("a DCS 023 over with 5% flipped bits: no code, lone hits above chance: absent, never null", async () => {
 		const scene = await recorderScene([
-			{ seconds: 6, ctcssHz: null, gapAfter: 4.1, subAudible: nrz },
+			{
+				seconds: 6,
+				ctcssHz: null,
+				gapAfter: 4.1,
+				subAudible: brokenDcsDeviation("023", 5),
+			},
 		])
 		expect(scene.outcomes).toEqual(["finalized"])
-		expect(scene.facts[0]!.tone).toBeNull()
-		expect(scene.stored[0]!.tone).toBeNull()
+		expect("tone" in scene.facts[0]!).toBe(false)
+		expect("tone" in scene.stored[0]!).toBe(false)
 	}, 120_000)
+
+	/**
+	 * Modelled sub-audible noise as deviation (Hz at t s): white noise through two one-pole
+	 * low-passes at 250 Hz, `rmsHz` RMS, plus an 88.5 Hz tone `snrDb` under it (none when null).
+	 * Called once per source sample at LOW_FS, in order.
+	 */
+	const subAudibleNoise = (
+		seed: number,
+		rmsHz: number,
+		snrDb: number | null,
+	) => {
+		const alpha = 1 - Math.exp((-2 * Math.PI * 250) / LOW_FS)
+		const filtered = () => {
+			const rand = mulberry32(seed)
+			let y1 = 0
+			let y2 = 0
+			return () => {
+				y1 += alpha * (gaussian(rand) - y1)
+				y2 += alpha * (y1 - y2)
+				return y2
+			}
+		}
+		const probe = filtered()
+		let power = 0
+		for (let i = 0; i < LOW_FS * 4; i++) power += probe() ** 2
+		const scale = rmsHz / Math.sqrt(power / (LOW_FS * 4))
+		const next = filtered()
+		const toneHz =
+			snrDb === null ? 0 : rmsHz * Math.sqrt(2 * 10 ** (snrDb / 10))
+		return (t: number) =>
+			scale * next() + toneHz * Math.sin(2 * Math.PI * 88.5 * t)
+	}
+
+	// An 88.5 Hz tone 12 dB under sub-audible noise: too weak for a block to vote, but blocks lean
+	// on it two in a row: absent, never null. The same noise alone: nothing leans, null.
+	it("a weak 88.5 Hz tone under sub-audible noise: absent; the noise alone: null", async () => {
+		const toned = await recorderScene([
+			{
+				seconds: 6,
+				ctcssHz: null,
+				gapAfter: 4.1,
+				subAudible: subAudibleNoise(23, 150, -12),
+			},
+		])
+		expect(toned.outcomes).toEqual(["finalized"])
+		expect("tone" in toned.facts[0]!).toBe(false)
+		expect("tone" in toned.stored[0]!).toBe(false)
+		const noise = await recorderScene([
+			{
+				seconds: 6,
+				ctcssHz: null,
+				gapAfter: 4.1,
+				subAudible: subAudibleNoise(23, 150, null),
+			},
+		])
+		expect(noise.outcomes).toEqual(["finalized"])
+		expect(noise.facts[0]!.tone).toBeNull()
+		expect(noise.stored[0]!.tone).toBeNull()
+	}, 240_000)
 
 	// A 600 ms over alone: its detectors analysed under 1 s (the CTCSS minimum): absent.
 	it("a short over (600 ms): the tone is absent, never null", async () => {

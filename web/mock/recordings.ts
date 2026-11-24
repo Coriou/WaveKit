@@ -130,7 +130,7 @@ const SEEDS: readonly Seed[] = [
 		cut: "duration-rollover",
 		part: 1,
 		parts: 3,
-		tone: { kind: "dcs", code: "023" },
+		tone: { kind: "dcs", code: "023", polarity: "normal" },
 	},
 	{
 		kind: "scanner-analog",
@@ -140,7 +140,7 @@ const SEEDS: readonly Seed[] = [
 		cut: "duration-rollover",
 		part: 2,
 		parts: 3,
-		tone: { kind: "dcs", code: "023" },
+		tone: { kind: "dcs", code: "023", polarity: "normal" },
 	},
 	{
 		kind: "scanner-analog",
@@ -150,7 +150,7 @@ const SEEDS: readonly Seed[] = [
 		cut: "scanner-moved",
 		part: 3,
 		parts: 3,
-		tone: { kind: "dcs", code: "023" },
+		tone: { kind: "dcs", code: "023", polarity: "normal" },
 	},
 	{
 		kind: "scanner-analog",

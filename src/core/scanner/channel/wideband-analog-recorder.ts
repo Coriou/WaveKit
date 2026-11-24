@@ -4638,6 +4638,7 @@ export class WidebandAnalogRecorder {
 						partialBlocks: file.ctcss.partialBlockCount(),
 						dcsSamples: file.dcs.sampleCount(),
 						dcsChain: file.dcs.longestChain(),
+						dcsLoneHits: file.dcs.loneHitCount(),
 						dcs: file.dcs.result(),
 						ownTone: file.classTone !== null || file.toneCarried,
 					}

@@ -192,6 +192,8 @@ export class DcsDecoder {
 	private samples = 0
 	/** Most consecutive matching words any chain reached (longestChain). */
 	private bestHits = 0
+	/** Word chains started (loneHitCount). */
+	private loneHits = 0
 
 	constructor(options?: { codeSet?: DcsCodeSet }) {
 		this.standard = (options?.codeSet ?? DCS_CODE_SET) === "standard"
@@ -298,6 +300,17 @@ export class DcsDecoder {
 		return this.bestHits
 	}
 
+	/**
+	 * Word chains started since construction or the last reset: every register that matched a
+	 * valid word while no chain was pending (wordHits() = 1), whether or not the chain went on.
+	 * Noise or voice hits by chance about once per 13 s (DCS_CHANCE_HIT_SECONDS in
+	 * recording-facts.ts); a DCS code too broken to chain still hits many times a second. Does not
+	 * affect `result()`.
+	 */
+	loneHitCount(): number {
+		return this.loneHits
+	}
+
 	result(): AnalogTransmissionDcs | null {
 		return this.confirmed === NONE ? null : toDcs(this.confirmed)
 	}
@@ -324,6 +337,7 @@ export class DcsDecoder {
 		this.confirmed = NONE
 		this.samples = 0
 		this.bestHits = 0
+		this.loneHits = 0
 	}
 
 	private pushBit(bit: number, quiet: boolean): void {
@@ -357,6 +371,7 @@ export class DcsDecoder {
 		this.candidateBit = this.bitIndex
 		this.candidateWord = this.register
 		this.hits = 1
+		this.loneHits += 1
 		if (this.bestHits < 1) this.bestHits = 1
 	}
 }

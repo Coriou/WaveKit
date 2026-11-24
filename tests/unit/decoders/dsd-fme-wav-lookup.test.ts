@@ -526,13 +526,20 @@ describe("dsd-fme call_end held for its first lookup", () => {
 			).length
 		endThrough(d, 60)
 		endThrough(d, 61)
-		// Call 60's attempt is abandoned at the timeout; call 61's then waits a full timeout on it.
+		// Call 60's attempt is abandoned at the timeout (its retry is scheduled); call 61's then
+		// waits a full timeout on the stuck read.
 		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS)
-		expect(skipped()).toBe(1)
+		expect(skipped()).toBe(0)
 		expect(internals.stuckWavListing!.waiters.size).toBe(1)
 		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS - 1)
-		expect(skipped()).toBe(1)
+		expect(skipped()).toBe(0)
+		// Call 61's attempt times out; call 60's retry, queued behind it, finds the same read
+		// still stuck and ends its lookup unread.
 		await vi.advanceTimersByTimeAsync(1)
+		expect(skipped()).toBe(1)
+		expect(internals.stuckWavListing!.waiters.size).toBe(0)
+		// Call 61's retry likewise, DSD_FME_WAV_RETRY_MS later.
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS)
 		expect(skipped()).toBe(2)
 		// Both lookups are over: nothing waits on the read over a whole retry chain's time.
 		const chainMs =
@@ -546,10 +553,164 @@ describe("dsd-fme call_end held for its first lookup", () => {
 		endThrough(d, 62)
 		await vi.advanceTimersByTimeAsync(0)
 		expect(internals.stuckWavListing!.waiters.size).toBe(1)
-		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS)
+		await vi.advanceTimersByTimeAsync(
+			DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS,
+		)
 		expect(skipped()).toBe(3)
 		expect(internals.stuckWavListing!.waiters.size).toBe(0)
 		expect(ours(opendir)).toHaveLength(1)
+	})
+
+	it("a merely slow read (it settles after the timeout, before the retry runs): the retry reads and finds the file", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const reads = heldReads(1)
+		const { d, found } = decoderWithUpdates()
+		const internals = d as unknown as StuckInternals
+		endThrough(d, 70)
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS)
+		expect(internals.stuckWavListing).not.toBeNull()
+		// The file is renamed into place and the slow read settles, both before the retry runs.
+		fs.writeFileSync(path.join(root, fileOf(70)), "")
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS - 100)
+		reads.release(0)
+		await untilReal(() => internals.stuckWavListing === null)
+		await vi.advanceTimersByTimeAsync(100)
+		await settleWavLookups(d)
+		expect(found).toEqual([fileOf(70)])
+	})
+
+	it("a read that settles only after the retry began waiting: the retry ends the lookup (the hung-mount bound)", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const reads = heldReads(1)
+		const { d, found } = decoderWithUpdates()
+		const internals = d as unknown as StuckInternals
+		endThrough(d, 71)
+		fs.writeFileSync(path.join(root, fileOf(71)), "")
+		await vi.advanceTimersByTimeAsync(
+			DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS + 100,
+		)
+		reads.release(0)
+		await untilReal(() => internals.stuckWavListing === null)
+		const chainMs =
+			(1 + DSD_FME_WAV_RETRIES) *
+			(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS)
+		await vi.advanceTimersByTimeAsync(chainMs)
+		await settleWavLookups(d)
+		expect(ours(reads.opendir).filter(([dir]) => dir === root)).toHaveLength(1)
+		expect(found).toEqual([])
+	})
+
+	it("a lookup whose first attempt was only queued when start() began a new run reads once and retries nothing", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const reads = heldReads(1)
+		const { d, found } = decoderWithUpdates()
+		const internals = d as unknown as StuckInternals & {
+			callTimeoutTimer: ReturnType<typeof setInterval> | null
+		}
+		const rootReads = (): number =>
+			ours(reads.opendir).filter(([dir]) => dir === root).length
+		// Call 72's attempt holds the chain in a slow read; call 73's first attempt is queued.
+		endThrough(d, 72)
+		endThrough(d, 73)
+		await vi.advanceTimersByTimeAsync(0)
+		expect(rootReads()).toBe(1)
+		vi.spyOn(
+			Object.getPrototypeOf(DsdFmeDecoder.prototype) as {
+				start(): Promise<void>
+			},
+			"start",
+		).mockResolvedValue(undefined)
+		await d.start()
+		if (internals.callTimeoutTimer) clearInterval(internals.callTimeoutTimer)
+		internals.callTimeoutTimer = null
+		// The slow read settles: call 72 finds nothing and schedules no retry; call 73's first
+		// attempt reads once (nothing yet) and, from the old run, schedules none either.
+		reads.release(0)
+		await untilReal(() => rootReads() === 2)
+		await settleWavLookups(d)
+		fs.writeFileSync(path.join(root, fileOf(72)), "")
+		fs.writeFileSync(path.join(root, fileOf(73)), "")
+		const chainMs =
+			(1 + DSD_FME_WAV_RETRIES) *
+			(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS)
+		await vi.advanceTimersByTimeAsync(chainMs)
+		await settleWavLookups(d)
+		expect(rootReads()).toBe(2)
+		expect(found).toEqual([])
+	})
+
+	describe("a DMR lookup releases its clearance exactly once on every early end", () => {
+		/** A DMR call's lookup started directly, and the clearance releases for it. */
+		const dmrLookup = (d: DsdFmeDecoder, tg: number) => {
+			const clearance = (
+				d as unknown as { dmrClearance: { ended(id: string): void } }
+			).dmrClearance
+			const ended = vi.spyOn(clearance, "ended")
+			;(d as unknown as Lookup).findWavFileAsync(
+				{ ...callOf(tg), protocol: "dmr" },
+				START,
+			)
+			return () => ended.mock.calls.filter(([id]) => id === `c${tg}`).length
+		}
+		const restart = async (d: DsdFmeDecoder) => {
+			const internals = d as unknown as {
+				callTimeoutTimer: ReturnType<typeof setInterval> | null
+			}
+			vi.spyOn(
+				Object.getPrototypeOf(DsdFmeDecoder.prototype) as {
+					start(): Promise<void>
+				},
+				"start",
+			).mockResolvedValue(undefined)
+			await d.start()
+			if (internals.callTimeoutTimer) clearInterval(internals.callTimeoutTimer)
+			internals.callTimeoutTimer = null
+		}
+		const chainMs =
+			(1 + DSD_FME_WAV_RETRIES) *
+			(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS)
+
+		it("the retry finds the same read still stuck", async () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+			stuckOpendir()
+			const { d } = decoderWithUpdates()
+			const released = dmrLookup(d, 80)
+			await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS)
+			expect(released()).toBe(0)
+			await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS)
+			expect(released()).toBe(1)
+			await vi.advanceTimersByTimeAsync(chainMs)
+			expect(released()).toBe(1)
+		})
+
+		it("a retry the old run scheduled runs in a new run", async () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+			const { d } = decoderWithUpdates()
+			const released = dmrLookup(d, 81)
+			await settleWavLookups(d)
+			expect(released()).toBe(0)
+			await restart(d)
+			await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS)
+			await settleWavLookups(d)
+			expect(released()).toBe(1)
+			await vi.advanceTimersByTimeAsync(chainMs)
+			await settleWavLookups(d)
+			expect(released()).toBe(1)
+		})
+
+		it("an attempt that ends in a new run schedules no retry", async () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+			const reads = heldReads(1)
+			const { d } = decoderWithUpdates()
+			const released = dmrLookup(d, 82)
+			await vi.advanceTimersByTimeAsync(0)
+			await restart(d)
+			reads.release(0)
+			await untilReal(() => released() === 1)
+			await vi.advanceTimersByTimeAsync(chainMs)
+			await settleWavLookups(d)
+			expect(released()).toBe(1)
+		})
 	})
 
 	it("a found-nothing attempt still retries while no listing is stuck", async () => {

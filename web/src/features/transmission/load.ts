@@ -489,7 +489,7 @@ export function recorderTone(
 		: {
 				...base,
 				state: "heard",
-				dcs: { code: tone.code, polarity: null },
+				dcs: { code: tone.code, polarity: tone.polarity ?? null },
 				why: null,
 			}
 }

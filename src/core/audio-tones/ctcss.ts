@@ -32,6 +32,16 @@ const MIN_POWER = 1e-12
  * and a gliding voice pitch spreads its energy over many bins.
  */
 const PARTIAL_BAND_FRACTION = 0.325
+/**
+ * A weaker lean also counts when two consecutive blocks lean on the same tone at this share or
+ * more (the vote's own two-block rule): a steady tone under noise. Modelled (60 s each, 239
+ * blocks, three seeds): white noise low-passed at 300 Hz and pink noise reach a dominant share
+ * of at most 0.12 in single blocks and never lean on one tone twice in a row; a gliding voice
+ * pitch (110-170 Hz) reaches 0.16 but never dominates; random 134.4 bps NRZ dominates at most
+ * 0.20, never twice on one tone. A steady 88.5 Hz tone 12 dB under the band's noise holds about
+ * 0.15 and leans twice in a row in 5 of 23 block pairs over 6 s; at 9 dB under, 15 of 23.
+ */
+const LEAN_BAND_FRACTION = 0.1
 /** Tones evaluated together in one Goertzel pass (see `CtcssBank.goertzel`). */
 const GOERTZEL_LANES = 10
 
@@ -153,6 +163,8 @@ export class CtcssBank {
 	private subAudibleBlocks = 0
 	/** Analysis blocks no tone won whose best tone still dominated (partialBlockCount). */
 	private partialBlocks = 0
+	/** The tone the previous block leaned on at LEAN_BAND_FRACTION or more, or -1. */
+	private lastLean = -1
 
 	constructor() {
 		for (let i = 0; i < CTCSS_HZ.length; i++) {
@@ -231,9 +243,10 @@ export class CtcssBank {
 	}
 
 	/**
-	 * Analysis blocks no tone won whose best tone still dominated the others (≥ 3× the next) and
-	 * held at least PARTIAL_BAND_FRACTION of the band (and 1% of whole-audio power): a tone too
-	 * broken up or too weak to vote, never one a vote counted. Does not affect `result()`.
+	 * Analysis blocks no tone won whose best tone still dominated the others (≥ 3× the next, and
+	 * held 1% of whole-audio power) with at least PARTIAL_BAND_FRACTION of the band, or with at
+	 * least LEAN_BAND_FRACTION when the previous block leaned on the same tone that far too: a tone
+	 * too broken up or too weak to vote, never one a vote counted. Does not affect `result()`.
 	 */
 	partialBlockCount(): number {
 		return this.partialBlocks
@@ -271,6 +284,7 @@ export class CtcssBank {
 		this.votedBlocks = 0
 		this.subAudibleBlocks = 0
 		this.partialBlocks = 0
+		this.lastLean = -1
 	}
 
 	private analyse(): void {
@@ -329,15 +343,21 @@ export class CtcssBank {
 			bandMean >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
 		)
 			this.subAudibleBlocks += 1
-		if (
+		const leanShare =
 			winner < 0 &&
 			dominates &&
 			bandMean > MIN_POWER &&
 			bestPower > MIN_POWER &&
-			bestPower >= PARTIAL_BAND_FRACTION * bandMean &&
 			bestPower >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
+				? bestPower / bandMean
+				: 0
+		const lean = leanShare >= LEAN_BAND_FRACTION ? best : -1
+		if (
+			leanShare >= PARTIAL_BAND_FRACTION ||
+			(lean >= 0 && lean === this.lastLean)
 		)
 			this.partialBlocks += 1
+		this.lastLean = lean
 		this.lastBlockWinner = winner
 		if (winner >= 0 && winner === this.lastWinner) this.streak += 1
 		else if (winner >= 0) {

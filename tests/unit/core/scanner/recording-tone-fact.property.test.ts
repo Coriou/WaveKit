@@ -1,12 +1,14 @@
 /**
  * toneFactOf (recording-facts.ts) over arbitrary detector coverage: "No tone heard" (null) only
  * when both detectors analysed their minimums and heard nothing tone-like on a file not kept for
- * its own tone; a settled CTCSS tone always wins; a gated DCS code beats an unsettled CTCSS.
+ * its own tone; a gated DCS code always wins; a settled CTCSS tone wins otherwise.
  * Modelled counters only.
  */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	DCS_LONE_HIT_SECONDS,
+	DCS_LONE_HITS_MIN,
 	DCS_MEASURED_MIN_SAMPLES,
 	DCS_PARTIAL_WORDS,
 	TONE_MEASURED_MIN_BLOCKS,
@@ -30,6 +32,7 @@ const coverage = fc.record({
 	partialBlocks: count,
 	dcsSamples: count,
 	dcsChain: count,
+	dcsLoneHits: count,
 	dcs,
 	ownTone: fc.boolean(),
 })
@@ -49,6 +52,12 @@ describe("toneFactOf properties", () => {
 				expect(c.votedBlocks).toBe(0)
 				expect(c.partialBlocks).toBe(0)
 				expect(c.dcsChain).toBeLessThan(DCS_PARTIAL_WORDS)
+				// Lone DCS hits at chance only: under the minimum or under one per 3 s analysed.
+				expect(Number.isFinite(c.dcsLoneHits)).toBe(true)
+				expect(
+					c.dcsLoneHits < DCS_LONE_HITS_MIN ||
+						c.dcsLoneHits * DCS_LONE_HIT_SECONDS * 8000 < c.dcsSamples,
+				).toBe(true)
 				expect(c.ownTone).toBe(false)
 			}),
 			{ numRuns: 300 },
@@ -57,11 +66,14 @@ describe("toneFactOf properties", () => {
 
 	// Feature: recording facts tone, Property 2: precedence of the measured tones
 	// Validates: Requirements R1
-	it("a settled CTCSS always wins; a DCS answer is a standard code with a known polarity", () => {
+	it("a gated DCS code always wins, a settled CTCSS otherwise; a DCS answer is a standard code with a known polarity", () => {
 		fc.assert(
 			fc.property(coverage, fc.constantFrom(67, 88.5, 254.1), (c, hz) => {
-				expect(toneFactOf(hz, c)).toEqual({ tone: { kind: "ctcss", hz } })
-				const fact = toneFactOf(null, c)
+				const withTone = toneFactOf(hz, c)
+				const noTone = toneFactOf(null, c)
+				if (noTone.tone?.kind === "dcs") expect(withTone).toEqual(noTone)
+				else expect(withTone).toEqual({ tone: { kind: "ctcss", hz } })
+				const fact = noTone
 				if (fact.tone?.kind !== "dcs") return
 				expect(c.dcsSamples).toBeGreaterThanOrEqual(DCS_MEASURED_MIN_SAMPLES)
 				expect(["023", "047", "754"]).toContain(fact.tone.code)

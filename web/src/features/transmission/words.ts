@@ -84,9 +84,10 @@ export function ctcssText(hz: number): string {
 	return `CTCSS ${hz.toFixed(1)} Hz`
 }
 
-/** "DCS 023": three digits, zero padded. */
-export function dcsText(code: string): string {
-	return `DCS ${code.padStart(3, "0")}`
+/** "DCS 023": three digits, zero padded; "DCS 023 inverted" for an inverted reading (normal and unknown say none). */
+export function dcsText(code: string, polarity?: unknown): string {
+	const text = `DCS ${code.padStart(3, "0")}`
+	return polarity === "inverted" ? `${text} inverted` : text
 }
 
 /**
@@ -97,7 +98,9 @@ export function toneText(raw: unknown): string {
 	const tone = readTone(raw)
 	if (tone === null) return "No tone heard"
 	if (tone === undefined || tone === "malformed") return "Not measured"
-	return tone.kind === "ctcss" ? ctcssText(tone.hz) : dcsText(tone.code)
+	return tone.kind === "ctcss"
+		? ctcssText(tone.hz)
+		: dcsText(tone.code, tone.polarity)
 }
 
 /** Why a tone is not measured, one hint per reason (TransmissionTone["why"]). */
@@ -122,9 +125,10 @@ export const TONE_NOT_STORED = "A tone was heard (not stored)"
 function heardText(t: TransmissionTone): string | null {
 	const hz: unknown = t.ctcssHz
 	if (typeof hz === "number" && Number.isFinite(hz)) return ctcssText(hz)
-	const code: unknown = (t.dcs as { code?: unknown } | null)?.code
+	const dcs = t.dcs as { code?: unknown; polarity?: unknown } | null
+	const code: unknown = dcs?.code
 	if (typeof code === "string" && /^[0-7]{1,3}$/.test(code))
-		return dcsText(code)
+		return dcsText(code, dcs?.polarity)
 	return null
 }
 
@@ -151,12 +155,9 @@ export function toneRow(t: TransmissionTone): {
 	}
 	if (t.state === "none" && t.from !== "recorder")
 		return { value: "Not measured", hint: NOT_MEASURED_WORDS["live-none"] }
-	if (t.state === "none")
-		return {
-			value: "No tone heard",
-			hint:
-				t.dcsChecked === true ? null : "This recorder does not check DCS codes",
-		}
+	// The recorder's stored null rules DCS out too: it checks DCS codes, and an older core stored null only for an
+	// empty sub-audible band, which a DCS code fills.
+	if (t.state === "none") return { value: "No tone heard", hint: null }
 	if (t.state !== "not-measured") return malformed
 	const why: unknown = t.why
 	return {

@@ -255,6 +255,30 @@ export function dcsDeviation(
 }
 
 /**
+ * Modelled DCS code too broken to chain: `dcsDeviation` with one bit flipped at a random place
+ * (seeded) in every `every` bits (20: 5% bit errors). No 46 bits in a row are ever clean, so no
+ * two consecutive words match, yet many 23-bit windows still are.
+ */
+export function brokenDcsDeviation(
+	code: string,
+	seed: number,
+	deviationHz = 600,
+	every = 20,
+): (t: number) => number {
+	const clean = dcsDeviation(code, false, deviationHz)
+	const rand = mulberry32(seed)
+	const flips: number[] = []
+	return t => {
+		const bit = Math.floor(t * 134.4)
+		const block = Math.floor(bit / every)
+		while (flips.length <= block)
+			flips.push(flips.length * every + Math.floor(rand() * every))
+		const level = clean((bit + 0.5) / 134.4)
+		return flips[block] === bit ? -level : level
+	}
+}
+
+/**
  * Modelled untoned voice pitch as NfmSource.setSubAudible deviation (Hz at t s): a fundamental
  * gliding 110-170 Hz (140 Hz ± 30 Hz at 1.3 Hz, a speaker's intonation) with its second harmonic
  * at half its level and a 4 Hz syllabic raised-cosine envelope: the energy a voice puts in the

@@ -12,7 +12,7 @@ import {
 	TONE_MEASURED_MIN_BLOCKS,
 	toneFactOf,
 } from "../../../../src/core/scanner/store/recording-facts.js"
-import { dcsBitStream, nrz } from "./dcs-synth.js"
+import { dcsBitStream, lowpassInPlace, nrz, whiteNoise } from "./dcs-synth.js"
 import { gaussian, mulberry32 } from "./synth.js"
 
 const RATE = 8000
@@ -40,6 +40,7 @@ function fact({ bank, dcs }: Fed, ownTone = false) {
 		partialBlocks: bank.partialBlockCount(),
 		dcsSamples: dcs.sampleCount(),
 		dcsChain: dcs.longestChain(),
+		dcsLoneHits: dcs.loneHitCount(),
 		dcs: dcs.result(),
 		ownTone,
 	})
@@ -193,10 +194,14 @@ describe("CtcssBank sub-audible energy without a winning tone", () => {
 })
 
 /**
- * PARTIAL_BAND_FRACTION (0.325, half a vote's 0.65): the 88.5 Hz tone's share of the band set by
- * an off-table 148.8 Hz companion (between 146.2 and 151.4 Hz, its leak on either table bin under
- * a third of the tone's power). A share of a²/(a² + b²) for amplitudes a and b; shares just above
- * and below the bound (a float share cannot sit exactly on it), and a vote's share past 0.65.
+ * PARTIAL_BAND_FRACTION (0.325, half a vote's 0.65) and LEAN_BAND_FRACTION (0.1, two consecutive
+ * blocks on the same tone): the 88.5 Hz tone's share of the band set by an off-table 148.8 Hz
+ * companion (between 146.2 and 151.4 Hz, its leak on either table bin under a third of the tone's
+ * power). A share of a²/(a² + b²) for amplitudes a and b; shares just above and below each bound
+ * (a float share cannot sit exactly on one), and a vote's share past 0.65. 16 000 samples run 7
+ * blocks; a share under 0.325 leans from the second block on (the first has no previous lean).
+ * Near 0.1 the measured share sits a little under the nominal one while the band filters settle:
+ * a nominal 0.11 leans from the fourth block only, 0.12 from the second.
  */
 describe("CtcssBank partialBlockCount bound", () => {
 	const mix = (share: number) => {
@@ -211,8 +216,10 @@ describe("CtcssBank partialBlockCount bound", () => {
 	}
 	it.each([
 		[0.8, "votes", 7, 0],
-		[0.4, "leans", 0, 7],
-		[0.3, "neither", 0, 0],
+		[0.4, "leans alone", 0, 7],
+		[0.3, "leans twice in a row", 0, 6],
+		[0.12, "leans twice in a row", 0, 6],
+		[0.09, "neither", 0, 0],
 	])("a %s share %s", (share, _what, voted, partial) => {
 		const { bank } = fed(mix(share))
 		expect(bank.votedBlockCount()).toBe(voted)
@@ -254,5 +261,99 @@ describe("DcsDecoder coverage accessors", () => {
 		for (let i = 0; i < 2_000; i++) dcs.pushSample(0)
 		expect(dcs.result()).toBeNull()
 		expect(dcs.longestChain()).toBe(2)
+	})
+})
+
+/** Two 2nd-order Butterworth low-passes at 300 Hz: the recorder's tone audio band (modelled). */
+function lowpassed300(x: Float64Array): Float64Array {
+	return lowpassInPlace(lowpassInPlace(x, 300, RATE), 300, RATE)
+}
+
+/** Mean power of `x`. */
+function power(x: ArrayLike<number>): number {
+	let p = 0
+	for (let i = 0; i < x.length; i++) p += (x[i] ?? 0) ** 2
+	return p / x.length
+}
+
+describe("weak or broken tones under noise read absent, noise and voice stay null", () => {
+	/** 6 s of 300 Hz low-passed white noise with an 88.5 Hz tone `snrDb` under its power. */
+	const weakTone = (snrDb: number, seed: number) => {
+		const noise = lowpassed300(whiteNoise({ seconds: 6, seed, std: 0.3 }))
+		const amplitude = Math.sqrt(2 * power(noise) * 10 ** (snrDb / 10))
+		return noise.map(
+			(v, i) => v + amplitude * Math.sin((2 * Math.PI * 88.5 * i) / RATE),
+		)
+	}
+
+	it.each([9, 12])(
+		"an 88.5 Hz tone %s dB under the band's noise: no vote, consecutive leans: absent",
+		snrDb => {
+			const f = fed(weakTone(-snrDb, 4))
+			expect(f.bank.result()).toBeNull()
+			expect(f.bank.votedBlockCount()).toBe(0)
+			expect(f.bank.partialBlockCount()).toBeGreaterThan(0)
+			expect(fact(f)).toEqual({})
+		},
+	)
+
+	it.each([1, 2, 3])(
+		"60 s of 300 Hz low-passed white noise (seed %s): no lean twice on one tone, chance DCS hits only: null",
+		seed => {
+			const f = fed(lowpassed300(whiteNoise({ seconds: 60, seed, std: 0.3 })))
+			expect(f.bank.partialBlockCount()).toBe(0)
+			expect(f.dcs.loneHitCount()).toBeLessThan(20)
+			expect(fact(f)).toEqual({ tone: null })
+		},
+		30_000,
+	)
+
+	it("60 s of a gliding voice pitch (110-170 Hz, its harmonic, 4 Hz syllables): null", () => {
+		const glide = 30 / (2 * Math.PI * 1.3)
+		const x = Array.from({ length: 60 * RATE }, (_, i) => {
+			const t = i / RATE
+			const phase =
+				2 * Math.PI * (140 * t - glide * Math.cos(2 * Math.PI * 1.3 * t))
+			const envelope = 0.5 - 0.5 * Math.cos(2 * Math.PI * 4 * t)
+			return 0.3 * envelope * (Math.sin(phase) + 0.5 * Math.sin(2 * phase))
+		})
+		const f = fed(x)
+		expect(f.bank.partialBlockCount()).toBe(0)
+		expect(fact(f)).toEqual({ tone: null })
+	}, 30_000)
+
+	// DCS 023 with one bit flipped at a random place in every 20 (5% bit errors): never 46 clean
+	// bits in a row, so no two consecutive words match, yet clean 23-bit windows hit many times.
+	it("DCS 023 with 5% flipped bits: no chain of two, lone hits far above chance: absent", () => {
+		const rand = mulberry32(5)
+		const bits = dcsBitStream({ code: 0o23, bits: Math.ceil(6 * 134.4) + 2 })
+		for (let i = 0; i < bits.length; i += 20) {
+			const k = i + Math.floor(rand() * 20)
+			if (k < bits.length) bits[k] = bits[k]! ^ 1
+		}
+		const audio = lowpassInPlace(nrz(bits, { amplitude: 0.15 }), 250, RATE)
+		const f = fed(audio.subarray(0, 6 * RATE))
+		expect(f.dcs.result()).toBeNull()
+		expect(f.dcs.longestChain()).toBe(1)
+		// One per 3 s of 6 s analysed is 2; it hits far more.
+		expect(f.dcs.loneHitCount()).toBeGreaterThanOrEqual(10)
+		expect(fact(f)).toEqual({})
+	})
+})
+
+describe("DcsDecoder loneHitCount", () => {
+	it("counts every chain start, a chain that went on to confirm once; reset clears it", () => {
+		const dcs = new DcsDecoder()
+		for (const x of nrz(dcsBitStream({ code: 0o23, bits: 23 * 6 })))
+			dcs.pushSample(x)
+		expect(dcs.result()).toEqual({ code: "023", polarity: "normal" })
+		const started = dcs.loneHitCount()
+		expect(started).toBeGreaterThanOrEqual(1)
+		expect(started).toBeLessThan(dcs.longestChain())
+		dcs.reset()
+		expect(dcs.loneHitCount()).toBe(0)
+		// Silence never hits.
+		for (let i = 0; i < 8_000; i++) dcs.pushSample(0)
+		expect(dcs.loneHitCount()).toBe(0)
 	})
 })

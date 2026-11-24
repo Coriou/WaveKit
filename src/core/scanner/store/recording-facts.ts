@@ -35,7 +35,7 @@
  * session runs on after the file and its later activity was never fed to them; a roll-over part's
  * carried-in tail is not fed to the new part's detectors either). Both hear the same tone audio
  * (the demodulated 8 kHz audio low-passed at 300 Hz). `{kind:"ctcss",hz}` when the bank settled on
- * a tone; `{kind:"dcs",code,polarity}` when the DCS decoder confirmed a code (its three words) over
+ * a tone and no DCS code was confirmed; `{kind:"dcs",code,polarity}` when the DCS decoder confirmed a code (its three words) over
  * at least DCS_MIN_AUDIO_SECONDS, of the standard set when DCS_CODE_SET is "standard" (the live
  * transmission path's gate), the polarity as that path reports it: "normal" is the stream as
  * demodulated, "inverted" its complement. null ("No tone heard") only when both detectors analysed
@@ -87,12 +87,31 @@ export const DCS_MEASURED_MIN_SAMPLES = DCS_MIN_AUDIO_SECONDS * TONE_RATE_HZ
 
 /**
  * A DCS word chain this long that never confirmed (DCS_MIN_WORDS, 3) is a partial code: 2 words,
- * the same 23-bit register exactly 23 bits apart. A lone hit is no evidence: a random register is
- * a rotation of one of the 104 standard words or their complements with p ≈ 104 × 23 × 2 / 2^23 ≈
- * 5.7e-4 per bit, at 134.4 bit/s about one hit per 13 s of noise or voice; a second matching word
- * at the next check point has p = 2^-23 more.
+ * the same 23-bit register exactly 23 bits apart; a second matching word after a chance hit has
+ * p = 2^-23 more.
  */
 export const DCS_PARTIAL_WORDS = DCS_MIN_WORDS - 1
+
+/**
+ * Seconds of noise or voice per chance DCS word hit (a chain started, DcsDecoder.loneHitCount):
+ * a random register is a rotation of one of the 104 standard words or of their complements with
+ * p ≈ 104 × 23 × 2 / 2^23 ≈ 5.7e-4 per bit, at 134.4 bit/s 0.077 hits/s, one per 13 s.
+ * Modelled 60 s runs hit less: white or low-passed noise 1-3 times, random NRZ once, voice-like
+ * audio never (its sliced bits come in long runs).
+ */
+export const DCS_CHANCE_HIT_SECONDS = 13
+
+/**
+ * Lone DCS word hits that make a file tone-like (absent, never "No tone heard"): at least
+ * DCS_LONE_HITS_MIN and at least one per DCS_LONE_HIT_SECONDS analysed, four times the chance
+ * rate. A code too broken to chain two words still hits many times a second (modelled: DCS 023
+ * with one bit in 20 flipped, never 46 clean bits in a row, hits 13 times in 6 s). By chance
+ * (Poisson, λ = seconds / 13): a 1 s file needs 2 hits (p ≈ 0.3%), a 6 s file 2 (λ = 0.46,
+ * p ≈ 7.8%), a 30 s file 10 (λ = 2.3, p ≈ 1e-4), a 120 s file 40 (λ = 9.2, p < 1e-12): a chance
+ * hit only ever turns a null into absent, the safe answer.
+ */
+export const DCS_LONE_HITS_MIN = 2
+export const DCS_LONE_HIT_SECONDS = 3
 
 /** What a file's tone detectors analysed when the file finished (their counters). */
 export interface ToneCoverage {
@@ -106,6 +125,8 @@ export interface ToneCoverage {
 	readonly dcsSamples: number
 	/** Longest DCS word chain, confirmed or not (DcsDecoder.longestChain). */
 	readonly dcsChain: number
+	/** DCS word chains started, one per lone hit (DcsDecoder.loneHitCount). */
+	readonly dcsLoneHits: number
 	/** The DCS decoder's confirmed code (DcsDecoder.result()), before the gate. */
 	readonly dcs: unknown
 	/**
@@ -164,45 +185,64 @@ const atLeast = (n: number, min: number): boolean =>
 	Number.isFinite(n) && n >= min
 
 /**
+ * Lone DCS word hits above chance (DCS_LONE_HITS_MIN and one per DCS_LONE_HIT_SECONDS of the
+ * `samples` analysed); a count that is not a finite number counts as above.
+ */
+function dcsHitsAboveChance(hits: number, samples: number): boolean {
+	if (!Number.isFinite(hits) || !Number.isFinite(samples)) return true
+	return (
+		hits >= DCS_LONE_HITS_MIN &&
+		hits * DCS_LONE_HIT_SECONDS * TONE_RATE_HZ >= samples
+	)
+}
+
+/**
  * The tone fact of a file whose CTCSS bank answered `toneHz` with `coverage` at the file's
  * finish, as AnalogFinishFacts members. Decision table, first matching row wins ("analysed" is
  * what the detector processed for this file, never what the session was fed):
  *
- * | CTCSS          | DCS (gated)        | CTCSS blocks | DCS samples | own-tone keep | tone         |
- * | -------------- | ------------------ | ------------ | ----------- | ------------- | ------------ |
- * | settled (hz)   | any                | any          | any         | any           | ctcss hz     |
- * | not settled    | confirmed code     | any          | ≥ 6 000     | any           | dcs code     |
- * | no coverage    | -                  | -            | -           | -             | absent       |
- * | any            | any                | any          | any         | yes           | absent       |
- * | any            | any                | < 3          | any         | no            | absent       |
- * | any            | any                | any          | < 6 000     | no            | absent       |
- * | voted, unset   | any                | ≥ 3          | ≥ 6 000     | no            | absent       |
- * | partial block  | any                | ≥ 3          | ≥ 6 000     | no            | absent       |
- * | none           | partial (2 words)  | ≥ 3          | ≥ 6 000     | no            | absent       |
- * | none           | none (chain < 2)   | ≥ 3          | ≥ 6 000     | no            | null         |
+ * | CTCSS         | DCS (gated)             | CTCSS blocks | DCS samples | own-tone keep | tone     |
+ * | ------------- | ----------------------- | ------------ | ----------- | ------------- | -------- |
+ * | any           | confirmed code          | any          | ≥ 6 000     | any           | dcs code |
+ * | settled (hz)  | no code                 | any          | any         | any           | ctcss hz |
+ * | no coverage   | -                       | -            | -           | -             | absent   |
+ * | any           | any                     | any          | any         | yes           | absent   |
+ * | any           | any                     | < 3          | any         | no            | absent   |
+ * | any           | any                     | any          | < 6 000     | no            | absent   |
+ * | voted, unset  | any                     | ≥ 3          | ≥ 6 000     | no            | absent   |
+ * | leaned block  | any                     | ≥ 3          | ≥ 6 000     | no            | absent   |
+ * | none          | partial (2 words)       | ≥ 3          | ≥ 6 000     | no            | absent   |
+ * | none          | lone hits above chance  | ≥ 3          | ≥ 6 000     | no            | absent   |
+ * | none          | none (chance hits only) | ≥ 3          | ≥ 6 000     | no            | null     |
  *
- * Both settled: CTCSS wins (its answer needs 60% of all the file's blocks, a DCS code only three
- * words, about 0.5 s). "voted, unset": some block voted for a tone the bank did not settle on
- * (under 60% of the blocks: hang noise, gaps and untoned turnarounds dilute a toned voice).
- * "partial block": a block no tone won still leaned on one (a tone keyed on and off, or too weak to
- * vote). Voice, receiver noise and a broken-up DCS code put energy in the sub-audible band without
- * either: an untoned voice reads null, a DCS code too broken to hold two consecutive words reads
- * null too (the disclosed limit). A count that is not a finite number is not analysed.
+ * Both settled: DCS wins. A confirmed standard code is three identical 23-bit words exactly
+ * 23 bits apart, one of 4 784 registers (104 codes × 23 rotations × 2 polarities) and then twice
+ * the same register: about 5.7e-4 × 2^-46 per bit by chance; a CTCSS answer is a line that held
+ * 0.65 of the band in 60% of the blocks, and a DCS word repeats every 23 bits, so its spectrum
+ * is lines 134.4 / 23 ≈ 5.84 Hz apart, one of which can sit on a CTCSS tone's bin. "voted, unset": some block voted for a tone the bank did
+ * not settle on (under 60% of the blocks: hang noise, gaps and untoned turnarounds dilute a toned
+ * voice). "leaned block" (CtcssBank.partialBlockCount): a block no tone won still leaned on one
+ * (a tone keyed on and off, or too weak under noise to vote). "lone hits above chance": a DCS code
+ * too broken to chain two words. Voice and receiver noise put energy in the sub-audible band
+ * without any of these: an untoned voice reads null. A count that is not a finite number is not
+ * analysed.
  */
 export function toneFactOf(
 	toneHz: number | null,
 	coverage: ToneCoverage | null,
 ): { readonly tone?: RecordingTone | null } {
+	const dcs =
+		coverage === null ? null : gatedDcs(coverage.dcs, coverage.dcsSamples)
+	if (dcs !== null) return { tone: { kind: "dcs", ...dcs } }
 	if (toneHz !== null) return { tone: { kind: "ctcss", hz: toneHz } }
 	if (coverage === null) return {}
-	const dcs = gatedDcs(coverage.dcs, coverage.dcsSamples)
-	if (dcs !== null) return { tone: { kind: "dcs", ...dcs } }
 	if (coverage.ownTone) return {}
 	if (!atLeast(coverage.ctcssBlocks, TONE_MEASURED_MIN_BLOCKS)) return {}
 	if (!atLeast(coverage.dcsSamples, DCS_MEASURED_MIN_SAMPLES)) return {}
 	if (coverage.votedBlocks !== 0 || coverage.partialBlocks !== 0) return {}
 	if (!Number.isFinite(coverage.dcsChain)) return {}
 	if (coverage.dcsChain >= DCS_PARTIAL_WORDS) return {}
+	if (dcsHitsAboveChance(coverage.dcsLoneHits, coverage.dcsSamples)) return {}
 	return { tone: null }
 }
 

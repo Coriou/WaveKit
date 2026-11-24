@@ -9,10 +9,13 @@ import { z } from "zod"
 
 // ---- facts (the kept recording's sidecar)
 
-/** The sub-audible tone a kept analog recording carried: a CTCSS tone or a DCS code (three octal digits). */
+/**
+ * The sub-audible tone a kept analog recording carried: a CTCSS tone or a DCS code (three octal digits) with its
+ * polarity when the core stored one ("normal": the stream as demodulated).
+ */
 export type RecordingTone =
 	| { kind: "ctcss"; hz: number }
-	| { kind: "dcs"; code: string }
+	| { kind: "dcs"; code: string; polarity?: "normal" | "inverted" }
 
 /** The recording admission's measured numbers and the codes it decided on (expert data: Details only). */
 export interface RecordingAdmissionFacts {
@@ -67,7 +70,11 @@ const DcsCode = z.string().regex(/^[0-7]{1,3}$/)
 /** A CTCSS tone or a DCS code, as the recorder's facts store it. */
 const ToneSchema = z.discriminatedUnion("kind", [
 	z.object({ kind: z.literal("ctcss"), hz: CtcssHz }),
-	z.object({ kind: z.literal("dcs"), code: DcsCode }),
+	z.object({
+		kind: z.literal("dcs"),
+		code: DcsCode,
+		polarity: z.enum(["normal", "inverted"]).optional(),
+	}),
 ])
 
 /**
@@ -156,9 +163,11 @@ export function readTone(
 	if (raw === null) return null
 	const t = ToneSchema.safeParse(raw)
 	if (!t.success) return "malformed"
-	return t.data.kind === "dcs"
-		? { kind: "dcs", code: t.data.code.padStart(3, "0") }
-		: { kind: "ctcss", hz: t.data.hz }
+	if (t.data.kind === "ctcss") return { kind: "ctcss", hz: t.data.hz }
+	const code = t.data.code.padStart(3, "0")
+	return t.data.polarity === undefined
+		? { kind: "dcs", code }
+		: { kind: "dcs", code, polarity: t.data.polarity }
 }
 
 /** Parses a facts sidecar as the core sends it; null when it is missing or not readable. */
@@ -225,7 +234,10 @@ export interface TransmissionTone {
 	state: "heard" | "none" | "not-measured"
 	ctcssHz: number | null
 	dcs: { code: string; polarity: "normal" | "inverted" | null } | null
-	/** False for the scanner recorder today: it never looks for DCS. */
+	/**
+	 * Whether a live reading looked for DCS at all. False for the scanner recorder's tone, which says nothing of it:
+	 * its stored null already rules DCS out (words.ts toneRow).
+	 */
 	dcsChecked: boolean
 	from: "recorder" | "live-demod" | null
 	/**
