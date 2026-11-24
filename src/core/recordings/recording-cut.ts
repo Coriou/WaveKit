@@ -17,12 +17,7 @@ import {
 	RECORDING_FACTS_MAX_BYTES,
 	recordingFactsOf,
 } from "../scanner/store/recording-facts.js"
-import {
-	COPY_FACTS_FILE,
-	COPY_FACTS_MAX_BYTES,
-	copyFactsOf,
-	type CopyFacts,
-} from "../scanner/store/copy-facts.js"
+import type { CopyFacts } from "../scanner/store/copy-facts.js"
 import type { RecordingFsPort } from "./inventory.js"
 import { startedAtLocalFromName } from "./names.js"
 
@@ -77,9 +72,8 @@ export interface RecordingReceiptFacts {
 	 */
 	facts?: RecordingFacts | null
 	/**
-	 * The copy sidecar beside the receipt (copy-facts.ts, mutable: re-read on the store's
-	 * copy-changed notice). Absent or null: not a copy (missing, oversized, malformed or of
-	 * another operation).
+	 * The file's copy mark (copy-facts.ts), taken by the catalogue from the scanner's in-memory
+	 * index (never read here: readRecordingReceipt leaves it out). Absent or null: not a copy.
 	 */
 	copy?: CopyFacts | null
 }
@@ -185,60 +179,16 @@ export async function readRecordingReceipt(
 		path.join(dir, RECORDING_FACTS_FILE),
 		RECORDING_FACTS_MAX_BYTES,
 	)
-	const copy = await readCopyAt(fs, dir, operationId)
 	return {
 		...facts,
 		facts:
 			sidecar === undefined ? null : recordingFactsOf(sidecar, operationId),
-		// Only a copy carries the member (most files are none).
-		...(copy === null ? {} : { copy }),
 	}
 }
 
-/** The operation folder of an analog file name, and its operation id; null for any other name. */
-function operationDirOf(
-	recordingsDir: string,
-	name: string,
-): { dir: string; operationId: string } | null {
-	const operationId = ANALOG_FILE.exec(name)?.[1]
-	if (operationId === undefined) return null
-	return {
-		dir: path.join(
-			path.dirname(recordingsDir),
-			".analog-operations",
-			operationId,
-		),
-		operationId,
-	}
-}
-
-/** The bounded strict read of an operation folder's copy.json: null when not a copy. */
-async function readCopyAt(
-	fs: RecordingFsPort,
-	dir: string,
-	operationId: string,
-): Promise<CopyFacts | null> {
-	const json = await readBoundedJson(
-		fs,
-		path.join(dir, COPY_FACTS_FILE),
-		COPY_FACTS_MAX_BYTES,
-	)
-	return json === undefined ? null : copyFactsOf(json, operationId)
-}
-
-/**
- * Reads only the copy sidecar of the analog file `name` (the catalogue's copy-changed re-read:
- * the WAV and its receipt are unchanged). Null when it is not a copy, for a name that is not an
- * analog file, and for any read or parse failure.
- */
-export async function readRecordingCopy(
-	fs: RecordingFsPort,
-	recordingsDir: string,
-	name: string,
-): Promise<CopyFacts | null> {
-	const at = operationDirOf(recordingsDir, name)
-	if (at === null) return null
-	return readCopyAt(fs, at.dir, at.operationId)
+/** The operation id of a scanner analog file name (`analog-<uuid>.wav`), or null. */
+export function analogOperationIdOf(name: string): string | null {
+	return ANALOG_FILE.exec(name)?.[1] ?? null
 }
 
 /**

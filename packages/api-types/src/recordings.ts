@@ -343,7 +343,7 @@ export interface RecordingInventoryCounts {
 	kept: number
 	bytes: number
 	byKind: Record<RecordingInventoryKind, number>
-	/** Copies (items with a `copyOf`) in the unfiltered listing. Absent from older cores. */
+	/** Copies (items with a `copyOf`) in the unfiltered listing a `copies=false` listing leaves out (a Kept copy is never left out, so never counted). Absent from older cores. */
 	copiesTotal?: number
 }
 

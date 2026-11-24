@@ -49,7 +49,10 @@ export const RECORDINGS_WINDOW_MAX = 10_000
 /** The server-side filters the panel uses (GET /api/recordings query keys). */
 export interface RecordingsQuery {
 	kept?: true
-	/** false: copies (items with a copyOf) are left out; the core lists them by default. */
+	/**
+	 * false: copies (items with a copyOf) are left out; the core lists them by default. Sent only to a
+	 * core that showed it knows the key (an older one refuses it: RecordingsStore.copiesKnown).
+	 */
 	copies?: false
 	kind?: RecordingInventoryKind
 	talkgroup?: string
@@ -132,16 +135,21 @@ const pageSchema = z
 	})
 	.passthrough()
 
-/** The GET /api/recordings query string of a query, at most `limit` rows after `cursor`. */
+/**
+ * The GET /api/recordings query string of a query, at most `limit` rows after `cursor`. `copies=false`
+ * only with `copiesKnown` (the core showed it knows the key: an older core answers 400
+ * RECORDINGS_QUERY_INVALID to an unknown key); without it the list asks with copies listed.
+ */
 export function recordingsParams(
 	q: RecordingsQuery,
 	limit: number,
 	cursor: string | null,
+	copiesKnown = true,
 ): Record<string, QueryValue> {
 	const p: Record<string, QueryValue> = { limit }
 	if (cursor !== null) p["cursor"] = cursor
 	if (q.kept) p["kept"] = "true"
-	if (q.copies === false) p["copies"] = "false"
+	if (q.copies === false && copiesKnown) p["copies"] = "false"
 	if (q.kind !== undefined) p["kind"] = q.kind
 	if (q.talkgroup !== undefined) p["talkgroup"] = q.talkgroup
 	if (q.source !== undefined) p["source"] = q.source
@@ -200,6 +208,11 @@ export class RecordingsStore extends PagedFeed<
 	 * asked for after them is the truth and ends them.
 	 */
 	private readonly kept = new Map<string, { kept: boolean; after: number }>()
+	/**
+	 * The core showed it knows copies (an answer with `counts.copiesTotal`, or an item carrying
+	 * `copyOf`): only then is `copies=false` sent. Never forgotten for this store's life.
+	 */
+	private copiesKnown = false
 	private readonly gone = new Map<string, number>()
 
 	constructor(
@@ -338,7 +351,7 @@ export class RecordingsStore extends PagedFeed<
 	): Promise<FeedPage<RecordingInventoryItem, RecordingsMeta>> {
 		return this.api
 			.get<unknown>(RECORDINGS_ROUTE, {
-				query: recordingsParams(query, this.pageSize, cursor),
+				query: recordingsParams(query, this.pageSize, cursor, this.copiesKnown),
 				signal,
 				timeoutMs: this.timeoutMs,
 			})
@@ -359,11 +372,23 @@ export class RecordingsStore extends PagedFeed<
 					if (item.success) items.push(item.data as RecordingInventoryItem)
 				}
 				const d = page.data
+				const counts =
+					(d.counts as RecordingInventoryCounts | undefined) ?? null
+				if (
+					!this.copiesKnown &&
+					(counts?.copiesTotal !== undefined ||
+						items.some(i => i.copyOf !== undefined))
+				) {
+					this.copiesKnown = true
+					// A list that wanted copies left out was read with them: read again (the key changed).
+					if (query.copies === false)
+						setTimeout(() => void this.setQuery(query), 0)
+				}
 				return {
 					items,
 					nextCursor: d.nextCursor,
 					meta: {
-						counts: (d.counts as RecordingInventoryCounts | undefined) ?? null,
+						counts,
 						matched: d.matched ?? null,
 						truncated: d.truncated,
 						truncatedBefore: d.truncatedBefore ?? null,
@@ -404,7 +429,7 @@ export class RecordingsStore extends PagedFeed<
 	}
 
 	protected override keyOf(q: RecordingsQuery): string {
-		return JSON.stringify(recordingsParams(q, 0, null))
+		return JSON.stringify(recordingsParams(q, 0, null, this.copiesKnown))
 	}
 
 	protected override retryable(error: unknown): boolean {

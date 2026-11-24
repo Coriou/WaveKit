@@ -49,6 +49,7 @@ import {
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
 import { notAnalogVoiceProtocol } from "../channel/voice-veto.js"
+import { copyRasterFit, type RasterFit } from "../channel/copy-intermod.js"
 import {
 	OWNER_DEDICATED_PRIOR_TTL_MS,
 	type DigitalProof,
@@ -5027,23 +5028,21 @@ export class DiscoveryStore
 	/**
 	 * Copy detection's raster fit of a centre heard on `sourceId`, on placement's terms: the
 	 * rasters at it kept for its OBW (gridFor; null keeps every one) and the source's learned
-	 * correction subtracted before snapping. `on` within a raster's tolerance, `off` outside every
-	 * one, `unknown` when no raster is at it (no off-raster evidence then).
+	 * correction subtracted before snapping. `on` within a raster's tolerance; `off` only at least
+	 * max(tolerance, 4 kHz) from every raster's nearest channel; `unknown` between the two and when
+	 * no raster is at it (no off-raster evidence then). See copy-intermod.ts copyRasterFit.
 	 */
 	rasterFit(
 		sourceId: string,
 		centreHz: number,
 		obwHz: number | null,
-	): "on" | "off" | "unknown" {
+	): RasterFit {
 		if (!Number.isFinite(centreHz)) return "unknown"
 		const rasters = gridFor(
 			this.rastersFor(sourceId, centreHz),
 			obwHz ?? Number.NaN,
 		)
-		if (!rasters.some(r => r.spacingHz > 0)) return "unknown"
-		return snapToRaster(centreHz, rasters, this.correction(sourceId)).snapped
-			? "on"
-			: "off"
+		return copyRasterFit(centreHz - this.correction(sourceId), rasters)
 	}
 
 	/** WG2 req 12.1: the locked-out discoveries heard on `sourceId` (no clone: three scalars each). */

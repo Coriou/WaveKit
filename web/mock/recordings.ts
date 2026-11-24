@@ -4,7 +4,8 @@
  *
  * - GET /api/recordings: newest `modifiedAt` first, ties by id; `limit` (1–200, default 50),
  *   opaque `cursor`, `kind`, `decoderId`, `copies` (default true; `false` leaves copies out of the
- *   listing and `matched`, never `counts`, whose `copiesTotal` counts them); 400
+ *   listing and `matched`, never `counts`, whose `copiesTotal` counts them; a Kept copy is never
+ *   left out nor counted); 400
  *   RECORDINGS_QUERY_INVALID otherwise. Scanner analog items carry `copyOf` (null, or the original's
  *   key and the copy's evidence: one seeded ghost pair).
  * - GET /api/recordings/:id/file: the WAV (synthetic speech-like bursts, 8 kHz 16-bit mono),
@@ -121,7 +122,7 @@ const SEEDS: readonly Seed[] = [
 	// The tone states of the facts sidecar (Transmission view, Tone row): CTCSS, DCS, measured none, not measured,
 	// and no facts at all.
 	// A ghost pair (made-up frequencies): one voice heard on its channel and again, weaker, off the raster as an
-	// intermodulation product at the same time. The copy is hidden from the drawer until Show copies.
+	// intermodulation product at the same time. The copy shows with its "copy" chip until Hide copies.
 	{
 		kind: "scanner-analog",
 		agoMin: 14,
@@ -763,7 +764,9 @@ export function registerRecordingsMock(
 				(q.kind === undefined || r.kind === q.kind) &&
 				(q.decoderId === undefined || r.decoderId === q.decoderId) &&
 				(q.kept === undefined || (r.kept === true) === (q.kept === "true")) &&
-				(q.copies !== "false" || (r.copyOf ?? null) === null) &&
+				(q.copies !== "false" ||
+					(r.copyOf ?? null) === null ||
+					r.kept === true) &&
 				(q.discoveryId === undefined || r.discoveryId === q.discoveryId) &&
 				(q.talkgroup === undefined || r.talkgroup === q.talkgroup) &&
 				(q.source === undefined || r.source === q.source) &&
@@ -819,7 +822,9 @@ export function registerRecordingsMock(
 					"scanner-analog": all.filter(r => r.kind === "scanner-analog").length,
 					"dv-call": all.filter(r => r.kind === "dv-call").length,
 				},
-				copiesTotal: all.filter(r => (r.copyOf ?? null) !== null).length,
+				copiesTotal: all.filter(
+					r => (r.copyOf ?? null) !== null && r.kept !== true,
+				).length,
 			},
 			truncatedBefore: null,
 		}

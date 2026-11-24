@@ -65,7 +65,7 @@ import {
 	type AnalogSetAsideStatus,
 	type LegacyRetention,
 } from "./analog-operations.js"
-import type { CopyFactsInput } from "./copy-facts.js"
+import type { CopyFacts, CopyFactsInput } from "./copy-facts.js"
 import {
 	NOISE_QUARANTINE,
 	NoiseQuarantine,
@@ -831,7 +831,7 @@ export class EvidenceStore {
 	get analogAuthorityReady(): boolean {
 		return this.analog?.ready ?? false
 	}
-	/** Store notices of the analog operations (copy-changed, removed); see AnalogNotice. */
+	/** Store notices of the analog operations (copy-changed, copies-loaded, removed); see AnalogNotice. */
 	private readonly analogNoticeListeners = new Set<(n: AnalogNotice) => void>()
 	/** Subscribes to the analog operations' notices (also before configureAnalog); unsubscribe. */
 	onAnalogNotice(listener: (n: AnalogNotice) => void): () => void {
@@ -848,6 +848,10 @@ export class EvidenceStore {
 		return (
 			this.analog?.writeCopy(operationId, copy) ?? Promise.resolve("skipped")
 		)
+	}
+	/** AnalogOperations.copyOf (memory only); null without an analog authority. */
+	copyOf(operationId: string): CopyFacts | null {
+		return this.analog?.copyOf(operationId) ?? null
 	}
 	/** Analog operations active now over all sources (0 without an analog authority). */
 	get analogActiveCount(): number {

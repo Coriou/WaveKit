@@ -31,6 +31,9 @@
  * most 16 values per span (256 × 16 = 4 096 values, once per file end).
  */
 
+import { rasterToleranceHz } from "../bandplan/index.js"
+import type { Raster } from "../../spectrum/types.js"
+
 /** Overlap of a parent with the file's span: at least half the file. */
 export const INTERMOD_MIN_OVERLAP_SHARE = 0.5
 /** A parent's SNR (dB); Rule B's mirror fc′ needs it too. */
@@ -54,6 +57,47 @@ export const TRACK_SPANS_MAX = 256
 
 /** Centres a span's sampler keeps (its median: the partner's raster fit). */
 export const SPAN_HZ_SAMPLES_MAX = 16
+
+/**
+ * The off-raster evidence's floor (Hz): the intermod centroid tolerance's floor, 4 × 1 kHz
+ * (INTERMOD_TOL_BINS × INTERMOD_MIN_BIN_HZ). A centre is off raster only when it is at least
+ * max(raster tolerance, this) from the nearest channel of EVERY raster at it.
+ */
+export const COPY_OFF_RASTER_MIN_HZ = INTERMOD_TOL_BINS * INTERMOD_MIN_BIN_HZ
+
+/**
+ * Copy detection's raster fit of a corrected centre (the source's learned correction already
+ * subtracted) against the rasters placement keeps at it: `on` within one raster's tolerance
+ * (rasterToleranceHz: max(1 kHz, spacing / 4), as placement snaps); `off` only when at least
+ * max(that tolerance, COPY_OFF_RASTER_MIN_HZ) from the nearest channel of every raster; `unknown`
+ * between the two (a centroid error of a few kHz could put an on-raster channel there) and with no
+ * raster at all. Arithmetic: 12.5 kHz spacing, tolerance 3 125 Hz: on ≤ 3 125, unknown 3 125 to
+ * 4 000, off from 4 000 to 6 250 (half a channel); 25 kHz: tolerance 6 250 ≥ 4 000, off past
+ * 6 250; 6.25 kHz: tolerance 1 562.5, and no centre is 4 000 from a channel (half a channel is
+ * 3 125): never off.
+ */
+export function copyRasterFit(
+	correctedHz: number,
+	rasters: readonly Raster[],
+): RasterFit {
+	if (!Number.isFinite(correctedHz)) return "unknown"
+	let any = false
+	let off = true
+	for (const r of rasters) {
+		if (!(r.spacingHz > 0) || !Number.isFinite(r.firstChannelHz)) continue
+		any = true
+		const ch = Math.round(
+			r.firstChannelHz +
+				Math.round((correctedHz - r.firstChannelHz) / r.spacingHz) *
+					r.spacingHz,
+		)
+		const d = Math.abs(correctedHz - ch)
+		const tol = rasterToleranceHz(r.spacingHz)
+		if (d <= tol) return "on"
+		if (d < Math.max(tol, COPY_OFF_RASTER_MIN_HZ)) off = false
+	}
+	return any && off ? "off" : "unknown"
+}
 
 export type RasterFit = "on" | "off" | "unknown"
 

@@ -62,20 +62,13 @@ import {
 	startedAtLocalFromName,
 } from "./names.js"
 import { parseRiffDurationMs } from "./riff.js"
+import type { CopyFacts } from "../scanner/store/copy-facts.js"
 import {
-	readRecordingCopy,
+	analogOperationIdOf,
 	readRecordingReceipt,
 	recordingParts,
 	type RecordingReceiptFacts,
 } from "./recording-cut.js"
-
-/**
- * Names waiting for a copy-sidecar re-read (copyChanged), at most this many (oldest forgotten:
- * the slow reconcile reads a forgotten one's sidecar with its receipt only when its WAV changes,
- * so a forgotten change waits for the next restart; 4 096 far exceeds the 63 writes one
- * re-point can make).
- */
-export const RECORDINGS_COPY_DIRTY_MAX = 4096
 
 /**
  * Copies of one root counted as changed when that root's own copy state changes: capped at 64,
@@ -330,10 +323,20 @@ export interface RecordingInventory {
 	 */
 	keysOfCopyRoot?(key: string): readonly string[]
 	/**
-	 * Writers: the copy sidecar of the analog file `alias` (`<discovery>~analog-<uuid>.wav`) was
-	 * written or removed. Its WAV and receipt are unchanged, so only the sidecar is read again.
+	 * Writers: the copy mark of the analog file `alias` (`<discovery>~analog-<uuid>.wav`) was
+	 * written or removed. Its WAV and receipt are unchanged: only its copy state is taken again
+	 * from the copy source (memory, setCopySource), nothing is read.
 	 */
 	copyChanged?(alias: string): void
+	/** Writers: the copy source reloaded every mark (scanner recovery): each file is compared again. */
+	copiesReloaded?(): void
+	/**
+	 * Binds the copy marks (the scanner's in-memory index by operation id; null unbinds: no file
+	 * is a copy), then compares every indexed analog file again (copiesReloaded).
+	 */
+	setCopySource?(
+		source: ((operationId: string) => CopyFacts | null) | null,
+	): void
 	/** Writers: these discoveries' folders changed (finalize, delete, retention). */
 	touchDiscoveries?(ids: readonly string[]): Promise<void>
 	/** Writers: a dsd-fme call of `decoderId` ended (no id: every dsd-fme directory). */
@@ -971,8 +974,45 @@ export function createRecordingInventory(
 	const byTx = new Map<string, Set<IndexedEntry>>()
 	/** Indexed scanner analog copies per root key their copy sidecar names (every copy). */
 	const byCopyRoot = new Map<string, Set<IndexedEntry>>()
-	/** File names whose copy sidecar changed (copyChanged), re-read by their next refresh. */
-	const copyDirty = new Set<string>()
+	/**
+	 * The scanner's copy marks (memory only: its index, setCopySource); null: none bound, every
+	 * file reads as no copy. A mark is taken by reference, so an unchanged mark compares equal.
+	 */
+	let copySource: ((operationId: string) => CopyFacts | null) | null = null
+	/** The copy mark of the scanner analog file `name` (memory only), or null. */
+	function copyFor(name: string): CopyFacts | null {
+		const id = analogOperationIdOf(name)
+		if (id === null || copySource === null) return null
+		try {
+			return copySource(id)
+		} catch {
+			return null
+		}
+	}
+	/**
+	 * Memory only: the indexed analog files whose stored mark differs from the copy source now are
+	 * re-indexed (that pass compares by reference and reads nothing for them).
+	 */
+	function reloadCopies(): void {
+		for (const state of folders.values()) {
+			if (state.spec.kind !== "scanner-analog") continue
+			const names = new Set<string>()
+			for (const [name, e] of state.files)
+				if (e.receipt !== null && (e.receipt.copy ?? null) !== copyFor(name))
+					names.add(name)
+			if (names.size > 0)
+				void trackUrgent(indexFolder(state.spec, newCounts(), names))
+		}
+	}
+	/** A receipt just read, with the file's copy mark (the receipt read never opens one). */
+	function withCopy(
+		receipt: RecordingReceiptFacts | null,
+		name: string,
+	): RecordingReceiptFacts | null {
+		if (receipt === null) return null
+		const copy = copyFor(name)
+		return copy === null ? receipt : { ...receipt, copy }
+	}
 	/** First full build: null until started, then its promise. */
 	let build: Promise<void> | null = null
 	let built = false
@@ -1558,25 +1598,23 @@ export function createRecordingInventory(
 		}
 		clearPending(state, name)
 		const prev = state.files.get(name)
-		// A copy sidecar change (copyChanged): the WAV stat is unchanged, so the stat-equal pass
-		// below would never see it. Only the sidecar is read again (a changed WAV reads it anyway).
-		const copyStale = copyDirty.delete(name)
-		const copyRoot = spec.dirs[0]
+		// A copy mark change (copyChanged, copiesReloaded, or any pass): the WAV stat is unchanged,
+		// so the stat-equal pass below would never see it. The mark is memory (the scanner's index):
+		// compared by reference, nothing is read.
+		const copy =
+			spec.kind === "scanner-analog" && prev && prev.receipt !== null
+				? copyFor(name)
+				: null
 		if (
-			copyStale &&
 			prev &&
 			prev.receipt !== null &&
 			spec.kind === "scanner-analog" &&
-			copyRoot !== undefined &&
+			(prev.receipt.copy ?? null) !== copy &&
 			prev.dev === st.dev &&
 			prev.ino === st.ino &&
 			prev.size === st.size &&
 			prev.mtimeMs === st.mtimeMs
 		) {
-			const copy = await handleSem.run(() =>
-				readRecordingCopy(fs, copyRoot, name),
-			)
-			if (!attached(state) || state.files.get(name) !== prev) return
 			const wasCopy = (prev.receipt.copy ?? null) !== null
 			setFile(state, name, {
 				...prev,
@@ -1609,8 +1647,9 @@ export function createRecordingInventory(
 				!receiptMayFollow(st.mtimeMs, at)
 			)
 				return
-			const late = await handleSem.run(() =>
-				readRecordingReceipt(fs, root, name),
+			const late = withCopy(
+				await handleSem.run(() => readRecordingReceipt(fs, root, name)),
+				name,
 			)
 			if (late === null || !attached(state) || state.files.get(name) !== prev)
 				return
@@ -1633,7 +1672,10 @@ export function createRecordingInventory(
 		const root = spec.dirs[0]
 		const receipt =
 			entry && spec.kind === "scanner-analog" && root !== undefined
-				? await handleSem.run(() => readRecordingReceipt(fs, root, name))
+				? withCopy(
+						await handleSem.run(() => readRecordingReceipt(fs, root, name)),
+						name,
+					)
 				: null
 		// The folder may have been replaced meanwhile (config change): never write into a stale state.
 		if (!attached(state)) return
@@ -2048,8 +2090,13 @@ export function createRecordingInventory(
 		return n
 	}
 
-	/** Listed copies over the whole catalogue (counts.copiesTotal): O(copies indexed). */
-	function copiesListed(): number {
+	/**
+	 * Listed copies over the whole catalogue a `copies=false` listing hides (counts.copiesTotal):
+	 * a Kept copy is never hidden, so never counted. O(copies indexed).
+	 */
+	function copiesListed(
+		keptOf: (e: IndexedEntry) => boolean | undefined,
+	): number {
 		let n = 0
 		for (const [root, set] of byCopyRoot) {
 			if (listedRootOf(root) === null) continue
@@ -2057,7 +2104,8 @@ export function createRecordingInventory(
 				if (
 					e.listed &&
 					e.item.kind === "scanner-analog" &&
-					(e.key ?? e.item.id) !== root
+					(e.key ?? e.item.id) !== root &&
+					keptOf(e) !== true
 				)
 					n++
 		}
@@ -2086,7 +2134,8 @@ export function createRecordingInventory(
 			if (q.sinceMs !== null && e.mtimeMs < q.sinceMs) return false
 			if (q.untilMs !== null && e.mtimeMs > q.untilMs) return false
 			if (q.kept !== null && (kept === true) !== q.kept) return false
-			if (!q.copies && copyOfEntry(e) !== null) return false
+			// A copy the user kept is never hidden: Kept is the user's word on that file.
+			if (!q.copies && kept !== true && copyOfEntry(e) !== null) return false
 			if (wanted !== null) {
 				if (e.discoveryId === null) return false
 				if (
@@ -2217,7 +2266,7 @@ export function createRecordingInventory(
 				kept: keptTotal,
 				bytes: v.bytes,
 				byKind: { ...v.byKind },
-				copiesTotal: copiesListed(),
+				copiesTotal: copiesListed(keptOf),
 			},
 			truncatedBefore:
 				cutoff !== null ? new Date(cutoff.m).toISOString() : null,
@@ -2681,17 +2730,17 @@ export function createRecordingInventory(
 
 		copyChanged(alias) {
 			if (typeof alias !== "string") return
-			const targets = statesOf(`scan:${alias}`)
-			for (const { state, name } of targets) {
-				copyDirty.delete(name)
-				copyDirty.add(name)
-				while (copyDirty.size > RECORDINGS_COPY_DIRTY_MAX) {
-					const oldest = copyDirty.values().next()
-					if (oldest.done === true) break
-					copyDirty.delete(oldest.value)
-				}
+			for (const { state, name } of statesOf(`scan:${alias}`))
 				void trackUrgent(indexFolder(state.spec, newCounts(), new Set([name])))
-			}
+		},
+
+		copiesReloaded() {
+			reloadCopies()
+		},
+
+		setCopySource(source) {
+			copySource = source
+			reloadCopies()
 		},
 
 		keysOfTx(txId) {

@@ -237,7 +237,7 @@ describe("recording search", () => {
 				text: "",
 				filter: "all",
 			}),
-		).toEqual({ kind: "dv-call", copies: false })
+		).toEqual({ kind: "dv-call" })
 		expect(suggest("  ", [])).toEqual([])
 		// a chip already there is not offered again
 		const tg = suggest("9", [])[0]?.token
@@ -259,17 +259,14 @@ describe("recording search", () => {
 			}),
 		).toEqual({
 			kept: true,
-			copies: false,
 			talkgroup: "2081",
 			source: "2081",
 			kind: "dsd-fme-call",
 			minHz: 156_793_750,
 			maxHz: 156_806_250,
 		})
-		expect(recordingsQuery({ tokens: [], text: "", filter: "all" })).toEqual({
-			copies: false,
-		})
-		// Show copies on: the core's default (copies listed), nothing asked.
+		expect(recordingsQuery({ tokens: [], text: "", filter: "all" })).toEqual({})
+		// Copies shown (the default): the core's default, nothing asked; Hide copies asks copies=false.
 		expect(
 			recordingsQuery({
 				tokens: [],
@@ -278,6 +275,14 @@ describe("recording search", () => {
 				showCopies: true,
 			}),
 		).toEqual({})
+		expect(
+			recordingsQuery({
+				tokens: [],
+				text: "",
+				filter: "all",
+				showCopies: false,
+			}),
+		).toEqual({ copies: false })
 	})
 
 	it("sends typed text as the core reads it, the typed text winning over a text chip", () => {

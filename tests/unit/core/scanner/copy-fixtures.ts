@@ -121,8 +121,16 @@ export interface StreamSpec {
 	readonly noiseSigma: number
 	/** The front end's third-order coefficient (y = x + a3·x·|x|²). */
 	readonly a3: number
-	/** A strong unmodulated blocker keyed on and off at seeded 0.2 to 2 s. */
-	readonly blocker?: { readonly offsetHz: number; readonly amp: number }
+	/**
+	 * A strong unmodulated blocker keyed on and off at seeded 0.2 to 2 s, or, with `burstMs`, pulsed:
+	 * on for `burstMs` (a 30 ms burst), off for a seeded 0.1 to 0.6 s between bursts (a pulsed
+	 * transmitter's common-mode desense of every channel through the front end).
+	 */
+	readonly blocker?: {
+		readonly offsetHz: number
+		readonly amp: number
+		readonly burstMs?: number
+	}
 }
 
 /** The noise sigma that gives a carrier of `amp` a CNR of `cnrDb` in 12.5 kHz at MIX_FS. */
@@ -177,7 +185,16 @@ export function mixedStream(spec: StreamSpec): Uint8Array {
 		if (spec.blocker) {
 			if (i >= blockerUntil) {
 				blockerOn = !blockerOn
-				blockerUntil = i + Math.round((0.2 + keyRng() * 1.8) * MIX_FS)
+				const burstMs = spec.blocker.burstMs
+				blockerUntil =
+					i +
+					Math.round(
+						burstMs === undefined
+							? (0.2 + keyRng() * 1.8) * MIX_FS
+							: blockerOn
+								? (burstMs / 1000) * MIX_FS
+								: (0.1 + keyRng() * 0.5) * MIX_FS,
+					)
 			}
 			blockerPhase =
 				(blockerPhase + (TWO_PI * spec.blocker.offsetHz) / MIX_FS) % TWO_PI

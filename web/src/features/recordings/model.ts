@@ -358,13 +358,13 @@ export function serverText(text: string): string | null {
 }
 
 /**
- * The drawer's core query: the store's, plus `copies: false` (the core lists copies unless asked not to,
- * so the drawer asks for the list without them until Show copies is on).
+ * The drawer's core query: the store's, plus `copies: false` once the user hid copies (Hide copies; the
+ * core lists them by default, and so does the drawer).
  */
 export type RecordingsViewQuery = RecordingsQuery & { copies?: false }
 
 /**
- * The core query of the drawer's view: Kept, copies left out unless Show copies is on, one value per
+ * The core query of the drawer's view: Kept, copies left out only under Hide copies, one value per
  * chip kind (a later chip of a kind replaces an earlier one, see addToken), and the typed text, which
  * wins over a text chip while it is there.
  */
@@ -376,7 +376,7 @@ export function recordingsQuery(ui: {
 }): RecordingsViewQuery {
 	const q: RecordingsViewQuery = {}
 	if (ui.filter === "kept") q.kept = true
-	if (ui.showCopies !== true) q.copies = false
+	if (ui.showCopies === false) q.copies = false
 	for (const t of ui.tokens) {
 		if (t.kind === "talkgroup") q.talkgroup = t.value
 		else if (t.kind === "radio") q.source = t.value
@@ -472,16 +472,16 @@ export function isCopy(r: RecordingInventoryItem): boolean {
 }
 
 /**
- * The footer's Show copies toggle, in words: "Show copies (3)" while they are hidden, "Hide copies" while
- * they are shown; null when there is nothing to toggle (no copies, or an older core without the count).
+ * The footer's copies toggle, in words: "Hide copies (3)" while they are shown (the default), "Show copies (3)"
+ * while they are hidden; null when there is nothing to toggle (no copies to hide, or an older core without the
+ * count, which is never sent copies=false).
  */
 export function copiesToggleLabel(
 	copiesTotal: number | null | undefined,
 	showing: boolean,
 ): string | null {
-	if (showing) return "Hide copies"
 	if (copiesTotal == null || copiesTotal <= 0) return null
-	return `Show copies (${countText(copiesTotal)})`
+	return `${showing ? "Hide" : "Show"} copies (${countText(copiesTotal)})`
 }
 
 // ---- actions

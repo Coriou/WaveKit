@@ -14,7 +14,10 @@ export interface RecordingsUiState {
 	/** The search field's text (it filters as you type, like the board). */
 	text: string
 	filter: RecFilter
-	/** Copies (the same audio heard again on another frequency) are listed; off by default (copies=false). */
+	/**
+	 * Copies (the same audio heard again on another frequency) are listed, each with its "copy" chip: on by
+	 * default (copy detection marks them; nothing is hidden until the user asks: Hide copies, copies=false).
+	 */
 	showCopies: boolean
 	openId: string | null
 	cursorId: string | null
@@ -24,7 +27,7 @@ export const recordingsUi = new Store<RecordingsUiState>({
 	tokens: [],
 	text: "",
 	filter: "all",
-	showCopies: false,
+	showCopies: true,
 	openId: null,
 	cursorId: null,
 })

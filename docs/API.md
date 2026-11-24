@@ -7040,7 +7040,10 @@ whole Hz equal to it) or `nearHz` with `toleranceHz` (integer Hz, 0 to
 1,000,000, default 6,250: recordings whose `frequencyHz` lies within the
 tolerance; `toleranceHz` without `nearHz`, or `channelHz` with `nearHz`, is a
 400), `copies` (`true`, the default, or `false`: leave copies, items with a `copyOf`, out of the
-listing and `matched`; `counts` still counts them; GET by id, the file, Keep and delete ignore it),
+listing and `matched`, except a Kept copy, which is never left out; `counts` still counts them; GET
+by id, the file, Keep and delete ignore it; a core older than copies answers 400
+`RECORDINGS_QUERY_INVALID` to the key, so a client sends it only once an answer showed
+`counts.copiesTotal` or an item's `copyOf`),
 `since` and `until` (ISO-8601 with a zone, inclusive, on `modifiedAt`) and `q`
 (1 to 64 characters, case-insensitive, in the talkgroup, radio, decoder, kind,
 local start time or frequency in MHz; never in the opaque id). The query is
@@ -7202,10 +7205,12 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
 - `copyOf` (scanner analog recordings only; other kinds and older cores omit it): the
   scanner marked this file a copy (a ghost: the same audio heard again on another frequency, see
   [SCANNER.md](SCANNER.md#analog-voice-recordings)) of the listed recording `key`, with the
-  copy's own `evidence` (`intermod`, `off-raster`), from its `copy.json` sidecar. Null when it is
-  not a copy, or when the named original is no longer listed or is itself a copy (the file is shown
-  again). `counts.copiesTotal` (absent from older cores) counts the listed copies. A change to a
-  sidecar is re-read at once and announced like any change.
+  copy's own `evidence` (`intermod`, `off-raster`), from its copy mark (the scanner keeps the marks
+  in memory, loaded at start from `<scanner.storage.dir>/copies/`). Null when it is not a copy, or
+  when the named original is no longer listed or is itself a copy (the file is shown again).
+  `counts.copiesTotal` (absent from older cores) counts the listed copies `copies=false` leaves
+  out (a Kept copy is never left out, so never counted). A changed mark is taken at once and
+  announced like any change.
 - `frequencyHz` of a scanner recording is its channel frequency: the frequency
   of the discovery that owns it now, in whole Hz (rounded as the Activity row's
   `channel.frequencyHz` is). The two agree until a merge: the catalogue item

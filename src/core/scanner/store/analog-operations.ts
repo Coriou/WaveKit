@@ -51,40 +51,27 @@ import {
 } from "./recording-operation.js"
 import {
 	RECORDING_FACTS_FILE,
-	RECORDING_FACTS_MAX_BYTES,
 	RECORDING_FACTS_TEMP,
 	factsFitFolder,
 	recordingFactsBytes,
 } from "./recording-facts.js"
 import {
-	COPY_FACTS_FILE,
-	COPY_FACTS_TEMP,
+	COPY_MARKS_DIR,
+	COPY_MARKS_LIST_MAX,
+	COPY_FACTS_MAX_BYTES,
 	copyFactsBytes,
+	copyFactsOf,
+	copyMarkIdOf,
+	type CopyFacts,
 	type CopyFactsInput,
 } from "./copy-facts.js"
 
-/**
- * Every name an operation folder may hold (the recovery scan's allowed names, the cleanup list):
- * the intent, the receipt, the staged media, the facts sidecar and the copy sidecar, each with
- * its temp. A folder listing reads at most this many names (children's bound is derived from
- * the list, never a literal): 9 now.
- */
-export const OPERATION_FOLDER_NAMES: readonly string[] = [
-	"intent.json",
-	"intent.tmp",
-	"receipt.json",
-	"receipt.tmp",
-	"payload.wav.part",
-	RECORDING_FACTS_FILE,
-	RECORDING_FACTS_TEMP,
-	COPY_FACTS_FILE,
-	COPY_FACTS_TEMP,
-]
-
 /** What the store tells its observers (copy detection, the catalogue). */
 export type AnalogNotice =
-	/** An operation's copy.json was written or removed (the file's alias). */
+	/** An operation's copy mark (`copies/<operationId>.json`) was written or removed (its alias). */
 	| { readonly kind: "copy-changed"; readonly alias: string }
+	/** The copy marks were (re)loaded at recovery: every file's copy state may differ. */
+	| { readonly kind: "copies-loaded" }
 	/** An operation's folder was removed (retention, a delete, recovery, a failed finish). */
 	| { readonly kind: "removed"; readonly operationId: string }
 
@@ -691,7 +678,7 @@ interface Context {
 		evicted: number
 		held: number
 	}) => void
-	/** Store notices (copy-changed, removed); never throws into the store. */
+	/** Store notices (copy-changed, copies-loaded, removed); never throws into the store. */
 	notice?: (n: AnalogNotice) => void
 	/**
 	 * The noise quarantine (noise-quarantine.ts NoiseQuarantine.admit): moves a cancelled noise
@@ -1012,6 +999,10 @@ export class AnalogOperations {
 	 * forgotten.
 	 */
 	private readonly retiring = new Set<string>()
+	/** Copy marks by lower-cased operation id (copy-facts.ts): loaded at recovery, kept by writes. */
+	private readonly copyIndex = new Map<string, CopyFacts>()
+	/** Tail of the paced copy-mark writes (writeCopy); never rejects. */
+	private copyChain: Promise<unknown> = Promise.resolve()
 	constructor(private readonly context: Context) {
 		this.io = context.io ?? defaultIo
 		this.root = resolve(context.root)
@@ -1500,7 +1491,7 @@ export class AnalogOperations {
 	private moveDirectory(from: string, to: string): Promise<void> {
 		return this.io.rename?.(from, to) ?? rename(from, to)
 	}
-	/** A sidecar's temp → target rename, through the io seam (fault injection) when it has one. */
+	/** A copy mark's temp → target rename, through the io seam (fault injection) when it has one. */
 	private renameFile(from: string, to: string): Promise<void> {
 		return this.io.rename?.(from, to) ?? rename(from, to)
 	}
@@ -2535,10 +2526,7 @@ export class AnalogOperations {
 			return
 		}
 		if (owned) {
-			for (const child of await this.children(
-				dir,
-				OPERATION_FOLDER_NAMES.length,
-			))
+			for (const child of await this.children(dir, 8))
 				await account(join(dir, child), true)
 			return
 		}
@@ -2571,15 +2559,23 @@ export class AnalogOperations {
 			return
 		}
 		let metadataBytes = 0
-		const directoryNames = await this.children(
-			dir,
-			OPERATION_FOLDER_NAMES.length,
-		)
+		const directoryNames = await this.children(dir, 8)
 		if (cleanup && directoryNames.some(name => name !== "intent.json"))
 			out.unknown = true
 		for (const name of directoryNames) {
 			const metadata = name !== "payload.wav.part"
-			if (!OPERATION_FOLDER_NAMES.includes(name)) out.unknown = true
+			if (
+				![
+					"intent.json",
+					"intent.tmp",
+					"receipt.json",
+					"receipt.tmp",
+					"payload.wav.part",
+					RECORDING_FACTS_FILE,
+					RECORDING_FACTS_TEMP,
+				].includes(name)
+			)
+				out.unknown = true
 			const before = out.bytes
 			await account(join(dir, name), metadata)
 			if (metadata) metadataBytes += out.bytes - before
@@ -2813,6 +2809,7 @@ export class AnalogOperations {
 		this.recovery ??= this.exclusive(async () => {
 			this.available.clear()
 			this.quarantine.clear()
+			this.copyIndex.clear()
 			if (!this.context.adapter.authorityHealthy()) {
 				this.initialized = false
 				return [
@@ -2853,7 +2850,9 @@ export class AnalogOperations {
 				results.push(await this.reconcile(intent, changed))
 			}
 			await this.refresh(changed)
+			await this.loadCopies()
 			this.initialized = true
+			this.notify({ kind: "copies-loaded" })
 			return results
 		})
 		return this.recovery
@@ -3332,11 +3331,12 @@ export class AnalogOperations {
 		} catch (cause) {
 			// The cleanup gave up (a refusal, an owner that moved, an I/O failure): the operation
 			// stays inventoried, so a later writeCopy may write again (a retried cleanup removes
-			// copy.json with the rest).
+			// its copy mark).
 			this.retiring.delete(intent.operationId)
 			throw cause
 		}
 		this.retiring.delete(intent.operationId)
+		await this.removeCopyMark(intent.operationId)
 		this.notify({ kind: "removed", operationId: intent.operationId })
 	}
 	/** cleanupOwned's removals, in order (the caller holds `retiring`). */
@@ -3381,8 +3381,6 @@ export class AnalogOperations {
 			"intent.tmp",
 			RECORDING_FACTS_TEMP,
 			RECORDING_FACTS_FILE,
-			COPY_FACTS_TEMP,
-			COPY_FACTS_FILE,
 		]) {
 			try {
 				await remove(join(dir, name))
@@ -3422,17 +3420,138 @@ export class AnalogOperations {
 			/* an observer never fails the store */
 		}
 	}
+	/** `<root>/copies` (copy-facts.ts): beside `.analog-operations/`, never inside it. */
+	private copiesDir(): string {
+		return join(this.root, COPY_MARKS_DIR)
+	}
 	/**
-	 * Writes (`copy`) or removes (null) a kept file's copy sidecar (copy-facts.ts) under the lock:
+	 * The copy mark of a listed, finalized operation (memory only: the index loaded at recovery and
+	 * kept by writeCopy and cleanupOwned), or null: not a copy, or not listed now.
+	 */
+	copyOf(operationId: string): CopyFacts | null {
+		if (typeof operationId !== "string") return null
+		return this.copyIndex.get(operationId.toLowerCase()) ?? null
+	}
+	/**
+	 * Recovery's one read of `copies/` (under the lock, the inventory just scanned): every mark of an
+	 * operation the inventory lists is parsed (bounded, strict) into the index; a mark of no listed
+	 * operation (an orphan: its removal was cut short), a malformed or oversized mark and every
+	 * temp are removed. A listing past COPY_MARKS_LIST_MAX, an unsafe directory or a failed listing
+	 * loads nothing and removes nothing (every file shown as no copy until the next recovery).
+	 * Foreign names are left alone.
+	 */
+	private async loadCopies(): Promise<void> {
+		this.copyIndex.clear()
+		const dir = this.copiesDir()
+		let names: string[]
+		try {
+			await this.safeDirectory(this.root)
+			const info = await lstat(dir).catch((cause: unknown) => {
+				if (nativeCode(cause) === "ENOENT") return null
+				throw cause
+			})
+			if (info === null) return
+			if (info.isSymbolicLink() || !info.isDirectory()) return
+			names = await this.children(dir, COPY_MARKS_LIST_MAX)
+		} catch {
+			return
+		}
+		let removed = false
+		for (const name of names) {
+			const mark = copyMarkIdOf(name)
+			if (mark === null) continue
+			const path = join(dir, name)
+			const facts =
+				mark.temp || !this.inventory.intents.has(mark.operationId)
+					? null
+					: await this.readCopyMark(path, mark.operationId)
+			if (facts !== null) {
+				this.copyIndex.set(mark.operationId, facts)
+				continue
+			}
+			try {
+				await this.safeTarget(path)
+				await this.io.unlink(path)
+				removed = true
+			} catch {
+				/* left for the next recovery */
+			}
+		}
+		if (removed)
+			try {
+				await this.syncDirectory(dir, "operations")
+			} catch {
+				/* durability only */
+			}
+	}
+	/** A mark's bounded strict read (no symlink, a regular file ≤ COPY_FACTS_MAX_BYTES), or null. */
+	private async readCopyMark(
+		path: string,
+		operationId: string,
+	): Promise<CopyFacts | null> {
+		try {
+			await this.safeTarget(path)
+			const handle = await (this.io.readOpen?.(
+				path,
+				constants.O_RDONLY | constants.O_NOFOLLOW,
+			) ?? open(path, constants.O_RDONLY | constants.O_NOFOLLOW))
+			try {
+				const info = await handle.stat()
+				if (!info.isFile() || info.size > COPY_FACTS_MAX_BYTES) return null
+				const bytes = Buffer.alloc(info.size)
+				let offset = 0
+				while (offset < bytes.length) {
+					const { bytesRead } = await handle.read(
+						bytes,
+						offset,
+						bytes.length - offset,
+						offset,
+					)
+					if (bytesRead <= 0) return null
+					offset += bytesRead
+				}
+				return copyFactsOf(
+					JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+					operationId,
+				)
+			} finally {
+				await handle.close()
+			}
+		} catch {
+			return null
+		}
+	}
+	/**
+	 * Removes an operation's mark with the operation (cleanupOwned, after its folder is gone):
+	 * dropped from the index first; a failed unlink leaves an orphan the next recovery removes.
+	 */
+	private async removeCopyMark(operationId: string): Promise<void> {
+		const id = operationId.toLowerCase()
+		this.copyIndex.delete(id)
+		for (const name of [`${id}.tmp`, `${id}.json`]) {
+			const path = join(this.copiesDir(), name)
+			try {
+				await this.safeTarget(path)
+				await this.io.unlink(path)
+			} catch {
+				/* missing (most operations are no copy) or left for recovery's orphan sweep */
+			}
+		}
+	}
+	/**
+	 * Writes (`copy`) or removes (null) a kept file's copy mark (copy-facts.ts) under the lock:
 	 * only for an operation the inventory lists whose receipt is finalized and available, that is
 	 * not active (still finishing) and whose cleanup has not begun (`retiring`); else "skipped".
 	 * Nothing here waits for a finish (the detector asks only for settled operations; an active
-	 * one is skipped), so the lock is never held across another lock user's wait. Tmp + fsync +
-	 * rename; a failure removes the temp (best effort: an allowed name, removed with the
-	 * operation) and leaves the folder as it was. Skipped when intent + receipt + the largest facts
-	 * sidecar + this sidecar would exceed the folder's metadata bound (MAX_OPERATION_METADATA_BYTES).
-	 * Refreshes the operation's inventory entry like retire, and notifies `copy-changed` after a
-	 * write or a removal.
+	 * one is skipped), so the lock is never held across another lock user's wait.
+	 *
+	 * Paced: the detector re-points a group in a burst (up to 63 writes at once, never awaited);
+	 * the writes queue on their own chain and each takes the store lock alone, after yielding a
+	 * macrotask, so a lock user that asks during a burst waits for one mark write, not the burst.
+	 *
+	 * Tmp (`copies/<id>.tmp`) + fsync + rename + directory fsync; a failure removes the temp (best
+	 * effort: recovery removes any left) and leaves the mark and the index as they were. Notifies
+	 * `copy-changed` after a write or a removal.
 	 */
 	writeCopy(
 		operationId: string,
@@ -3440,77 +3559,89 @@ export class AnalogOperations {
 	): Promise<"written" | "removed" | "skipped"> {
 		if (this.stopped || !UUIDSchema.safeParse(operationId).success)
 			return Promise.resolve("skipped")
-		return this.exclusive(async () => {
-			const intent = this.inventory.intents.get(operationId)
-			if (
-				intent === undefined ||
-				this.inventory.unknown ||
-				this.active.has(operationId) ||
-				this.retiring.has(operationId)
-			)
-				return "skipped"
-			const slot = this.available.get(intent.alias)
-			if (
-				slot === undefined ||
-				!slot.available ||
-				slot.receipt.outcome !== "finalized" ||
-				slot.receipt.operationId !== operationId
-			)
-				return "skipped"
-			const dir = this.opDir(operationId)
-			const target = join(dir, COPY_FACTS_FILE)
-			const temp = join(dir, COPY_FACTS_TEMP)
-			let outcome: "written" | "removed" | "skipped" = "skipped"
-			this.auditTouched?.add(operationId)
-			try {
-				if (copy === null) {
-					await this.safeTarget(target)
+		const run = this.copyChain.then(async () => {
+			await new Promise<void>(resolve => setImmediate(resolve))
+			return this.exclusive(() => this.writeCopyLocked(operationId, copy))
+		})
+		this.copyChain = run.then(
+			() => undefined,
+			() => undefined,
+		)
+		return run
+	}
+	private async writeCopyLocked(
+		operationId: string,
+		copy: CopyFactsInput | null,
+	): Promise<"written" | "removed" | "skipped"> {
+		const id = operationId.toLowerCase()
+		const intent = this.inventory.intents.get(operationId)
+		if (
+			this.stopped ||
+			intent === undefined ||
+			this.inventory.unknown ||
+			this.active.has(operationId) ||
+			this.retiring.has(operationId)
+		)
+			return "skipped"
+		const slot = this.available.get(intent.alias)
+		if (
+			slot === undefined ||
+			!slot.available ||
+			slot.receipt.outcome !== "finalized" ||
+			slot.receipt.operationId !== operationId
+		)
+			return "skipped"
+		const dir = this.copiesDir()
+		const target = join(dir, `${id}.json`)
+		const temp = join(dir, `${id}.tmp`)
+		let outcome: "written" | "removed" | "skipped" = "skipped"
+		try {
+			if (copy === null) {
+				await this.safeTarget(target)
+				try {
+					await this.io.unlink(target)
+					outcome = "removed"
+				} catch (cause) {
+					if (nativeCode(cause) !== "ENOENT") throw cause
+				}
+				this.copyIndex.delete(id)
+			} else {
+				const bytes = copyFactsBytes(operationId, copy, Date.now())
+				const facts =
+					bytes === null
+						? null
+						: copyFactsOf(JSON.parse(bytes.toString("utf8")), operationId)
+				if (bytes !== null && facts !== null) {
+					await this.safeDirectory(dir, true)
+					await this.safeTarget(temp)
 					try {
-						await this.io.unlink(target)
-						outcome = "removed"
+						await this.io.unlink(temp)
 					} catch (cause) {
 						if (nativeCode(cause) !== "ENOENT") throw cause
 					}
-				} else {
-					const bytes = copyFactsBytes(operationId, copy, Date.now())
-					const metadata =
-						boundedJson(intent).length +
-						boundedJson(slot.receipt).length +
-						RECORDING_FACTS_MAX_BYTES
-					if (
-						bytes !== null &&
-						metadata + bytes.length <= MAX_OPERATION_METADATA_BYTES
-					) {
-						await this.safeTarget(temp)
-						try {
-							await this.io.unlink(temp)
-						} catch (cause) {
-							if (nativeCode(cause) !== "ENOENT") throw cause
-						}
-						await this.writeSynced(temp, bytes)
-						await this.safeTarget(target)
-						await this.renameFile(temp, target)
-						outcome = "written"
+					await this.writeSynced(temp, bytes)
+					await this.safeTarget(target)
+					await this.renameFile(temp, target)
+					this.copyIndex.set(id, facts)
+					outcome = "written"
+					try {
+						await this.syncDirectory(dir, "operations")
+					} catch {
+						/* durability only: the rename is done */
 					}
 				}
-			} catch {
-				outcome = "skipped"
-				try {
-					await this.io.unlink(temp)
-				} catch {
-					/* an allowed name: inventoried, removed with the operation */
-				}
-			} finally {
-				try {
-					await this.refresh([operationId])
-				} catch {
-					this.inventory.unknown = true
-				}
 			}
-			if (outcome !== "skipped")
-				this.notify({ kind: "copy-changed", alias: intent.alias })
-			return outcome
-		})
+		} catch {
+			outcome = "skipped"
+			try {
+				await this.io.unlink(temp)
+			} catch {
+				/* recovery removes a stale temp */
+			}
+		}
+		if (outcome !== "skipped")
+			this.notify({ kind: "copy-changed", alias: intent.alias })
+		return outcome
 	}
 
 	path(alias: string): string | null {

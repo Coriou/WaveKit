@@ -1,13 +1,13 @@
 /**
  * Copies (ghosts: the same audio heard again on another frequency) in the Recordings drawer and the
- * Transmission view: the list asks for copies=false until Show copies, a copy's row carries a "copy"
- * chip opening its original, an original's view lists "Also heard on … (copy)" and a copy's view
+ * Transmission view: the list shows copies by default (copies=false only under Hide copies, and only to
+ * a core that showed it knows the key), a copy's row carries a "copy" chip opening its original, an original's view lists "Also heard on … (copy)" and a copy's view
  * links "Copy of …". Made-up keys and frequencies.
  */
 import { readFileSync } from "node:fs"
 import { createElement, type ReactElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { RecordingInventoryItem } from "@wavekit/api-types"
 
 import { CopyChip } from "../../src/features/recordings/RecordingsDrawer.tsx"
@@ -34,7 +34,10 @@ import {
 	moreCopiesText,
 } from "../../src/features/transmission/words.ts"
 import { json, scripted } from "../data/fake-fetch.ts"
-import { recordingsParams } from "../../src/data/recordings-store.ts"
+import {
+	RecordingsStore,
+	recordingsParams,
+} from "../../src/data/recordings-store.ts"
 
 const ROOT = "scan:d_ROOT~analog-00000000-0000-4000-8000-000000000001.wav"
 const GHOST = "scan:d_GHOST~analog-00000000-0000-4000-8000-000000000002.wav"
@@ -73,14 +76,43 @@ const ghost = item({
 
 afterEach(() => {
 	transmissionNav.set(null)
-	setShowCopies(false)
+	setShowCopies(true)
 	clearTransmissionCache()
 })
 
-describe("Recordings: copies hidden by default, Show copies, the copy chip", () => {
-	it("sends copies=false on the wire (the store's query string)", () => {
-		const q = recordingsQuery({ tokens: [], text: "", filter: "all" })
-		expect(recordingsParams(q, 50, null)).toMatchObject({ copies: "false" })
+/** An answer as a core answers: `counts` with `copiesTotal` (this core) or without (an older core). */
+function listing(items: unknown[], copiesTotal?: number) {
+	return {
+		items,
+		nextCursor: null,
+		scannedFiles: items.length,
+		truncated: false,
+		scannedAt: "2026-11-23T18:00:00.000Z",
+		matched: items.length,
+		counts: {
+			total: items.length,
+			kept: 0,
+			bytes: 0,
+			byKind: { "scanner-analog": items.length },
+			...(copiesTotal === undefined ? {} : { copiesTotal }),
+		},
+	}
+}
+
+describe("Recordings: copies shown by default with their chip, Hide copies, the copy chip", () => {
+	it("sends copies=false on the wire only under Hide copies, and only to a core that knows the key", () => {
+		const hidden = recordingsQuery({
+			tokens: [],
+			text: "",
+			filter: "all",
+			showCopies: false,
+		})
+		expect(recordingsParams(hidden, 50, null)).toMatchObject({
+			copies: "false",
+		})
+		expect(recordingsParams(hidden, 50, null, false)).not.toHaveProperty(
+			"copies",
+		)
 		expect(
 			recordingsParams(
 				recordingsQuery({
@@ -95,12 +127,13 @@ describe("Recordings: copies hidden by default, Show copies, the copy chip", () 
 		).not.toHaveProperty("copies")
 	})
 
-	it("asks the core for the list without copies until Show copies is on", () => {
-		expect(recordingsUi.get().showCopies).toBe(false)
-		const hidden = recordingsQuery({ ...recordingsUi.get() })
-		expect(hidden).toEqual({ copies: false })
-		setShowCopies(true)
+	it("lists copies by default; Hide copies asks the core for the list without them", () => {
+		expect(recordingsUi.get().showCopies).toBe(true)
 		expect(recordingsQuery({ ...recordingsUi.get() })).toEqual({})
+		setShowCopies(false)
+		expect(recordingsQuery({ ...recordingsUi.get() })).toEqual({
+			copies: false,
+		})
 		// the drawer's opening query and every later one carry the toggle
 		const src = readFileSync(
 			new URL(
@@ -113,6 +146,42 @@ describe("Recordings: copies hidden by default, Show copies, the copy chip", () 
 		expect(src).toContain(
 			"recordingsQuery({ tokens, text, filter, showCopies })",
 		)
+	})
+
+	it("an older core (no copiesTotal, no copyOf) is never sent copies=false: no error, the list shows", async () => {
+		const old = item()
+		delete old.copyOf
+		const { api, calls } = scripted(() => json(200, listing([old])))
+		const store = new RecordingsStore(api)
+		await store.show({ copies: false })
+		await store.show({ copies: false })
+		expect(calls.length).toBeGreaterThan(0)
+		expect(calls.every(c => !c.url.includes("copies"))).toBe(true)
+		expect(store.get()).toMatchObject({ status: "ready", error: null })
+		expect(store.get().items.map(i => i.id)).toEqual([ROOT])
+		store.dispose()
+	})
+
+	it("a core that showed copiesTotal is sent copies=false (read again once it showed it)", async () => {
+		const { api, calls } = scripted(call =>
+			json(
+				200,
+				listing(
+					call.url.includes("copies=false") ? [item()] : [item(), ghost],
+					1,
+				),
+			),
+		)
+		const store = new RecordingsStore(api)
+		await store.show({ copies: false })
+		await vi.waitFor(() =>
+			expect(calls.some(c => c.url.includes("copies=false"))).toBe(true),
+		)
+		await vi.waitFor(() =>
+			expect(store.get().items.map(i => i.id)).toEqual([ROOT]),
+		)
+		expect(calls[0]?.url).not.toContain("copies")
+		store.dispose()
 	})
 
 	it("the header count with copies hidden is `matched` (the rows shown), with them shown `counts`", () => {
@@ -142,12 +211,14 @@ describe("Recordings: copies hidden by default, Show copies, the copy chip", () 
 	})
 
 	it("words the quiet toggle from the core's copiesTotal", () => {
+		expect(copiesToggleLabel(3, true)).toBe("Hide copies (3)")
 		expect(copiesToggleLabel(3, false)).toBe("Show copies (3)")
 		expect(copiesToggleLabel(1_204, false)).toBe("Show copies (1,204)")
 		expect(copiesToggleLabel(0, false)).toBeNull()
-		expect(copiesToggleLabel(undefined, false)).toBeNull()
+		expect(copiesToggleLabel(0, true)).toBeNull()
+		// an older core without the count: nothing to toggle (it is never sent copies=false)
+		expect(copiesToggleLabel(undefined, true)).toBeNull()
 		expect(copiesToggleLabel(null, false)).toBeNull()
-		expect(copiesToggleLabel(0, true)).toBe("Hide copies")
 	})
 
 	it("a copy's row shows a copy chip that opens its original; an original shows none", () => {

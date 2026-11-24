@@ -1,15 +1,20 @@
 /**
- * Copy sidecar of a kept scanner analog recording (copy-facts.ts, AnalogOperations.writeCopy):
- * written and removed under the store lock only for a settled, finalized, listed operation, read
- * by the catalogue as `copyOf` (re-read on the copy-changed notice although the WAV stat is
- * unchanged), filtered by `copies=false`, recovered as a known name, removed with the operation.
- * Synthetic ids and made-up frequencies only.
+ * Copy mark of a kept scanner analog recording (copy-facts.ts, AnalogOperations.writeCopy):
+ * `<storage>/copies/<operationId>.json`, outside `.analog-operations/` (an older core's recovery
+ * scan never sees it), written and removed under the store lock only for a settled, finalized,
+ * listed operation, held in an in-memory index the catalogue reads as `copyOf` (taken again on the
+ * copy-changed notice although the WAV stat is unchanged; no mark file is opened by the
+ * catalogue), filtered by `copies=false` (never a Kept copy), loaded and swept at recovery
+ * (orphans, malformed marks, stale temps), removed with the operation. Synthetic ids and made-up
+ * frequencies only.
  */
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
 import {
 	lstat,
+	mkdir,
 	mkdtemp,
+	readdir,
 	readFile,
 	realpath,
 	rename,
@@ -22,17 +27,16 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { RecordingsChangedEventData } from "@wavekit/api-types"
+import type { RecordingProtection } from "../../../../src/core/recordings/contract.js"
 import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
 import {
-	OPERATION_FOLDER_NAMES,
 	type AnalogMetadataAdapter,
 	type AnalogNotice,
 	type AnalogOperationIo,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import {
-	COPY_FACTS_FILE,
 	COPY_FACTS_MAX_BYTES,
-	COPY_FACTS_TEMP,
+	COPY_MARKS_DIR,
 	CopyFactsSchema,
 	copyFactsBytes,
 	copyFactsOf,
@@ -56,6 +60,16 @@ afterEach(async () => {
 		dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })),
 	)
 })
+
+/** The inventory's keep answer in these tests: the keys in `kept` are Kept. */
+function keptKeys(kept: Set<string>): RecordingProtection {
+	return {
+		isProtected: key => kept.has(key),
+		isDsdFmeFileProtected: () => false,
+		isScannerFileProtected: () => false,
+		discoveryHoldsKept: () => false,
+	}
+}
 
 async function harness(io?: AnalogOperationIo) {
 	const root = await realpath(await mkdtemp(join(tmpdir(), "wk-copy-")))
@@ -119,15 +133,31 @@ async function harness(io?: AnalogOperationIo) {
 		ev.configureAnalog(adapter)
 		return ev
 	}
-	const evidence = evidenceOf()
+	let evidence = evidenceOf()
 	await evidence.recoverAnalog()
+	const kept = new Set<string>()
 	const inventory = createRecordingInventory({
 		dsdFmeDirs: () => [],
 		scannerRecordingsDir: () => join(root, "recordings"),
 		logger,
+		protection: keptKeys(kept),
 	})
+	// As catalogue-wiring binds it: the store's in-memory index, never a file.
+	inventory.setCopySource?.(id => evidence.copyOf(id))
 	closers.push(() => inventory.close?.())
+	/** A restart of the store: a new EvidenceStore recovers (and loads the marks) in place. */
+	const restart = async (): Promise<EvidenceStore> => {
+		await evidence.stopAnalog()
+		evidence = evidenceOf()
+		await evidence.recoverAnalog()
+		return evidence
+	}
 	return {
+		kept,
+		restart,
+		get current() {
+			return evidence
+		},
 		root,
 		store,
 		discoveryId,
@@ -158,8 +188,26 @@ async function keptOp(h: Harness, _label = "first") {
 	return { op, receipt, alias, key: `scan:${alias}` }
 }
 
+const copiesDir = (h: Harness): string => join(h.root, COPY_MARKS_DIR)
 const copyPath = (h: Harness, operationId: string): string =>
-	join(h.root, ".analog-operations", operationId, COPY_FACTS_FILE)
+	join(copiesDir(h), `${operationId}.json`)
+const copyTemp = (h: Harness, operationId: string): string =>
+	join(copiesDir(h), `${operationId}.tmp`)
+
+/**
+ * The names a pre-copy core's recovery scan admits in an operation folder (frozen from that core's
+ * analog-operations.ts scanFolder: any other name marks the inventory unknown and quarantines
+ * every operation; at most 8 children are listed).
+ */
+const BASE_OPERATION_FOLDER_NAMES = [
+	"intent.json",
+	"intent.tmp",
+	"receipt.json",
+	"receipt.tmp",
+	"payload.wav.part",
+	"facts.json",
+	"facts.tmp",
+] as const
 
 const record = (key: string, operationId: string): CopyFactsInput => ({
 	of: { key, operationId },
@@ -167,8 +215,8 @@ const record = (key: string, operationId: string): CopyFactsInput => ({
 	evidence: ["intermod", "off-raster"],
 })
 
-describe("copy sidecar: writeCopy under the store lock", () => {
-	it("writes copy.json for a finalized, listed operation and notifies copy-changed", async () => {
+describe("copy mark: writeCopy under the store lock", () => {
+	it("writes copies/<id>.json for a finalized, listed operation and notifies copy-changed", async () => {
 		const h = await harness()
 		const root = await keptOp(h)
 		const copy = await keptOp(h, "o2")
@@ -187,16 +235,8 @@ describe("copy sidecar: writeCopy under the store lock", () => {
 			of: { key: root.key, operationId: root.op.operationId },
 			evidence: ["intermod", "off-raster"],
 		})
-		expect(
-			existsSync(
-				join(
-					h.root,
-					".analog-operations",
-					copy.op.operationId,
-					COPY_FACTS_TEMP,
-				),
-			),
-		).toBe(false)
+		expect(existsSync(copyTemp(h, copy.op.operationId))).toBe(false)
+		expect(h.evidence.copyOf(copy.op.operationId)?.of.key).toBe(root.key)
 		expect(h.notices).toContainEqual({
 			kind: "copy-changed",
 			alias: copy.alias,
@@ -206,6 +246,7 @@ describe("copy sidecar: writeCopy under the store lock", () => {
 			"removed",
 		)
 		expect(existsSync(copyPath(h, copy.op.operationId))).toBe(false)
+		expect(h.evidence.copyOf(copy.op.operationId)).toBeNull()
 		// Nothing to remove: skipped, no notice.
 		const before = h.notices.length
 		expect(await h.evidence.writeCopy(copy.op.operationId, null)).toBe(
@@ -252,16 +293,18 @@ describe("copy sidecar: writeCopy under the store lock", () => {
 	it("renames through the io seam: a failed rename leaves no sidecar and no temp, skipped, no notice", async () => {
 		let failRename = false
 		const renamed: string[] = []
+		const h0 = { root: "" }
 		const h = await harness({
 			unlink: path => unlink(path),
 			checkpoint: async () => undefined,
 			rename: async (from, to) => {
 				renamed.push(to)
-				if (failRename && to.endsWith(COPY_FACTS_FILE))
+				if (failRename && to.startsWith(join(h0.root, COPY_MARKS_DIR)))
 					throw Object.assign(new Error("injected"), { code: "EIO" })
 				await rename(from, to)
 			},
 		})
+		h0.root = h.root
 		const root = await keptOp(h)
 		const copy = await keptOp(h, "o2")
 		failRename = true
@@ -272,10 +315,12 @@ describe("copy sidecar: writeCopy under the store lock", () => {
 				record(root.key, root.op.operationId),
 			),
 		).toBe("skipped")
-		expect(renamed.filter(p => p.endsWith(COPY_FACTS_FILE))).toHaveLength(1)
-		const dir = join(h.root, ".analog-operations", copy.op.operationId)
-		expect(existsSync(join(dir, COPY_FACTS_FILE))).toBe(false)
-		expect(existsSync(join(dir, COPY_FACTS_TEMP))).toBe(false)
+		expect(
+			renamed.filter(p => p === copyPath(h, copy.op.operationId)),
+		).toHaveLength(1)
+		expect(existsSync(copyPath(h, copy.op.operationId))).toBe(false)
+		expect(existsSync(copyTemp(h, copy.op.operationId))).toBe(false)
+		expect(h.evidence.copyOf(copy.op.operationId)).toBeNull()
 		expect(h.notices.length).toBe(before)
 		// The folder is as it was: the next write succeeds through the same seam.
 		failRename = false
@@ -285,7 +330,7 @@ describe("copy sidecar: writeCopy under the store lock", () => {
 				record(root.key, root.op.operationId),
 			),
 		).toBe("written")
-		expect(existsSync(join(dir, COPY_FACTS_FILE))).toBe(true)
+		expect(existsSync(copyPath(h, copy.op.operationId))).toBe(true)
 	})
 
 	it("skips an aborted operation (never finalized)", async () => {
@@ -307,7 +352,7 @@ describe("copy sidecar: writeCopy under the store lock", () => {
 		).toBe("skipped")
 	})
 
-	it("a write racing a retention removal never leaves an orphaned sidecar (one lock)", async () => {
+	it("a write racing a retention removal never leaves an orphaned mark (one lock)", async () => {
 		const h = await harness()
 		const root = await keptOp(h)
 		const copy = await keptOp(h, "o2")
@@ -330,10 +375,41 @@ describe("copy sidecar: writeCopy under the store lock", () => {
 			kind: "removed",
 			operationId: copy.op.operationId,
 		})
+		expect(existsSync(copyPath(h, copy.op.operationId))).toBe(false)
+		expect(h.evidence.copyOf(copy.op.operationId)).toBeNull()
+	})
+
+	it("paces a burst: each write takes the lock alone, so another lock user waits for one write, not the burst", async () => {
+		const h = await harness()
+		const root = await keptOp(h)
+		const others = [
+			await keptOp(h, "o2"),
+			await keptOp(h, "o3"),
+			await keptOp(h, "o4"),
+		]
+		const order: string[] = []
+		// A burst as the detector sends it (never awaited), then a lock user (a retention pass).
+		const burst = [...others, ...others, ...others].map((o, i) =>
+			h.evidence
+				.writeCopy(
+					o.op.operationId,
+					i % 2 === 0 ? record(root.key, root.op.operationId) : null,
+				)
+				.then(r => {
+					order.push("write")
+					return r
+				}),
+		)
+		const retention = h.evidence.retention(new Set()).then(() => {
+			order.push("retention")
+		})
+		await Promise.all([...burst, retention])
+		// The retention pass ran before the burst finished (it queued once, behind at most a write).
+		expect(order.indexOf("retention")).toBeLessThan(order.length - 1)
 	})
 })
 
-describe("copy sidecar: a cleanup that gives up", () => {
+describe("copy mark: a cleanup that gives up", () => {
 	it("a removal that fails before the folder goes leaves the operation writable again", async () => {
 		let failWav: string | null = null
 		const h = await harness({
@@ -369,8 +445,8 @@ describe("copy sidecar: a cleanup that gives up", () => {
 	})
 })
 
-describe("copy sidecar: removed with the operation, recovered as a known name", () => {
-	it("retention removes copy.json and copy.tmp with the folder and notifies removed", async () => {
+describe("copy mark: outside the operation folder, removed with the operation, swept at recovery", () => {
+	it("retention removes the mark and its temp with the operation and notifies removed", async () => {
 		const h = await harness()
 		const root = await keptOp(h)
 		const copy = await keptOp(h, "o2")
@@ -378,25 +454,55 @@ describe("copy sidecar: removed with the operation, recovered as a known name", 
 			copy.op.operationId,
 			record(root.key, root.op.operationId),
 		)
-		await writeFile(
-			join(h.root, ".analog-operations", copy.op.operationId, COPY_FACTS_TEMP),
-			"{",
-		)
+		await writeFile(copyTemp(h, copy.op.operationId), "{")
 		const old = new Date(NOW - 31 * 86_400_000)
 		await utimes(join(h.root, copy.receipt.artifact ?? ""), old, old)
 		await h.evidence.retention(new Set())
 		expect(
 			existsSync(join(h.root, ".analog-operations", copy.op.operationId)),
 		).toBe(false)
+		expect(existsSync(copyPath(h, copy.op.operationId))).toBe(false)
+		expect(existsSync(copyTemp(h, copy.op.operationId))).toBe(false)
+		expect(h.evidence.copyOf(copy.op.operationId)).toBeNull()
 		expect(h.notices).toContainEqual({
 			kind: "removed",
 			operationId: copy.op.operationId,
 		})
 	})
 
-	it(`a folder holding every allowed name (${OPERATION_FOLDER_NAMES.length}, copy.tmp included) recovers; one more name fails closed`, async () => {
-		expect(OPERATION_FOLDER_NAMES).toContain(COPY_FACTS_FILE)
-		expect(OPERATION_FOLDER_NAMES).toContain(COPY_FACTS_TEMP)
+	it("rollback: a pre-copy core's frozen 7-name list admits every operation folder the new code writes; the marks sit outside .analog-operations", async () => {
+		const h = await harness()
+		const root = await keptOp(h)
+		const copy = await keptOp(h, "o2")
+		expect(
+			await h.evidence.writeCopy(
+				copy.op.operationId,
+				record(root.key, root.op.operationId),
+			),
+		).toBe("written")
+		const operations = join(h.root, ".analog-operations")
+		for (const id of [root.op.operationId, copy.op.operationId]) {
+			const names = await readdir(join(operations, id))
+			// What that core's scanFolder checks: at most 8 children, each one of its 7 names.
+			expect(names.length).toBeLessThanOrEqual(8)
+			expect(
+				names.filter(
+					n => !(BASE_OPERATION_FOLDER_NAMES as readonly string[]).includes(n),
+				),
+			).toEqual([])
+		}
+		// Top-level `.analog-operations/` entries: operation folders (and cleanup markers) only.
+		for (const name of await readdir(operations))
+			expect(name).toMatch(
+				/^(\.set-aside|\.staging-[0-9a-f-]{36}|[0-9a-f-]{36}(\.cleanup)?)$/,
+			)
+		// The marks live beside it, directly under the storage root.
+		expect(existsSync(copyPath(h, copy.op.operationId))).toBe(true)
+		expect(copiesDir(h).startsWith(operations)).toBe(false)
+		expect(await readdir(copiesDir(h))).toEqual([`${copy.op.operationId}.json`])
+	})
+
+	it("recovery loads valid marks into the index (copies-loaded), removes orphans, malformed marks and stale temps, leaves foreign names", async () => {
 		const h = await harness()
 		const root = await keptOp(h)
 		const copy = await keptOp(h, "o2")
@@ -404,31 +510,72 @@ describe("copy sidecar: removed with the operation, recovered as a known name", 
 			copy.op.operationId,
 			record(root.key, root.op.operationId),
 		)
-		const dir = join(h.root, ".analog-operations", copy.op.operationId)
-		for (const name of [
-			"intent.tmp",
-			"receipt.tmp",
-			"facts.tmp",
-			COPY_FACTS_TEMP,
-		])
-			await writeFile(join(dir, name), "{")
-		await writeFile(join(dir, "payload.wav.part"), "")
-		await h.evidence.stopAnalog()
-		const next = h.evidenceOf()
-		const statuses = (await next.recoverAnalog()).map(r => r.status)
-		expect(statuses).toEqual(["available", "available"])
+		const orphan = randomUUID()
+		const bytes = copyFactsBytes(
+			orphan,
+			record(root.key, root.op.operationId),
+			NOW,
+		)!
+		await writeFile(copyPath(h, orphan), bytes)
+		await writeFile(copyTemp(h, copy.op.operationId), "{")
+		await writeFile(copyPath(h, root.op.operationId), "{ not json")
+		await writeFile(join(copiesDir(h), "README"), "foreign")
+		const before = h.notices.length
+		const next = await h.restart()
 		expect(next.analogQuarantine()).toEqual([])
-		await next.stopAnalog()
-		// One name past the list: the folder's listing overflows its bound (fail closed).
-		await writeFile(join(dir, "extra.json"), "{}")
-		const third = h.evidenceOf()
-		const after = await third.recoverAnalog()
-		expect(after.map(r => r.status)).not.toEqual(["available", "available"])
-		await third.stopAnalog()
+		expect(h.notices.slice(before)).toContainEqual({ kind: "copies-loaded" })
+		expect(next.copyOf(copy.op.operationId)?.of.key).toBe(root.key)
+		expect(next.copyOf(root.op.operationId)).toBeNull()
+		expect(next.copyOf(orphan)).toBeNull()
+		expect((await readdir(copiesDir(h))).sort()).toEqual(
+			[`${copy.op.operationId}.json`, "README"].sort(),
+		)
+		// The catalogue takes the loaded marks on the notice (memory: copiesReloaded).
+		h.inventory.copiesReloaded?.()
+		await vi.waitFor(async () =>
+			expect(
+				(await h.inventory.list({ limit: "200" })).items.find(
+					i => i.key === copy.key,
+				)?.copyOf?.key,
+			).toBe(root.key),
+		)
+	})
+
+	it("an oversized mark reads as no copy and is removed; a symlinked copies dir loads nothing and removes nothing", async () => {
+		const h = await harness()
+		const root = await keptOp(h)
+		const copy = await keptOp(h, "o2")
+		await mkdir(copiesDir(h), { recursive: true })
+		await writeFile(
+			copyPath(h, copy.op.operationId),
+			" ".repeat(COPY_FACTS_MAX_BYTES + 1),
+		)
+		let next = await h.restart()
+		expect(next.copyOf(copy.op.operationId)).toBeNull()
+		expect(existsSync(copyPath(h, copy.op.operationId))).toBe(false)
+		// A symlink in place of the directory: fail closed (nothing loaded, nothing followed).
+		await rm(copiesDir(h), { recursive: true })
+		const elsewhere = await mkdtemp(join(tmpdir(), "wk-copy-elsewhere-"))
+		dirs.push(elsewhere)
+		await writeFile(
+			join(elsewhere, `${copy.op.operationId}.json`),
+			copyFactsBytes(
+				copy.op.operationId,
+				record(root.key, root.op.operationId),
+				NOW,
+			)!,
+		)
+		const { symlink } = await import("node:fs/promises")
+		await symlink(elsewhere, copiesDir(h))
+		next = await h.restart()
+		expect(next.copyOf(copy.op.operationId)).toBeNull()
+		expect(existsSync(join(elsewhere, `${copy.op.operationId}.json`))).toBe(
+			true,
+		)
 	})
 })
 
-describe("copy sidecar: the catalogue's copyOf, copies filter and re-read", () => {
+describe("copy mark: the catalogue's copyOf, copies filter and memory index", () => {
 	async function wired(h: Harness) {
 		h.evidence.onAnalogNotice(n => {
 			if (n.kind === "copy-changed") h.inventory.copyChanged?.(n.alias)
@@ -444,12 +591,13 @@ describe("copy sidecar: the catalogue's copyOf, copies filter and re-read", () =
 		return { root, copy, other }
 	}
 
-	it("re-reads only copy.json on the notice although the WAV stat is unchanged; a plain listing never would", async () => {
+	it("takes the mark from the index on the notice although the WAV stat is unchanged; never opens a mark file", async () => {
 		const h = await harness()
 		const { root, copy } = await wired(h)
 		const wav = join(h.root, copy.receipt.artifact ?? "")
 		const before = await lstat(wav)
-		// Written behind the store's back: no notice, the WAV stat is unchanged, nothing re-reads.
+		// Written behind the store's back: not in the index, so never a copy, even after a re-read.
+		await mkdir(copiesDir(h), { recursive: true })
 		await writeFile(
 			copyPath(h, copy.op.operationId),
 			copyFactsBytes(
@@ -461,7 +609,7 @@ describe("copy sidecar: the catalogue's copyOf, copies filter and re-read", () =
 		h.inventory.invalidate?.(copy.key)
 		const stale = await h.inventory.list({ limit: "200" })
 		expect(stale.items.find(i => i.key === copy.key)?.copyOf).toBeNull()
-		// Through the store: the notice re-reads the sidecar.
+		// Through the store: the notice takes the index's mark.
 		await h.evidence.writeCopy(
 			copy.op.operationId,
 			record(root.key, root.op.operationId),
@@ -471,9 +619,44 @@ describe("copy sidecar: the catalogue's copyOf, copies filter and re-read", () =
 			key: root.key,
 			evidence: ["intermod", "off-raster"],
 		})
+		// Memory, not the file: the mark file gone behind the store's back changes nothing shown.
+		await unlink(copyPath(h, copy.op.operationId))
+		h.inventory.invalidate?.(copy.key)
+		const still = await h.inventory.list({ limit: "200" })
+		expect(still.items.find(i => i.key === copy.key)?.copyOf?.key).toBe(
+			root.key,
+		)
 		const after = await lstat(wav)
 		expect(after.mtimeMs).toBe(before.mtimeMs)
 		expect(after.size).toBe(before.size)
+	})
+
+	it("never hides a Kept copy and never counts it in copiesTotal", async () => {
+		const h = await harness()
+		const { root, copy, other } = await wired(h)
+		await h.evidence.writeCopy(
+			copy.op.operationId,
+			record(root.key, root.op.operationId),
+		)
+		expect((await h.inventory.list({ limit: "200" })).counts?.copiesTotal).toBe(
+			1,
+		)
+		h.kept.add(copy.key)
+		h.inventory.invalidate?.(copy.key)
+		const hidden = await h.inventory.list({ limit: "200", copies: "false" })
+		expect(hidden.items.map(i => i.key).sort()).toEqual(
+			[root.key, copy.key, other.key].sort(),
+		)
+		expect(hidden.items.find(i => i.key === copy.key)?.copyOf?.key).toBe(
+			root.key,
+		)
+		expect(hidden.matched).toBe(3)
+		expect(hidden.counts?.copiesTotal).toBe(0)
+		h.kept.delete(copy.key)
+		h.inventory.invalidate?.(copy.key)
+		const again = await h.inventory.list({ limit: "200", copies: "false" })
+		expect(again.items.some(i => i.key === copy.key)).toBe(false)
+		expect(again.counts?.copiesTotal).toBe(1)
 	})
 
 	it("lists copies by default; copies=false leaves them out of the listing and `matched`, never `counts`", async () => {
@@ -587,11 +770,11 @@ describe("copy sidecar: the catalogue's copyOf, copies filter and re-read", () =
 	})
 })
 
-describe("copy sidecar: bounds and strict parsing", () => {
+describe("copy mark: bounds and strict parsing", () => {
 	const own = randomUUID()
 	const longKey = `scan:d_${"a".repeat(62)}~analog-${randomUUID()}.wav`
 
-	it(`the largest valid sidecar fits COPY_FACTS_MAX_BYTES (${COPY_FACTS_MAX_BYTES})`, () => {
+	it(`the largest valid mark fits COPY_FACTS_MAX_BYTES (${COPY_FACTS_MAX_BYTES})`, () => {
 		const bytes = copyFactsBytes(
 			own,
 			{
@@ -637,7 +820,7 @@ describe("copy sidecar: bounds and strict parsing", () => {
 		).not.toBeNull()
 	})
 
-	it("reads unknown members, malformed JSON shapes and another operation's sidecar as no copy", () => {
+	it("reads unknown members, malformed JSON shapes and another operation's mark as no copy", () => {
 		const bytes = copyFactsBytes(own, record(longKey, randomUUID()), NOW)!
 		const json = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>
 		expect(copyFactsOf(json, own)).not.toBeNull()

@@ -14,6 +14,8 @@ import {
 	type CopySettled,
 } from "../../../../src/core/scanner/channel/copy-detector.js"
 import {
+	COPY_OFF_RASTER_MIN_HZ,
+	copyRasterFit,
 	intermodEvidenceOf,
 	type TrackSpan,
 } from "../../../../src/core/scanner/channel/copy-intermod.js"
@@ -84,6 +86,39 @@ describe("copy raster fit: the learned correction and placement's rasters", () =
 		// No raster at it: unknown (no evidence).
 		expect(s.rasterFit(SRC, 100_000_000, null)).toBe("unknown")
 		expect(s.rasterFit(SRC, Number.NaN, null)).toBe("unknown")
+	})
+
+	it("off raster only at max(raster tolerance, 4 kHz) from every raster's channel: unknown between, at and past the bound", () => {
+		expect(COPY_OFF_RASTER_MIN_HZ).toBe(4_000)
+		const s = store()
+		// 12.5 kHz: tolerance 3 125 Hz, bound max(3 125, 4 000) = 4 000.
+		expect(s.rasterFit(SRC, CH + 3_125, null)).toBe("on")
+		expect(s.rasterFit(SRC, CH + 3_126, null)).toBe("unknown")
+		expect(s.rasterFit(SRC, CH - 3_999, null)).toBe("unknown")
+		expect(s.rasterFit(SRC, CH + 4_000, null)).toBe("off")
+		expect(s.rasterFit(SRC, CH - 4_001, null)).toBe("off")
+		expect(s.rasterFit(SRC, CH + 6_250, null)).toBe("off")
+		// 25 kHz: tolerance 6 250 Hz ≥ 4 000, so the bound is the tolerance.
+		const wide = store([{ spacingHz: 25_000, firstChannelHz: FIRST }])
+		expect(wide.rasterFit(SRC, FIRST + 6_250, null)).toBe("on")
+		expect(wide.rasterFit(SRC, FIRST + 6_251, null)).toBe("off")
+		// 6.25 kHz: tolerance 1 562.5 Hz, half a channel is 3 125 < 4 000: never off.
+		const fine = store([{ spacingHz: 6_250, firstChannelHz: FIRST }])
+		for (const d of [1_563, 2_000, 3_125])
+			expect(fine.rasterFit(SRC, FIRST + d, null)).toBe("unknown")
+		// Two rasters: off only when far from both. 6 250 Hz is off the first (half a channel) but
+		// 3 750 Hz from the second's channel at +2 500 (past its 3 125 tolerance, under 4 000): unknown.
+		const two = [
+			{ spacingHz: 12_500, firstChannelHz: FIRST },
+			{ spacingHz: 12_500, firstChannelHz: FIRST + 2_500 },
+		]
+		expect(copyRasterFit(FIRST + 6_250, two)).toBe("unknown")
+		expect(copyRasterFit(FIRST + 6_250, [two[0]!])).toBe("off")
+		expect(copyRasterFit(FIRST + 2_500, two)).toBe("on")
+		expect(copyRasterFit(FIRST + 5_000, [])).toBe("unknown")
+		expect(
+			copyRasterFit(Number.NaN, [{ spacingHz: 12_500, firstChannelHz: FIRST }]),
+		).toBe("unknown")
 	})
 
 	it("keeps placement's OBW grid choice: a wide emission keys to the coarse raster only", () => {

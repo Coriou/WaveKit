@@ -517,9 +517,10 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   longer give the channel's discovery. A row's time is when its audio starts, not when it was kept,
   so Recordings and the Transmission view agree. **Copies** (the same audio heard again on another
   frequency, a receiver ghost the scanner marked, see
-  [SCANNER.md](SCANNER.md#analog-voice-recordings)) are left out of the list; the footer's quiet
-  **Show copies (n)** lists them again (**Hide copies** hides them) until you reload. A copy's row
-  carries a `copy` chip that opens its original's Transmission view. Copies stay on disk, play and
+  [SCANNER.md](SCANNER.md#analog-voice-recordings)) stay in the list, each row carrying a `copy`
+  chip that opens its original's Transmission view. The footer's quiet **Hide copies (n)** leaves
+  them out (**Show copies (n)** lists them again) until you reload; a copy you kept is never left
+  out. With a core older than copies the toggle does not show. Copies stay on disk, play and
   download like any recording. New recordings
   appear on their own (the core announces each change on the socket; nothing polls); while you
   scroll down or play one from this list, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,

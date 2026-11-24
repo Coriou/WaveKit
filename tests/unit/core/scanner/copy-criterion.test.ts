@@ -14,6 +14,10 @@
  *    property is the real guard against a common-mode pattern (a keyed blocker's desense).
  *    Explicit cases: both silent carriers keyed alike, both noise only, the same CTCSS tone with
  *    no voice on both: each no-compare or not the same audio.
+ * 4. Pulsed common-mode desense: a strong blocker keyed in 30 ms bursts (seeded 0.1 to 0.6 s
+ *    apart) compresses the front end (about 10 dB of gain at each burst) under two different
+ *    voices of one shared stream: the bursts imprint the same dips on both, yet the pair is never
+ *    the same audio and the detector never marks either a copy, even with off-raster evidence.
  *
  * Frequencies are made-up offsets inside the synthetic capture. The chain is slow (about half a
  * second per channel and 12 s), so every channel is demodulated once and shared.
@@ -422,6 +426,53 @@ describe("copy detection criteria: different voices of one shared stream", () =>
 		expect(maxZ).toBeLessThan(Z_COPY - 1.5)
 		expect(maxR).toBeLessThan(R_COPY_MIN)
 	}, 600_000)
+
+	it("pulsed common-mode desense: 30 ms blocker bursts on two different voices of one stream never make a copy", async () => {
+		const seconds = 12
+		const BLOCKER_AMP = 0.9
+		// Gain under a burst: 1 + a3·|x|² ≈ 1 − 0.8 × 0.81 = 0.35 (about −9 dB) on every channel.
+		const a3 = -0.8
+		await yieldToLoop()
+		const stream = mixedStream({
+			seconds,
+			seed: 91,
+			noiseSigma: sigmaFor(0.12, 18),
+			a3,
+			voices: [
+				{
+					offsetHz: -20_000,
+					amp: 0.12,
+					deviation: talker({ seed: 911, seconds }),
+				},
+				{
+					offsetHz: 20_000,
+					amp: 0.08,
+					deviation: talker({ seed: 912, seconds }),
+				},
+			],
+			blocker: { offsetHz: 40_000, amp: BLOCKER_AMP, burstMs: 30 },
+		})
+		await yieldToLoop()
+		const a = envelopeOf(channelAudio(stream, -20_000))
+		await yieldToLoop()
+		const b = envelopeOf(channelAudio(stream, 20_000))
+		const c = compareEnvelopes(place(a), place(b))
+		// Both voiced files are compared (the case is not vacuous), and never the same audio.
+		if ("noCompare" in c) throw new Error(`no-compare: ${c.noCompare}`)
+		// Non-gating: the pair's score (the bursts' common dips raise it over a quiet stream's).
+		process.stdout.write(
+			`copy desense case: z ${c.z.toFixed(2)} r* ${c.r.toFixed(3)} (Z_COPY ${Z_COPY}, R_COPY_MIN ${R_COPY_MIN})\n`,
+		)
+		expect(sameAudio(c)).toBe(false)
+		expect(c.z).toBeLessThan(Z_COPY)
+		expect(c.r).toBeLessThan(R_COPY_MIN)
+		// The detector, given every other piece of evidence (the weaker one off raster): no copy.
+		const strong = fingerprintOf(a, { hz: -20_000, snrDb: 18, raster: "on" })
+		const weak = fingerprintOf(b, { hz: 20_000, snrDb: 14, raster: "off" })
+		const det = await detect([strong, weak])
+		expect(det.stateOf(keyOf(weak))?.kind).not.toBe("copy")
+		expect(det.stateOf(keyOf(strong))?.kind).not.toBe("copy")
+	}, 300_000)
 
 	it("explicit cases: silent carriers keyed alike, noise only, the same CTCSS tone with no voice", async () => {
 		const seconds = 12

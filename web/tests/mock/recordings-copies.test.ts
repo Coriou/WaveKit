@@ -1,7 +1,7 @@
 /**
  * The mock's copies, as the core serves them: scanner analog items carry `copyOf` (one seeded ghost
  * pair, made-up frequencies), `copies=false` leaves copies out of the listing and `matched` but never
- * `counts` (`copiesTotal` counts them), an invalid value is 400, and GET /api/transmissions gives the
+ * `counts` (`copiesTotal` counts them), a Kept copy is never left out nor counted, an invalid value is 400, and GET /api/transmissions gives the
  * original its `copy.copies` and the copy its `copy.of`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
@@ -53,6 +53,32 @@ describe("mock recordings: copies", () => {
 		const bad = await get("/api/recordings?copies=maybe")
 		expect(bad.statusCode).toBe(400)
 		expect(bad.json()).toMatchObject({ code: "RECORDINGS_QUERY_INVALID" })
+	})
+
+	it("never hides nor counts a Kept copy (the user's word on that file)", async () => {
+		const all = await page("")
+		const copy = all.items.find(i => (i.copyOf ?? null) !== null)!
+		const id = encodeURIComponent(copy.id)
+		expect(
+			(
+				await server.app.inject({
+					method: "PUT",
+					url: `/api/recordings/${id}/keep`,
+				})
+			).statusCode,
+		).toBeLessThan(300)
+		try {
+			const hidden = await page("&copies=false")
+			expect(hidden.items.some(i => i.id === copy.id)).toBe(true)
+			expect(hidden.counts?.copiesTotal).toBe(0)
+			expect(hidden.matched).toBe(all.matched)
+		} finally {
+			await server.app.inject({
+				method: "DELETE",
+				url: `/api/recordings/${id}/keep`,
+			})
+		}
+		expect((await page("")).counts?.copiesTotal).toBe(1)
 	})
 
 	it("serves TransmissionDto.copy: the original's copies, the copy's original", async () => {

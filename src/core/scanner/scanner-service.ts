@@ -108,6 +108,7 @@ import {
 } from "./bandplan/index.js"
 import { CopyDetector } from "./channel/copy-detector.js"
 import type { RasterFit } from "./channel/copy-intermod.js"
+import type { CopyFacts } from "./store/copy-facts.js"
 import { builtinBandplansFor } from "../bandplans/builtin-supplement.js"
 import {
 	createBandRangeCache,
@@ -1771,7 +1772,8 @@ export class ScannerService extends EventEmitter {
 				},
 			})
 			// Copy (ghost) detection over the kept files: the store writes its sidecars, its removals
-			// reach the detector and its sidecar changes the recordings catalogue (`recording-copy-changed`).
+			// reach the detector and its mark changes the recordings catalogue (`recording-copy-changed`,
+			// `recording-copies-loaded` once recovery loaded the marks).
 			const copies = new CopyDetector({
 				write: (operationId, copy) =>
 					this.evidence.writeCopy(operationId, copy),
@@ -1779,6 +1781,8 @@ export class ScannerService extends EventEmitter {
 			})
 			this.evidence.onAnalogNotice(n => {
 				if (n.kind === "removed") copies.forget(n.operationId)
+				else if (n.kind === "copies-loaded")
+					this.emit("recording-copies-loaded")
 				else this.emit("recording-copy-changed", n.alias)
 			})
 			this.widebandAnalog = new WidebandAnalogRecorder({
@@ -3209,6 +3213,14 @@ export class ScannerService extends EventEmitter {
 	recordingFolderDiscovery(folderId: string): Discovery | undefined {
 		const d = recordingFolderDiscovery(this.store, folderId)
 		return d ? { ...d, ...this.storeMeta() } : undefined
+	}
+
+	/**
+	 * Copy detection: the copy mark of a kept analog file's operation (memory only, the store's
+	 * index), or null. The recordings catalogue reads this, never the mark's file.
+	 */
+	recordingCopyOf(operationId: string): CopyFacts | null {
+		return this.evidence.copyOf(operationId)
 	}
 
 	/**

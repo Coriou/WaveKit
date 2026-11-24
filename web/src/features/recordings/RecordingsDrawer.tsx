@@ -8,8 +8,8 @@ import "./recordings.css"
 // list; Back returns to the same search, scroll and open row. Playback is the app's one player (services.playback, its dock
 // the only transport): the row disc toggles it, the open row's waveform seeks it, the playing row is marked.
 // The list follows the catalogue's `recordings` socket notices; arrivals hold while it is scrolled or playing
-// from it ("N new"). Copies (the same audio heard again on another frequency) are left out of the list until the
-// footer's Show copies; a copy's row carries a "copy" chip that opens its original. Names, notes, trim, transcripts, IQ captures and Opus downloads wait for the core
+// from it ("N new"). Copies (the same audio heard again on another frequency) are listed with a "copy" chip that
+// opens their original; the footer's Hide copies leaves them out. Names, notes, trim, transcripts, IQ captures and Opus downloads wait for the core
 // (CORE-GAPS "Recordings").
 import { memo, useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode, KeyboardEvent as ReactKeyboardEvent } from "react"
@@ -1446,8 +1446,8 @@ function Footer() {
 					className="wk-btn wkr-copies"
 					data-variant="ghost"
 					data-size="sm"
-					aria-pressed={showCopies}
-					title="Copies: the same audio heard again on another frequency, kept on disk and listed under their original"
+					aria-pressed={!showCopies}
+					title="Copies: the same audio heard again on another frequency, marked with a copy chip that opens their original"
 					onClick={() => setShowCopies(!showCopies)}
 				>
 					{copies}

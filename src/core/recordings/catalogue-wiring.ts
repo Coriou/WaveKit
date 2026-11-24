@@ -10,8 +10,11 @@
  *   `evidence.recordings`): those discoveries' folders are re-indexed;
  * - digital voice `call` events: a call that ended checks that decoder's dsd-fme directory for
  *   newer calls (the file settles 10 s after its last write, then a timer lists it);
- * - scanner `recording-copy-changed` events: a kept analog file's copy sidecar was written or
- *   removed (copy detection): only that sidecar is read again (copyChanged).
+ * - scanner `recording-copy-changed` events: a kept analog file's copy mark was written or
+ *   removed (copy detection): only that file's copy state is taken again from the scanner's
+ *   in-memory index (copyChanged); `recording-copies-loaded` (recovery loaded the marks): every
+ *   indexed analog file's (copiesReloaded). The catalogue reads the index (`recordingCopyOf`,
+ *   bound here with setCopySource), never a mark's file.
  *
  * Keep, unkeep and delete reach the catalogue through `invalidate(id)` (the keep service). The
  * catalogue's slow reconcile catches anything else (a file removed by hand).
@@ -21,6 +24,7 @@ import type {
 	RecordingsChangedEventData,
 	ScannerDiscoveryEventData,
 } from "@wavekit/api-types"
+import type { CopyFacts } from "../scanner/store/copy-facts.js"
 import type { RecordingInventory } from "./inventory.js"
 
 export interface CatalogueDiscoverySource {
@@ -33,6 +37,7 @@ export interface CatalogueDiscoverySource {
 		event: "recording-copy-changed",
 		listener: (alias: string) => void,
 	): unknown
+	on(event: "recording-copies-loaded", listener: () => void): unknown
 	off(
 		event: "discovery",
 		listener: (d: ScannerDiscoveryEventData) => void,
@@ -42,6 +47,9 @@ export interface CatalogueDiscoverySource {
 		event: "recording-copy-changed",
 		listener: (alias: string) => void,
 	): unknown
+	off(event: "recording-copies-loaded", listener: () => void): unknown
+	/** The copy mark of an analog file's operation (memory only), or null. */
+	recordingCopyOf?(operationId: string): CopyFacts | null
 }
 
 interface EndedCall {
@@ -63,6 +71,8 @@ export interface CatalogueWiring {
 		| "discoveriesRemoved"
 		| "onChange"
 		| "copyChanged"
+		| "copiesReloaded"
+		| "setCopySource"
 	>
 	scanner?: CatalogueDiscoverySource | null
 	digitalVoice?: CatalogueCallSource | null
@@ -119,9 +129,16 @@ export function wireRecordingCatalogue(w: CatalogueWiring): () => void {
 	const onCopy = (alias: string): void => {
 		if (typeof alias === "string") inv.copyChanged?.(alias)
 	}
+	const onCopies = (): void => {
+		inv.copiesReloaded?.()
+	}
 	w.scanner?.on("discovery", onDiscovery)
 	w.scanner?.on("recordings-removed", onRemoved)
 	w.scanner?.on("recording-copy-changed", onCopy)
+	w.scanner?.on("recording-copies-loaded", onCopies)
+	const scanner = w.scanner
+	if (scanner?.recordingCopyOf !== undefined)
+		inv.setCopySource?.(id => scanner.recordingCopyOf?.(id) ?? null)
 	w.digitalVoice?.on("call", onCall)
 	const unsubscribe =
 		w.broadcast !== undefined ? inv.onChange?.(w.broadcast) : undefined
@@ -129,6 +146,8 @@ export function wireRecordingCatalogue(w: CatalogueWiring): () => void {
 		w.scanner?.off("discovery", onDiscovery)
 		w.scanner?.off("recordings-removed", onRemoved)
 		w.scanner?.off("recording-copy-changed", onCopy)
+		w.scanner?.off("recording-copies-loaded", onCopies)
+		inv.setCopySource?.(null)
 		w.digitalVoice?.off("call", onCall)
 		unsubscribe?.()
 	}

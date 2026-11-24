@@ -116,7 +116,7 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `since`, `until`, `q`, `copies`) and page fields (`revision`, `indexing`, `matched`, `counts`
   with `copiesTotal`, `truncatedBefore`), the file download, Keep and delete. Scanner analog items
   carry `copyOf`; one seeded ghost pair (made-up frequencies) has a copy of a voice heard again off
-  the raster, which `copies=false` leaves out of the listing and `matched`. The seeded scanner recordings cover the
+  the raster, which `copies=false` leaves out of the listing and `matched` (a Kept copy never). The seeded scanner recordings cover the
   naming cases: a three-part transmission split by roll-overs (`Part 1 of 3 · continues`), a lone
   rolled-over file whose chain is not known yet and whose carrier sits 0.3 kHz off the raster on
   an unsaved channel (`FM voice`, `Continues…`), and files on a saved frequency (its saved name).
