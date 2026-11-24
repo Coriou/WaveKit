@@ -9,7 +9,12 @@ import type { SavedFrequency } from "@wavekit/api-types"
 
 import type { DataLayer } from "../data/index.ts"
 import { isPendingId, useStore } from "../data/index.ts"
-import { recallSaved, savedMeta } from "../features/tuner/saved.ts"
+import {
+	recallSaved,
+	recallTuneOptions,
+	savedMeta,
+} from "../features/tuner/saved.ts"
+import { tuneTo } from "../features/tuning.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import { formatMHz } from "./maths.ts"
 import type { PlotController } from "./plot-store.ts"
@@ -44,7 +49,13 @@ export const SavedTags = memo(function SavedTags({
 			{
 				config: () => data.liveAudio.get().status?.config,
 				setConfig: patch => data.liveAudio.setConfig(patch),
-				tune: hz => controller.tuneTo(hz),
+				// "Tune as centre" recentres whatever Click to tune says (the controller reads that setting itself).
+				tune: hz =>
+					f.centre === true
+						? tuneTo(data, hz, recallTuneOptions("free", f)).catch(
+								() => undefined,
+							)
+						: controller.tuneTo(hz),
 			},
 			f,
 		)

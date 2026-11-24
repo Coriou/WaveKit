@@ -133,8 +133,9 @@ Receiver panel for 5 minutes.
   receiver recentres only when it lies past the capture's usable edge; with **Centre** the receiver
   always recentres on it, so a bookmark saved as a band's middle becomes the capture centre.
   A saved frequency with **Tune as centre** switched on (in the Tuner's save form, or its pencil
-  **Edit**) recentres from the Saved list and the palette even with **Free**. Undo after a palette
-  recall that recentred puts back the earlier centre and listening channel.
+  **Edit**) recentres from the Saved list, the spectrum's saved tags and the palette even with
+  **Free**. In **Edit**, Enter or leaving the row saves, Escape cancels, Space toggles the switch.
+  Undo after a palette recall puts back the earlier centre and listening channel.
 - Labels on the peaks say what WaveKit identified there (`DMR · CC 1`, `AIS · MMSI …`). Settings ›
   Spectrum › Signal labels chooses how many you see.
 - Labels and tags always sit at their own frequency inside the visible span. After a retune or a

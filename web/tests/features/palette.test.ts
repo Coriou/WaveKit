@@ -685,15 +685,21 @@ describe("palette: running rows", async () => {
 				161_150_000,
 				{ centreHz: 161_500_000 },
 			])
-			// Free, with no centre flag: the undo tunes back by the usual rule.
+			// Free, with no centre flag: the recall may still recentre past the usable edge, so the undo
+			// puts back the earlier centre too.
 			devicePrefsStore.set({ clickTuning: "free" })
 			const free = await runAction(
 				services as never,
 				{ kind: "recall", saved } as never,
 				"Tuned",
 			)
+			expect(calls.at(-1)).toEqual(["tune", 161_800_000, {}])
 			free.undo?.()
-			expect(calls.at(-1)).toEqual(["tune", 161_150_000, {}])
+			expect(calls.at(-1)).toEqual([
+				"tune",
+				161_150_000,
+				{ centreHz: 161_500_000 },
+			])
 			// A saved frequency marked centre recentres in Free too, and undoes the same way.
 			const marked = await runAction(
 				services as never,

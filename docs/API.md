@@ -6896,7 +6896,8 @@ usage that every paired browser shares, stored in the state directory.
   `{ name, frequencyHz, mode, bandwidthHz, tone, group?, centre? }`; `centre: true` ("Tune as
   centre") asks clients to recentre the receiver on it when recalled, whatever their Click to tune
   setting. Leave it out for no preference (`false` is stored as sent); changing it is a change
-  like any other field and moves the revision.
+  like any other field and moves the revision. Downgrade note: the store schema is strict and has
+  no version bump for `centre`, so an older core refuses a store that holds it.
 - `PATCH /api/operator-data/preferences`: change preferences.
 - `POST` and `DELETE /api/operator-data/command-usage`: record or reset command-palette
   usage.

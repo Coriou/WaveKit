@@ -121,6 +121,7 @@ export class FakeElement extends FakeNode {
 	}
 	focus(): void {}
 	blur(): void {}
+	select(): void {}
 	/** The first descendant (or this) whose attribute `name` equals `value`. */
 	find(name: string, value: string): FakeElement | null {
 		if (this.attributes.get(name) === value) return this

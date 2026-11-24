@@ -108,6 +108,9 @@ export function useRecall(): (f: SavedFrequency) => void {
 /**
  * "Tune as centre": recalling this saved frequency always recentres the receiver on it, whatever
  * Display › Click to tune says (a band-middle bookmark that should open the whole band around it).
+ * Pressing it keeps focus where it was (mousedown default prevented): Safari and Firefox on macOS
+ * do not focus a clicked button, so the edit group would otherwise see a blur to nowhere and save
+ * before the toggle lands. Space toggles it from the keyboard; Enter saves the edit group.
  */
 export function CentreSwitch({
 	checked,
@@ -120,7 +123,13 @@ export function CentreSwitch({
 	return (
 		<div className="wkf-save-centre">
 			<span id={id}>Tune as centre</span>
-			<Switch aria-labelledby={id} checked={checked} onChange={onChange} />
+			<Switch
+				aria-labelledby={id}
+				size="row"
+				checked={checked}
+				onChange={onChange}
+				onMouseDown={e => e.preventDefault()}
+			/>
 		</div>
 	)
 }
@@ -212,7 +221,10 @@ export function SaveForm({ hz, onDone }: { hz: number; onDone: () => void }) {
 	)
 }
 
-/** Edits a saved frequency in place: its name and "Tune as centre". Leaving the group saves; Escape cancels. */
+/**
+ * Edits a saved frequency in place: its name and "Tune as centre". Enter (also on the focused switch,
+ * whose Space toggles) or leaving the group saves; Escape cancels.
+ */
 export function EditField({
 	row,
 	onDone,
@@ -227,9 +239,17 @@ export function EditField({
 	useEffect(() => {
 		input.current?.select()
 	}, [])
+	// One outcome per edit: a blur that follows Enter or Escape (the row unmounting) changes nothing.
+	const settled = useRef(false)
+	const finish = () => {
+		if (settled.current) return false
+		settled.current = true
+		onDone()
+		return true
+	}
 	const commit = () => {
 		const next = name.trim()
-		onDone()
+		if (!finish()) return
 		if (!next || (next === row.name && centre === (row.centre === true))) return
 		data.savedFrequencies
 			.replace(row.id, withCentre({ ...inputOf(row), name: next }, centre))
@@ -251,7 +271,7 @@ export function EditField({
 				} else if (e.key === "Escape") {
 					e.preventDefault()
 					e.stopPropagation()
-					onDone()
+					finish()
 				}
 			}}
 		>

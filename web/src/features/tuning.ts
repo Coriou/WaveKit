@@ -122,9 +122,27 @@ export interface TuneOptions {
 	/**
 	 * Put the hardware centre here and reach the frequency by the live-audio offset: an undo that
 	 * restores an earlier centre and offset exactly. Without an offset (no live audio, or a scan owns
-	 * the receiver) the frequency is tuned as usual.
+	 * the receiver), or when the frequency lies past that centre's usable edge, it is tuned as usual.
 	 */
 	centreHz?: number
+}
+
+/** Whether `target` is reachable by offset from a capture centred on `centreHz` (inside its usable span). */
+function withinSpanOf(
+	ctx: TuneContext,
+	target: number,
+	centreHz: number,
+): boolean {
+	if (!(ctx.sampleRateHz > 0)) return false
+	const capture = captureOf({ ...ctx, centreHz })
+	return (
+		tuneAction(
+			target,
+			centreHz,
+			capture,
+			edgeMargin(capture, Math.max(0, ctx.bandwidthHz)),
+		).kind === "offset"
+	)
 }
 
 /** Moves the hardware centre to `centreHz` (when it is elsewhere), then the offset onto `target`. */
@@ -157,14 +175,15 @@ export async function tuneTo(
 	if (!tuner || !ctx) throw new Error("No tuner source")
 	const scanning = scanHasReceiver(data.scanner?.get().sweep)
 	const target = Math.round(hz)
-	if (options.centreHz !== undefined && ctx.offsetAvailable && !scanning)
-		return restoreCentre(
-			data,
-			ctx,
-			target,
-			Math.round(options.centreHz),
-			tuner.sourceId,
-		)
+	const restoreHz =
+		options.centreHz === undefined ? null : Math.round(options.centreHz)
+	if (
+		restoreHz !== null &&
+		ctx.offsetAvailable &&
+		!scanning &&
+		withinSpanOf(ctx, target, restoreHz)
+	)
+		return restoreCentre(data, ctx, target, restoreHz, tuner.sourceId)
 	// Asked to recentre, a frequency already reached by offset still moves the centre onto it.
 	const plan: TunePlan =
 		options.recentre === true && ctx.centreHz !== target

@@ -169,13 +169,13 @@ export async function runAction(
 					devicePrefsStore.getState().clickTuning,
 					action.saved,
 				)
-				// A recentring recall moves the hardware: its undo puts back that centre and offset.
+				// A recall may move the hardware (a recentring recall, or a Free one past the usable edge): its
+				// undo puts back that centre and offset.
 				const prior = tuneContext(
 					s.data.tuner.state(),
 					s.data.liveAudio.get().status ?? null,
 				)
-				const undoHow =
-					how.recentre === true && prior ? { centreHz: prior.centreHz } : {}
+				const undoHow = prior ? { centreHz: prior.centreHz } : {}
 				await recallSaved(
 					{
 						config: () => s.data.liveAudio.get().status?.config,

@@ -277,6 +277,22 @@ describe("TuningController against the mock core", () => {
 		expect(tuning.displayHz()).toBe(161_150_000)
 	})
 
+	it("a centreHz tune past that centre's usable span tunes by the usual rule, never an out-of-span offset", async () => {
+		const tuning = new TuningController(data)
+		await tuning.tune(161_300_000, { recentre: true })
+		// 8.5 MHz from the asked centre: no offset reaches it from there.
+		await tuning.tune(170_000_000, { centreHz: 161_500_000 })
+		expect(data.tuner.state()?.frequency).toBe(170_000_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
+		expect(tuning.displayHz()).toBe(170_000_000)
+		// Inside the asked centre's span but past its usable edge (the capture's last 10 %): the same.
+		const rate = data.tuner.state()?.sampleRate ?? 0
+		const edge = 161_500_000 + rate / 2 - 1_000
+		await tuning.tune(edge, { centreHz: 161_500_000 })
+		expect(data.tuner.state()?.frequency).toBe(edge)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
+	})
+
 	it("the latest coalesced target keeps its own recentre option", async () => {
 		const tuning = new TuningController(data)
 		await tuning.tune(161_500_000)
