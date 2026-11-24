@@ -55,6 +55,8 @@ export interface AnalogTransmissionPayload {
 	peakChannelPowerDbfs: number | null
 	meanChannelPowerDbfs: number | null
 	closeReason: "squelch" | "retune" | "config" | "stopped" | "max-duration"
+	/** The transmission's id (`tx_<ULID>`); absent on records stored before it or without a registry. */
+	txId?: string
 	/**
 	 * WG2: sub-audible tone and DTMF digits heard during the transmission. Present on closed
 	 * transmissions produced since WG2; absent on open events and on records stored before it.
@@ -104,6 +106,12 @@ export interface RecordingChangePayload {
 	durationMs: number
 	/** When the file was kept (ISO); the record's producedAt. */
 	finalizedAt: string
+	/** The transmission open at the file's first sample; absent on records stored before it. */
+	txId?: string
+	/** The other transmissions open while the file was (1 to 7, never `txId`); absent when none. */
+	moreTxIds?: readonly string[]
+	/** Wall time of the file's own first sample (ISO); absent when unknown or stored before it. */
+	startedAt?: string
 }
 
 /** Stored and returned record. commitSeq is assigned by the writer. */
@@ -288,6 +296,7 @@ export type ActivityRefType =
 	| "probeId"
 	| "channelId"
 	| "recordingId"
+	| "txId"
 
 /**
  * A stored ref's type: an ActivityRefType, or `channelHz`, internal and never a query ref: the

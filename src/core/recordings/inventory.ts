@@ -291,6 +291,11 @@ export interface RecordingInventory {
 	 * DMR recordings are off): no source serves it, so no folder state can make it present.
 	 */
 	hasKey?(key: string): boolean | null
+	/**
+	 * Memory only: the keep keys of the indexed files whose facts name a transmission (`txId` or
+	 * one of `moreTxIds`), rebuilt from the facts on every load and refresh; empty when none.
+	 */
+	keysOfTx?(txId: string): readonly string[]
 	/** Writers: these discoveries' folders changed (finalize, delete, retention). */
 	touchDiscoveries?(ids: readonly string[]): Promise<void>
 	/** Writers: a dsd-fme call of `decoderId` ended (no id: every dsd-fme directory). */
@@ -920,6 +925,11 @@ export function createRecordingInventory(
 	const byKey = new Map<string, number>()
 	/** Indexed scanner analog copies per receipt observation (roll-over parts). */
 	const byObservation = new Map<string, IndexedEntry[]>()
+	/**
+	 * Indexed copies per transmission their facts name. Bound: catalogue entries × at most 8
+	 * (a file's txId + 7 moreTxIds, recording-facts.ts).
+	 */
+	const byTx = new Map<string, Set<IndexedEntry>>()
 	/** First full build: null until started, then its promise. */
 	let build: Promise<void> | null = null
 	let built = false
@@ -1079,6 +1089,11 @@ export function createRecordingInventory(
 			group.push(e)
 			byObservation.set(observationId, group)
 		}
+		for (const txId of txIdsOfEntry(e)) {
+			const set = byTx.get(txId) ?? new Set<IndexedEntry>()
+			set.add(e)
+			byTx.set(txId, set)
+		}
 		if (e.key !== null) byKey.set(e.key, (byKey.get(e.key) ?? 0) + 1)
 		const copies = byId.get(e.item.id) ?? []
 		const before = winnerOf(copies)
@@ -1099,6 +1114,11 @@ export function createRecordingInventory(
 			const at = group?.indexOf(e) ?? -1
 			if (group && at >= 0) group.splice(at, 1)
 			if (group?.length === 0) byObservation.delete(observationId)
+		}
+		for (const txId of txIdsOfEntry(e)) {
+			const set = byTx.get(txId)
+			set?.delete(e)
+			if (set?.size === 0) byTx.delete(txId)
 		}
 		const copies = byId.get(e.item.id)
 		if (!copies) return
@@ -1996,6 +2016,9 @@ export function createRecordingInventory(
 			item.speech = receipt?.speech ?? "unchecked"
 			item.keptBy = receipt?.keptBy ?? null
 			item.facts = receipt?.facts ?? null
+			// The transmission open at the file's first sample (its facts); null: unknown.
+			if (e.item.kind === "scanner-analog")
+				item.txId = receipt?.facts?.txId ?? null
 			if (kept !== undefined) item.kept = kept
 			if (eventIdOf !== undefined) {
 				let eventId: string | null = null
@@ -2464,6 +2487,17 @@ export function createRecordingInventory(
 			}
 		},
 
+		keysOfTx(txId) {
+			const set = byTx.get(txId)
+			if (!set) return []
+			const keys: string[] = []
+			for (const e of set) {
+				const key = e.key ?? e.item.id
+				if (!keys.includes(key)) keys.push(key)
+			}
+			return keys
+		},
+
 		hasKey(key) {
 			// A dsd-fme call name the gate refuses (DMR while DMR recordings are off) is served by
 			// no source, whatever a missing directory or a running pass holds: its link may go.
@@ -2492,6 +2526,13 @@ export function createRecordingInventory(
 			}
 		},
 	}
+}
+
+/** The transmissions an indexed file's facts name (start id first). */
+function txIdsOfEntry(e: IndexedEntry): readonly string[] {
+	const facts = e.receipt?.facts
+	if (!facts?.txId) return []
+	return facts.moreTxIds ? [facts.txId, ...facts.moreTxIds] : [facts.txId]
 }
 
 function toItem(

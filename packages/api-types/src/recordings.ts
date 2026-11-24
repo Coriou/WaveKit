@@ -193,6 +193,11 @@ export interface RecordingInventoryItem {
 	 * malformed sidecar) and for other kinds. Absent from older cores.
 	 */
 	facts?: RecordingFacts | null
+	/**
+	 * Scanner analog recordings only: the transmission open at the file's first sample (its
+	 * facts' `txId`); null when unknown. Absent for other kinds and from older cores.
+	 */
+	txId?: string | null
 }
 
 /**
@@ -260,6 +265,10 @@ export interface RecordingFacts {
 	 * won such as a DCS code, which is not measured, a broken-up tone or untoned voice; older files).
 	 */
 	tone?: RecordingTone | null | undefined
+	/** The transmission open at the file's first sample; absent on files kept before it. */
+	txId?: string | undefined
+	/** The other transmissions open while the file was (at most 7); absent when none. */
+	moreTxIds?: string[] | undefined
 }
 
 /**

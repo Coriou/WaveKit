@@ -18,6 +18,7 @@ import {
 import { dirname, join, resolve, sep } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
+import { isTxId } from "../../transmissions/types.js"
 import {
 	WavFileWriter,
 	wavHeader,
@@ -412,6 +413,30 @@ export interface AnalogInput {
 	 * recording producer) passes nothing and gets the floor, 2.
 	 */
 	perSourceLimit?: number
+	/**
+	 * The transmission open at the file's first sample (transmissions registry). Memory only: held
+	 * on the operation, never in intent.json or receipt.json (an older core reads both strictly).
+	 */
+	txId?: string
+}
+
+/** Transmissions one file names: its start txId + 7 more (recording-facts.ts size arithmetic). */
+export const ANALOG_FILE_TX_MAX = 8
+
+/**
+ * The file's txIds: its start id first, then the finish's own list, deduplicated, each a valid
+ * txId, at most ANALOG_FILE_TX_MAX. Anything else is dropped (never fails the finish).
+ */
+export function analogTxIdsOf(
+	start: string | undefined,
+	more: readonly unknown[] | undefined,
+): string[] {
+	const out: string[] = []
+	for (const id of [start, ...(more ?? [])]) {
+		if (out.length >= ANALOG_FILE_TX_MAX) break
+		if (isTxId(id) && !out.includes(id)) out.push(id)
+	}
+	return out
 }
 
 /**
@@ -450,7 +475,15 @@ export interface AnalogMetadataAdapter {
 	buildCommitPlan(operationId: string): RecordingCommitPlan | null
 	/** Must delegate to the known plain DiscoveryStore identity checker, without callbacks. */
 	commitPlanCurrent(plan: RecordingCommitPlan): boolean
-	publishCommit(plan: RecordingCommitPlan): void
+	/**
+	 * `extra`: what the commit's listeners need beside the plan, never persisted with it: the
+	 * file's transmissions (start id first) and its first-sample wall time (the receipt's).
+	 */
+	publishCommit(plan: RecordingCommitPlan, extra: AnalogCommitExtra): void
+}
+export interface AnalogCommitExtra {
+	readonly txIds: readonly string[]
+	readonly startedAt: string | null
 }
 /** What the producer knows of a file's end, besides its cut (AnalogHandle.finish). */
 export interface AnalogFinishFacts {
@@ -483,6 +516,11 @@ export interface AnalogFinishFacts {
 	 * to the kept file's facts sidecar only; a read-only pass-through, dropped when malformed.
 	 */
 	readonly tone?: RecordingTone | null
+	/**
+	 * Every transmission open while the file was (its start id first, then each one that opened
+	 * or joined during it), at most ANALOG_FILE_TX_MAX. Written to the facts sidecar only.
+	 */
+	readonly txIds?: readonly string[]
 }
 /**
  * The receipt's verdict members of finish facts: each one kept only when the receipt schema takes
@@ -777,6 +815,8 @@ interface Operation {
 	admission: unknown
 	/** The first finish's AnalogFinishFacts.tone as given; undefined: none (validated on write). */
 	tone: unknown
+	/** The file's transmissions (analogTxIdsOf): AnalogInput.txId, then the finish's txIds. */
+	txIds: string[]
 	/** The check that refused it first (AnalogFailure), for its receipt. */
 	failure: AnalogFailure | null
 	accepting: boolean
@@ -1055,6 +1095,7 @@ export class AnalogOperations {
 			verdict: {},
 			admission: null,
 			tone: undefined,
+			txIds: analogTxIdsOf(input.txId, undefined),
 			failure: null,
 			accepting: true,
 			decision: null,
@@ -1123,6 +1164,7 @@ export class AnalogOperations {
 					op.verdict = verdictOf(facts)
 					op.admission = facts.admission ?? null
 					op.tone = facts.tone
+					op.txIds = analogTxIdsOf(op.txIds[0], facts.txIds)
 				}
 				return this.finishOperation(op, AnalogCutSchema.parse(cut))
 			},
@@ -1625,7 +1667,10 @@ export class AnalogOperations {
 				availability.available = true
 				// Projection is captured before listeners by the store adapter, never saved/replayed here.
 				try {
-					this.context.adapter.publishCommit(plan)
+					this.context.adapter.publishCommit(plan, {
+						txIds: [...op.txIds],
+						startedAt: receipt.startedAt ?? null,
+					})
 				} catch {
 					/* immutable commit survives listeners */
 				}
@@ -1776,6 +1821,7 @@ export class AnalogOperations {
 				cutActive: receipt.cutActive ?? null,
 				admission: op.admission,
 				tone: op.tone,
+				txIds: op.txIds,
 			})
 			if (bytes === null) return
 			const metadata =

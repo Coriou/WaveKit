@@ -383,9 +383,15 @@ import {
 	isStorageCountRefusal,
 	type AnalogCut,
 	type AnalogHandle,
+	type AnalogCommitExtra,
 	type AnalogInput,
 	type AnalogRoomShort,
 } from "./store/analog-operations.js"
+import type {
+	TxEndReason,
+	TxRefusalCode,
+	TxScannerPort,
+} from "../transmissions/types.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
 import {
 	CHANNEL_GATE_DEFAULT_WIDTH_HZ,
@@ -546,6 +552,12 @@ export interface ScannerServiceDeps {
 	readonly analogTrial?: AnalogTrialRunner
 	readonly iqCapture?: ScannerIqCapture
 	/**
+	 * Transmission identity: each gate-passed observation claims a txId at its start, the files
+	 * recorded over it carry it, and the kept event names it. Absent: no txId anywhere, behaviour
+	 * unchanged.
+	 */
+	readonly transmissions?: TxScannerPort
+	/**
 	 * Activity-ranked decoder channels: the ranker this service feeds (blocks, gated tracks,
 	 * decodes, replay outcomes, history). Absent: nothing is fed and the planner keeps its order.
 	 */
@@ -655,6 +667,12 @@ const RECONFIRM_AFTER_MS = 15 * 60_000
 const RESTORE_CAPS_TIMEOUT_MS = 1_000
 /** Track ids closed by the service (real or synthesized), kept to ignore their late events (R2). */
 const CLOSED_TRACKS_KEEP = 4096
+/**
+ * Max-duration rollovers remembered (the predecessor's txId for its successor, and the
+ * successor's predecessor): 8 sources × the spectrum's default 512 tracks. The successor
+ * normally opens in the same block, so an entry is consumed at once; the oldest goes first.
+ */
+const ROLLOVER_TX_KEEP = 4096
 const BURST_PROTOCOLS: ReadonlySet<ScannerProtocol> = new Set([
 	"ism",
 	"pocsag",
@@ -863,6 +881,11 @@ function nonAnalogFmClass(c: ScannerClass): boolean {
  * recorder only). Such a shadow has the lowest slot priority and is discarded when it is not
  * voiced within 3 s or not classed within 12 s of in-track audio (WIDEBAND_DIGITAL_*_MS).
  */
+/** An observation input's `txId` member: present only while the observation holds a claim. */
+function txOf(tx: { txId: string } | undefined): { txId?: string } {
+	return tx === undefined ? {} : { txId: tx.txId }
+}
+
 function definitelyNotAnalogFm(live: LiveObservation): boolean {
 	return (
 		nonAnalogFmClass(live.classification.class) &&
@@ -889,6 +912,12 @@ export interface ScannerRecordingKept {
 	 * discovery's frequency (the raster channel, as the recordings catalogue reports it).
 	 */
 	channel: { discoveryId: string; frequencyHz: number }
+	/** The transmission open at the file's first sample; absent without one. */
+	txId?: string
+	/** The other transmissions open while the file was (at most 7). */
+	moreTxIds?: string[]
+	/** Wall time of the file's own first sample (ISO, the receipt's); absent when unknown. */
+	startedAt?: string
 }
 
 export class ScannerService extends EventEmitter {
@@ -1322,6 +1351,15 @@ export class ScannerService extends EventEmitter {
 	/** Per source: track events of streams below this one are late (the stream ended, R2). */
 	private readonly streamFloor = new Map<string, number>()
 	private readonly closedTracks = new Set<string>()
+	/** Each live observation's transmission claim (only with a `transmissions` port). */
+	private readonly liveTx = new Map<
+		string,
+		{ txId: string; claimant: number }
+	>()
+	/** A track closed `max-duration`: its trackId → its txId (≤ ROLLOVER_TX_KEEP). */
+	private readonly rolloverTx = new Map<string, string>()
+	/** A rollover successor's trackId → its predecessor's (≤ ROLLOVER_TX_KEEP). */
+	private readonly rolloverOf = new Map<string, string>()
 	private passiveChain: Promise<void> = Promise.resolve()
 	/** Maintenance and passive-cost checks started by the tick (finding 5). */
 	private readonly background = new Set<Promise<void>>()
@@ -1649,12 +1687,12 @@ export class ScannerService extends EventEmitter {
 				buildCommitPlan: operationId =>
 					this.store.buildRecordingCommitPlan(operationId),
 				commitPlanCurrent: plan => this.store.recordingCommitPlanCurrent(plan),
-				publishCommit: plan => {
+				publishCommit: (plan, extra) => {
 					try {
 						this.store.publishRecordingCommit(plan)
 					} finally {
 						// The commit is irrevocable here (after any provisional hold): never a discarded file.
-						this.emitRecordingKept(plan)
+						this.emitRecordingKept(plan, extra)
 					}
 				},
 			})
@@ -1667,6 +1705,19 @@ export class ScannerService extends EventEmitter {
 					admission: this.settings().admission,
 				}),
 				beginAnalog: input => this.beginAnalogRecording(input),
+				...(this.deps.transmissions
+					? {
+							txOf: (observationId: string) =>
+								this.deps.transmissions?.openTxOf(`obs:${observationId}`) ??
+								null,
+							txRefusal: (observationId: string, code: TxRefusalCode) => {
+								this.deps.transmissions?.noteRefusal(
+									`obs:${observationId}`,
+									code,
+								)
+							},
+						}
+					: {}),
 				// The store's analog operations over all sources (its overall limit).
 				analogActive: () => this.evidence.analogActiveCount,
 				// And per source, the channel tier's included (the store's per-source limit).
@@ -3891,6 +3942,8 @@ export class ScannerService extends EventEmitter {
 	): void {
 		const track = ev.track
 		if (this.closedTracks.has(track.trackId)) return
+		if (ev.kind === "track-open" && ev.rolloverFrom !== undefined)
+			this.remember(this.rolloverOf, track.trackId, ev.rolloverFrom)
 		const now = this.now()
 		const covering = this.driversOn(sourceId).filter(d =>
 			d.covers(sourceId, track.centreHz),
@@ -3927,6 +3980,7 @@ export class ScannerService extends EventEmitter {
 				encrypted: false,
 			}
 			this.live.set(track.trackId, live)
+			this.claimTx(live, track)
 			this.emitActivity(live, track, true)
 		}
 		if (
@@ -4065,6 +4119,7 @@ export class ScannerService extends EventEmitter {
 		this.recent.push(live)
 		this.ambientObservations.upsert(live)
 		this.emitActivity(live, track, false)
+		this.endTx(live, track, endReason, now)
 		if (live.probeIds.size === 0 && live.discoveryId)
 			this.markRecording(live.observationId, "none")
 		this.writePsdEvidence(live).catch((err: unknown) =>
@@ -4101,6 +4156,80 @@ export class ScannerService extends EventEmitter {
 			track.obwHz,
 		)
 		for (const d of sweeps) d.onCandidate?.(track, minMs)
+	}
+
+	/**
+	 * A file's transmission: the producer's (the wideband recorder resolves it at the file's first
+	 * sample), else the observation's while its transmission is open. A file begun once that
+	 * transmission closed carries none (counted).
+	 */
+	private withTx(input: AnalogInput): AnalogInput {
+		const port = this.deps.transmissions
+		if (!port || input.txId !== undefined) return input
+		const txId = port.openTxOf(`obs:${input.observationId}`)
+		if (txId === null) {
+			port.noteFileWithoutTx()
+			return input
+		}
+		return { ...input, txId }
+	}
+
+	/** The observation's claim at its start (a rollover successor continues its predecessor). */
+	private claimTx(live: LiveObservation, track: TrackSnapshot): void {
+		const port = this.deps.transmissions
+		if (!port) return
+		const pred = this.rolloverOf.get(track.trackId)
+		if (pred !== undefined) this.rolloverOf.delete(track.trackId)
+		const continues = pred === undefined ? undefined : this.rolloverTx.get(pred)
+		if (pred !== undefined) this.rolloverTx.delete(pred)
+		const res = port.claim({
+			origin: "scanner-observation",
+			kind: "voice-analog",
+			sourceId: live.sourceId,
+			hz: track.centreHz,
+			halfWidthHz: track.obwHz / 2,
+			epoch: track.epoch,
+			stream: track.stream,
+			sample: track.startSample,
+			...(continues !== undefined ? { continues } : {}),
+			atMs: live.startedAt,
+			alias: `obs:${live.observationId}`,
+		})
+		if (res !== null) this.liveTx.set(live.observationId, res)
+	}
+
+	/** The observation's claim ends with it; a max-duration close is remembered for its successor. */
+	private endTx(
+		live: LiveObservation,
+		track: TrackSnapshot,
+		endReason: ObservationEndReason | undefined,
+		now: number,
+	): void {
+		const tx = this.liveTx.get(live.observationId)
+		if (tx === undefined) return
+		this.liveTx.delete(live.observationId)
+		const reason: TxEndReason =
+			endReason === "max-duration"
+				? "max-duration"
+				: endReason === "hop"
+					? "hop"
+					: endReason === "retune"
+						? "retune"
+						: endReason === "job-end"
+							? "stopped"
+							: "ended"
+		this.deps.transmissions?.end(tx.claimant, now, reason)
+		if (reason === "max-duration")
+			this.remember(this.rolloverTx, track.trackId, tx.txId)
+	}
+
+	private remember(map: Map<string, string>, key: string, value: string): void {
+		map.delete(key)
+		map.set(key, value)
+		if (map.size > ROLLOVER_TX_KEEP) {
+			const oldest = map.keys().next()
+			if (oldest.done !== true) map.delete(oldest.value)
+		}
 	}
 
 	private rememberClosed(trackId: string): void {
@@ -4194,6 +4323,7 @@ export class ScannerService extends EventEmitter {
 				track,
 				classification: live.classification,
 				startedAt: live.startedAt,
+				...txOf(this.liveTx.get(live.observationId)),
 				...(endReason ? { endedAt: live.endedAt ?? now, endReason } : {}),
 				...(live.hopIndex !== undefined ? { hopIndex: live.hopIndex } : {}),
 				singleBlockSurfacingAllowed: sweep,
@@ -5015,9 +5145,17 @@ export class ScannerService extends EventEmitter {
 	 * over and the file kept). A file discarded at its finish or after its hold never commits, so it
 	 * is never announced. Activity writes its `recording-change` row from this.
 	 */
-	private emitRecordingKept(plan: RecordingCommitPlan): void {
+	private emitRecordingKept(
+		plan: RecordingCommitPlan,
+		extra?: AnalogCommitExtra,
+	): void {
 		const m = plan.metadata
 		const out = m.expectedOutput
+		const [txId, ...moreTxIds] = extra?.txIds ?? []
+		// The kept file is an artefact of every transmission it spans (alias index only).
+		if (this.deps.transmissions)
+			for (const id of extra?.txIds ?? [])
+				this.deps.transmissions.attach(id, `rec:scan:${m.alias}`)
 		const kept: ScannerRecordingKept = {
 			recordingId: m.alias,
 			discoveryId: m.discoveryId,
@@ -5031,6 +5169,9 @@ export class ScannerService extends EventEmitter {
 				discoveryId: plan.discovery.id,
 				frequencyHz: plan.discovery.frequencyHz,
 			},
+			...(txId !== undefined ? { txId } : {}),
+			...(txId !== undefined && moreTxIds.length > 0 ? { moreTxIds } : {}),
+			...(extra?.startedAt != null ? { startedAt: extra.startedAt } : {}),
 		}
 		try {
 			this.emit("recording-kept", kept)
@@ -5149,6 +5290,7 @@ export class ScannerService extends EventEmitter {
 		active: boolean,
 	): void {
 		const top = live.classification.hypotheses[0]
+		const txId = this.liveTx.get(live.observationId)?.txId
 		const data: ScannerActivityEventData = {
 			sourceId: live.sourceId,
 			observationId: live.observationId,
@@ -5158,6 +5300,7 @@ export class ScannerService extends EventEmitter {
 			active,
 			peakDbfs: track.peakDbfs,
 			...(top ? { hypothesis: top } : {}),
+			...(txId !== undefined ? { txId } : {}),
 		}
 		this.emit("activity", data)
 	}
@@ -9444,7 +9587,7 @@ export class ScannerService extends EventEmitter {
 	 * for retention soon, so a full store frees room before the next transmission is refused.
 	 */
 	private beginAnalogRecording(input: AnalogInput): AnalogHandle {
-		const handle = this.evidence.beginAnalog(input)
+		const handle = this.evidence.beginAnalog(this.withTx(input))
 		// Not the metadata bounds: they share the code, and retention cannot clear them.
 		void handle.ready.then(
 			() => {

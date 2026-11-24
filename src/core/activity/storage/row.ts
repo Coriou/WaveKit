@@ -8,6 +8,7 @@ import { isDtmfDigitString } from "../../audio-tones/dtmf.js"
 import { WaveKitError } from "../../../utils/errors.js"
 import { RECORDING_KEEP_KEY } from "../../recordings/contract.js"
 import { withoutRecordingPath } from "../recording-path.js"
+import { isTxId } from "../../transmissions/types.js"
 import {
 	ACTIVITY_RECORD_VERSION,
 	MAX_INDEXED_TEXT_BYTES,
@@ -489,20 +490,43 @@ const RECORDING_CHANGE_KEYS = [
 	"finalizedAt",
 ] as const
 
+/** A `recording-change` payload's optional keys (each absent on records stored before it). */
+const RECORDING_CHANGE_OPTIONAL_KEYS = [
+	"channel",
+	"txId",
+	"moreTxIds",
+	"startedAt",
+] as const
+
+/** At most 7 more transmissions beside `txId` (a file names at most 8). */
+const RECORDING_CHANGE_MORE_TX_MAX = 7
+
 function isRecordingChange(value: unknown): value is RecordingChangePayload {
 	const body = plain(value)
 	if (!body) return false
 	const channel = body["channel"]
 	if (
-		!sameKeys(
-			body,
-			channel === undefined
-				? RECORDING_CHANGE_KEYS
-				: [...RECORDING_CHANGE_KEYS, "channel"],
-		)
+		!sameKeys(body, [
+			...RECORDING_CHANGE_KEYS,
+			...RECORDING_CHANGE_OPTIONAL_KEYS.filter(key => body[key] !== undefined),
+		])
 	)
 		return false
 	if (channel !== undefined && !isActivityChannel(channel)) return false
+	const txId = body["txId"]
+	if (txId !== undefined && !isTxId(txId)) return false
+	const more = body["moreTxIds"]
+	if (
+		more !== undefined &&
+		(txId === undefined ||
+			!Array.isArray(more) ||
+			more.length === 0 ||
+			more.length > RECORDING_CHANGE_MORE_TX_MAX ||
+			!more.every(id => isTxId(id) && id !== txId) ||
+			new Set(more).size !== more.length)
+	)
+		return false
+	if (body["startedAt"] !== undefined && !isIso(body["startedAt"])) return false
 	const short = (v: unknown): boolean =>
 		typeof v === "string" && v.length > 0 && v.length <= 128
 	const frequency = body["frequencyHz"]
@@ -600,10 +624,20 @@ function recordingChangeRow(
 				{ type: "recordingId", value: link.id },
 				{ type: "discoveryId", value: payload.discoveryId },
 				{ type: "observationId", value: payload.observationId },
+				...txRefsOf(payload.txId, payload.moreTxIds),
 			],
 			channel,
 		),
 	}
+}
+
+/** One `txId` ref per transmission a row names (none on rows stored before them). */
+function txRefsOf(
+	txId: string | undefined,
+	more: readonly string[] | undefined,
+): { type: "txId"; value: string }[] {
+	if (txId === undefined) return []
+	return [txId, ...(more ?? [])].map(value => ({ type: "txId", value }))
 }
 
 /** A scanner analog recording row's title since `channel`: what it holds, never a frequency. */
@@ -764,7 +798,7 @@ function transmissionRow(
 		recordJson,
 		recordBytes: Buffer.byteLength(recordJson, "utf8"),
 		ftsText: truncateUtf8(ftsParts.join("\n"), MAX_INDEXED_TEXT_BYTES),
-		refs: [],
+		refs: txRefsOf(payload.txId, undefined),
 	}
 }
 
@@ -825,6 +859,7 @@ function storedTransmission(
 								}),
 					},
 				}),
+		...(payload.txId === undefined ? {} : { txId: payload.txId }),
 	}
 }
 
@@ -1385,6 +1420,10 @@ function isTone(value: unknown): boolean {
 function transmissionKeysOk(body: Record<string, unknown>): boolean {
 	const present = Object.keys(body)
 	let optional = 0
+	if (present.includes("txId")) {
+		if (!isTxId(body["txId"])) return false
+		optional += 1
+	}
 	if (present.includes("tone")) {
 		if (!isTone(body["tone"])) return false
 		optional += 1

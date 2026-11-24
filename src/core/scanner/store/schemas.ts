@@ -11,6 +11,7 @@ import {
 } from "./recording-operation.js"
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
 import { DISCOVERY_RECORDING_ALIASES_STORED_MAX } from "../recording-aliases.js"
+import { TX_ID } from "../../transmissions/types.js"
 import {
 	HeldGuardSchema,
 	HeldJournalFormatSchema,
@@ -313,6 +314,7 @@ export const ObservationSchema = z.object({
 	tuningTrust: TuningTrustSchema,
 	classVote: ScannerClassSchema.optional(),
 	short: z.boolean().optional(),
+	txId: z.string().regex(TX_ID).optional(),
 })
 /** `proof` is a derived DTO field (A12). It is not a journal key. */
 export type ObservationCheck = Assert<

@@ -19,6 +19,32 @@ import {
 	type ScannerRecorderFlagDetail,
 } from "@wavekit/api-types"
 import type { Logger } from "../../../utils/logger.js"
+import type { TxRefusalCode } from "../../transmissions/types.js"
+
+/**
+ * The transmission refusal a decision stands for (noAudioReason): the slot and CPU refusals,
+ * an encrypted or unclean refusal, a noise discard, and a voiced session evicted on air (it lost
+ * its slot); null for every other decision.
+ */
+export function txRefusalOf(
+	code: ScannerRecorderDecision,
+): TxRefusalCode | null {
+	switch (code) {
+		case "refused:slots":
+		case "evicted":
+			return "refused:slots"
+		case "refused:cpu":
+			return "refused:cpu"
+		case "refused:encrypted":
+			return "encrypted"
+		case "refused:unclean":
+			return "unclean"
+		case "discarded:noise":
+			return "noise"
+		default:
+			return null
+	}
+}
 
 /**
  * Info lines per RECORDER_LOG_WINDOW_MS, session decisions only (snapshot refusals go to debug). A
@@ -83,6 +109,11 @@ export class RecorderDecisions {
 	constructor(
 		private readonly log: Logger,
 		private readonly now: () => number,
+		/** The observation's transmission refusal (txRefusalOf), noted before any repeat rule. */
+		private readonly onTxRefusal?: (
+			observationId: string,
+			code: TxRefusalCode,
+		) => void,
 	) {}
 
 	/**
@@ -103,6 +134,8 @@ export class RecorderDecisions {
 		receipt?: ReceiptDetail,
 	): void {
 		const at = this.now()
+		const refusal = this.onTxRefusal ? txRefusalOf(code) : null
+		if (refusal !== null) this.onTxRefusal?.(ref.observationId, refusal)
 		const known = this.byObservation.get(ref.observationId)
 		if (!session && known?.last === code && code.startsWith("refused:")) {
 			known.discoveryId = ref.discoveryId ?? known.discoveryId

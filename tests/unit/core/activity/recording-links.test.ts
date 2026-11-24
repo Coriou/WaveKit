@@ -234,6 +234,40 @@ describe("kept scanner recordings", () => {
 		expect(recordingChangeOf(kept(patch))).toBeNull()
 	})
 
+	it("carries the file's transmissions and own start; malformed ones are dropped", () => {
+		const a = `tx_01JTESTTX${"A".repeat(17)}`
+		const b = `tx_01JTESTTX${"B".repeat(17)}`
+		const more = Array.from(
+			{ length: 9 },
+			(_, i) => `tx_01JTESTTX${String(i).repeat(17)}`,
+		)
+		expect(
+			recordingChangeOf(
+				kept({
+					txId: a,
+					moreTxIds: [b, a, "bad", b],
+					startedAt: "2026-10-12T00:00:05Z",
+				}),
+			),
+		).toMatchObject({
+			txId: a,
+			moreTxIds: [b],
+			startedAt: "2026-10-12T00:00:05.000Z",
+		})
+		expect(
+			recordingChangeOf(kept({ txId: a, moreTxIds: more }))?.moreTxIds,
+		).toHaveLength(7)
+		const dropped = recordingChangeOf(
+			kept({ txId: "tx_bad", moreTxIds: [b], startedAt: "never" }),
+		)
+		expect(dropped).not.toHaveProperty("txId")
+		expect(dropped).not.toHaveProperty("moreTxIds")
+		expect(dropped).not.toHaveProperty("startedAt")
+		expect(recordingChangeOf(kept({ startedAt: null }))).not.toHaveProperty(
+			"startedAt",
+		)
+	})
+
 	it("unknown values read as null, never guessed", () => {
 		expect(
 			recordingChangeOf(

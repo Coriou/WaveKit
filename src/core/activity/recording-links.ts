@@ -16,6 +16,7 @@
  * RECORDING_LINK_MISSING_MS apart.
  */
 import { scannerKeepKey } from "../recordings/contract.js"
+import { isTxId } from "../transmissions/types.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ActivityRecordingLinks } from "./runtime.js"
 import type { RecordingChangePayload } from "./storage/contract.js"
@@ -66,6 +67,11 @@ export interface RecordingKeptEvent {
 	 * keeps the older title.
 	 */
 	channel?: { discoveryId: string | null; frequencyHz: number } | null
+	/** The file's transmission (start) and the others it spans (at most 7); malformed: dropped. */
+	txId?: string
+	moreTxIds?: readonly string[]
+	/** The file's own first-sample wall time (ISO); malformed: dropped. */
+	startedAt?: string | null
 }
 
 export interface RecordingLinkWiringOptions {
@@ -135,7 +141,31 @@ export function recordingChangeOf(
 		durationMs: duration,
 		finalizedAt: new Date(kept.at).toISOString(),
 		...(channel === null ? {} : { channel }),
+		...txMembersOf(kept),
 	}
+}
+
+/** At most 7 more transmissions beside the start one (a file names at most 8). */
+export const RECORDING_CHANGE_MORE_TX_MAX = 7
+
+/** The payload's transmission and file-start members of a kept event; malformed ones dropped. */
+function txMembersOf(
+	kept: RecordingKeptEvent,
+): Pick<RecordingChangePayload, "txId" | "moreTxIds" | "startedAt"> {
+	const out: { txId?: string; moreTxIds?: string[]; startedAt?: string } = {}
+	if (isTxId(kept.txId)) {
+		out.txId = kept.txId
+		const more: string[] = []
+		for (const id of kept.moreTxIds ?? []) {
+			if (more.length >= RECORDING_CHANGE_MORE_TX_MAX) break
+			if (isTxId(id) && id !== kept.txId && !more.includes(id)) more.push(id)
+		}
+		if (more.length > 0) out.moreTxIds = more
+	}
+	const started =
+		typeof kept.startedAt === "string" ? Date.parse(kept.startedAt) : Number.NaN
+	if (Number.isFinite(started)) out.startedAt = new Date(started).toISOString()
+	return out
 }
 
 export function wireRecordingLinks(

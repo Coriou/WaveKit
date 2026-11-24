@@ -219,6 +219,8 @@ export interface ObservationInput {
 	 * its epoch. Such an evidence-less observation never creates a record.
 	 */
 	dcCentred?: boolean
+	/** The transmission this observation claimed at its start (transmissions registry). */
+	txId?: string
 }
 
 // ---------------------------------------------------------------- stored records (§ 7.1)
@@ -406,6 +408,8 @@ export interface Observation {
 	tuningTrust: TuningTrust
 	/** WG12: derived from this observation's evidence. Absent when nothing is proven. */
 	proof?: ScannerProof
+	/** The transmission it claimed at its start; absent on records written before it or without one. */
+	txId?: string
 }
 
 /**

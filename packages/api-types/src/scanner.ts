@@ -522,6 +522,8 @@ export interface Observation {
 	tuningTrust: TuningTrust
 	/** WG12: derived from this observation's evidence. Absent when nothing is proven. */
 	proof?: ScannerProof
+	/** The transmission it claimed at its start; absent on records written before it or without one. */
+	txId?: string
 }
 
 // --- Jobs and plans (spec § 10.1, § 5.4) ---
@@ -1547,6 +1549,8 @@ export interface ScannerActivityEventData {
 	active: boolean
 	peakDbfs: number
 	hypothesis?: { protocol: ScannerProtocol; score: number }
+	/** The transmission the observation claimed at its start; absent without one. */
+	txId?: string
 }
 // --- Identify mode (spec § 10.8; Task 35a) ---
 

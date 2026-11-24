@@ -56,6 +56,7 @@ import { CtcssBank } from "../../audio-tones/ctcss.js"
 import { toneFactOf, type ToneCoverage } from "../store/recording-facts.js"
 import { ulid } from "../ids.js"
 import { CPU_COST } from "../plan/cost.js"
+import type { TxRefusalCode } from "../../transmissions/types.js"
 import type {
 	AnalogCut,
 	AnalogFinishFacts,
@@ -65,6 +66,7 @@ import type {
 	AnalogReceipt,
 } from "../store/analog-operations.js"
 import {
+	ANALOG_FILE_TX_MAX,
 	AnalogCutSchema,
 	AnalogFailureSchema,
 	ErrorSchema,
@@ -987,6 +989,13 @@ export interface WidebandAnalogDeps {
 		admission?: { readonly enabled: boolean } | undefined
 	}
 	beginAnalog(input: AnalogInput): AnalogHandle
+	/**
+	 * The txId of an observation while its transmission is open (transmissions registry); null
+	 * once closed or without one. Absent: files carry no txId.
+	 */
+	txOf?(observationId: string): string | null
+	/** A recorder refusal of an observation's transmission (RecorderDecisions, txRefusalOf). */
+	txRefusal?(observationId: string, code: TxRefusalCode): void
 	/** A standard CTCSS tone heard over a finalized file of this observation. */
 	recordTone?(observationId: string, ctcssHz: number, at: number): void
 	/** A snapshot refused `refused:tuning` (counted in the source's `tuningUnproven`). */
@@ -1102,6 +1111,11 @@ interface Frames {
 
 interface FileState {
 	readonly generation: number
+	/**
+	 * The transmissions open while the file was (at most ANALOG_FILE_TX_MAX): the one open at its
+	 * first sample first, then each one of an observation that opened or joined during it.
+	 */
+	readonly txIds: string[]
 	/** Null until admitted: classed, voiced, and the session's previous operation settled. */
 	handle: AnalogHandle | null
 	/** Gaps found before the operation began (replayed on begin). */
@@ -1705,7 +1719,13 @@ export class WidebandAnalogRecorder {
 
 	constructor(private readonly deps: WidebandAnalogDeps) {
 		this.log = createComponentLogger(deps.logger, "WidebandAnalogRecorder")
-		this.decisions = new RecorderDecisions(this.log, () => deps.now())
+		this.decisions = new RecorderDecisions(
+			this.log,
+			() => deps.now(),
+			deps.txRefusal === undefined
+				? undefined
+				: (observationId, code) => deps.txRefusal?.(observationId, code),
+		)
 		this.schedule = deps.schedule ?? (run => void setImmediate(run))
 		this.clock = deps.clock ?? (() => performance.now())
 	}
@@ -3421,6 +3441,7 @@ export class WidebandAnalogRecorder {
 		s.generation++
 		const file: FileState = {
 			generation: s.generation,
+			txIds: this.fileTxIds(s),
 			handle: null,
 			gaps: [],
 			gapRun: 0,
@@ -3551,6 +3572,7 @@ export class WidebandAnalogRecorder {
 				// sessions per source at their start, and a session started under it is never
 				// refused its operation later because the limit shrank since.
 				perSourceLimit: MAX_ACTIVE_ANALOG_PER_SOURCE,
+				...(file.txIds[0] !== undefined ? { txId: file.txIds[0] } : {}),
 			})
 		} catch (err: unknown) {
 			this.bindings.delete(key)
@@ -3605,6 +3627,41 @@ export class WidebandAnalogRecorder {
 		)
 	}
 
+	/**
+	 * A new file's transmissions: the voiced track's if it is open, else the newest open track's,
+	 * else the owner's, then every other open track's (each read while its transmission is open).
+	 */
+	private fileTxIds(s: Session): string[] {
+		const txOf = this.deps.txOf
+		if (txOf === undefined) return []
+		const open: string[] = []
+		for (const [id, a] of s.activity) if (a.open) open.push(id)
+		const voice =
+			s.voiceTx !== null && open.includes(s.voiceTx) ? s.voiceTx : null
+		const ids: string[] = []
+		for (const obs of [voice ?? open.at(-1) ?? s.owner, ...open]) {
+			if (ids.length >= ANALOG_FILE_TX_MAX) break
+			const tx = txOf(obs)
+			if (tx !== null && !ids.includes(tx)) ids.push(tx)
+		}
+		return ids
+	}
+
+	/** A track that opened or joined during the session's open file: its transmission is the file's too. */
+	private noteFileTx(s: Session, observationId: string): void {
+		const file = s.file
+		const txOf = this.deps.txOf
+		if (
+			file === null ||
+			file.endSample !== null ||
+			txOf === undefined ||
+			file.txIds.length >= ANALOG_FILE_TX_MAX
+		)
+			return
+		const tx = txOf(observationId)
+		if (tx !== null && !file.txIds.includes(tx)) file.txIds.push(tx)
+	}
+
 	private noteActivity(
 		s: Session,
 		observationId: string,
@@ -3641,6 +3698,7 @@ export class WidebandAnalogRecorder {
 			last: track.lastSample,
 			open: true,
 		})
+		this.noteFileTx(s, observationId)
 		if (s.activity.size <= WIDEBAND_MAX_ACTIVITY) return
 		for (const [id, a] of s.activity)
 			if (!a.open) {
@@ -5021,6 +5079,7 @@ export class WidebandAnalogRecorder {
 					// The file's CTCSS answer and what its bank was fed (toneFrames), both frozen in
 					// finishFile: the session's later activity never reached this file's bank.
 					...toneFactOf(file.toneHz, file.toneCoverage),
+					...(file.txIds.length > 0 ? { txIds: [...file.txIds] } : {}),
 				})
 				.catch(() => undefined)
 		}
