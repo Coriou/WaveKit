@@ -102,6 +102,26 @@
 		background: var(--wk-well-glass);
 		border-color: var(--wk-line-14);
 	}
+	/* "Tune as centre": label left, switch right, as a settings row. */
+	.wkf-save-centre {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-text-2);
+	}
+	.wkf-saved-editing {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 6px 4px 8px 0;
+	}
+	.wkf-saved-editing .wkf-save-centre {
+		padding-left: 6px;
+	}
 	.wkf-save-actions {
 		display: flex;
 		gap: 8px;

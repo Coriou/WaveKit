@@ -67,7 +67,8 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with
-  the revision token and core's error bodies, preference patches, `operator-data:snapshot` on subscribe and
+  the revision token and core's error bodies (a 400 or 428 names the failing field in `fields`; the
+  mock's `expected` text for a schema failure points at the API docs instead of core's per-field text), preference patches, `operator-data:snapshot` on subscribe and
   `operator-data:updated` after each change. Seeds are `MOCK_SAVED_FREQUENCIES` in `data.ts`.
   A real legacy core answers 404 there; the web app then says saved frequencies are unavailable.
 - Exception: the Settings routes (`settings.ts`, registered from one marked block in `server.ts`)

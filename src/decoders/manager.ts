@@ -2302,6 +2302,25 @@ export class DecoderManager extends EventEmitter {
 		})
 	}
 
+	/**
+	 * Why a runtime `channelsHz` list would not place channels for this decoder, or null when
+	 * it would (or the decoder is unknown). Only catalogue decoders and YAML decoders with
+	 * `useChannelizer: true` get channel placements; any other decoder keeps one raw placement
+	 * at the capture centre, so a list patched onto it would be stored and never decoded.
+	 */
+	channelListRefusal(id: string): string | null {
+		const state = this.decoders.get(id)
+		if (!state) return null
+		const config = state.effectiveConfig ?? state.originalConfig ?? state.config
+		const catalogue =
+			this.config.enablement?.isCatalogue(config) === true ||
+			this.config.enablement?.isCatalogue(
+				state.originalConfig ?? state.config,
+			) === true
+		if (catalogue || config.useChannelizer === true) return null
+		return "this decoder does not use channel placements (useChannelizer is not true)"
+	}
+
 	private configuredChannels(
 		config: DecoderConfig,
 		centreHz: number | undefined,

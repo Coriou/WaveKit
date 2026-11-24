@@ -164,6 +164,50 @@ describe("operator-data transitions", () => {
 
 	// Feature: operator-data, Property 3: CAS isolation
 	// Validates: Requirements 3.1, 3.2, 3.3
+	it("treats the centre flag as part of a saved frequency and rejects explicit undefined", () => {
+		const ctx = context()
+		const created = create(createEmptySnapshot(storeId), ctx, {
+			...frequency,
+			centre: true,
+		})
+		const id = created.savedFrequencyId!
+		expect(created.snapshot.savedFrequencies[0]?.centre).toBe(true)
+		expect(validateSnapshot(created.snapshot)).toEqual(created.snapshot)
+		const same = transition(
+			created.snapshot,
+			{
+				type: "replace-saved-frequency",
+				expected: snapshotToken(created.snapshot),
+				id,
+				frequency: { ...frequency, centre: true },
+			},
+			ctx,
+		)
+		expect(same.changed).toBe(false)
+		const cleared = transition(
+			created.snapshot,
+			{
+				type: "replace-saved-frequency",
+				expected: snapshotToken(created.snapshot),
+				id,
+				frequency: { ...frequency, centre: false },
+			},
+			ctx,
+		)
+		expect(cleared.changed).toBe(true)
+		expect(cleared.snapshot.revision).toBe(created.snapshot.revision + 1)
+		expect(cleared.snapshot.savedFrequencies[0]?.centre).toBe(false)
+		fail(
+			() =>
+				parseMutation({
+					type: "create-saved-frequency",
+					expected: snapshotToken(created.snapshot),
+					frequency: { ...frequency, centre: undefined },
+				}),
+			"OPERATOR_DATA_INVALID",
+		)
+	})
+
 	it("simulates serialized competing CAS writes and rejects stale no-ops before lookup", () => {
 		fc.assert(
 			fc.property(fc.boolean(), choice => {

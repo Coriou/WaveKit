@@ -18,6 +18,16 @@ export interface OperatorDataRoutesOptions {
 	): DeniedAdmission | undefined
 }
 
+/** The path id: a saved frequency's id as the snapshot lists it. */
+const SAVED_FREQUENCY_ID_TEXT =
+	"a saved frequency id (lowercase UUID) from snapshot.savedFrequencies of GET /api/operator-data"
+
+function invalid(field: string, expected: string): OperatorDataError {
+	return new OperatorDataError("OPERATOR_DATA_INVALID", undefined, [
+		{ field, expected },
+	])
+}
+
 function routeMutation(
 	request: FastifyRequest,
 	type: OperatorDataMutation["type"],
@@ -25,10 +35,12 @@ function routeMutation(
 	withId: boolean,
 ): OperatorDataMutation {
 	const body: unknown = request.body
+	// Only the server's own key names are listed, never a key the client sent.
+	const listed = keys.join(", ")
 	if (typeof body !== "object" || body === null || Array.isArray(body))
-		throw new OperatorDataError("OPERATOR_DATA_INVALID")
+		throw invalid("body", `a JSON object with the fields ${listed}`)
 	if (Object.keys(body).some(key => !keys.includes(key)))
-		throw new OperatorDataError("OPERATOR_DATA_INVALID")
+		throw invalid("body", `only the fields ${listed}`)
 	let id: string | undefined
 	if (withId) {
 		const params: unknown = request.params
@@ -37,7 +49,7 @@ function routeMutation(
 				? Reflect.get(params, "id")
 				: undefined,
 		)
-		if (!result.success) throw new OperatorDataError("OPERATOR_DATA_INVALID")
+		if (!result.success) throw invalid("id", SAVED_FREQUENCY_ID_TEXT)
 		id = result.data
 	}
 	// Only allowed body keys enter canonical validation; server fields are never copied.
@@ -67,7 +79,11 @@ export const operatorDataRoutes: FastifyPluginAsync<
 					statusCode >= 400 &&
 					statusCode < 500
 				)
-					classified = new OperatorDataError("OPERATOR_DATA_INVALID")
+					// A parser failure never repeats the parser's message (it can quote the body).
+					classified = invalid(
+						"body",
+						"a JSON document (Content-Type: application/json) holding one object",
+					)
 			}
 		} catch {
 			classified = undefined

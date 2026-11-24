@@ -51,6 +51,7 @@ import {
 	toApiDecoderStatus,
 } from "../serializers/decoder-status.js"
 import { decoderOptionDescriptors } from "../../decoders/options/index.js"
+import { isPatchableOption } from "../../decoders/settings/patch-policy.js"
 import { WaveKitError } from "../../utils/errors.js"
 import type { DeniedAdmission } from "../../access/types.js"
 import {
@@ -273,8 +274,37 @@ function settingsShapeFields(body: unknown): ValidationField[] {
 	return fields
 }
 
+/** Option keys that place a VFO-channel decoder; only `channelsHz` (absolute Hz) is runtime-patchable. */
+const PLACEMENT_KEYS: ReadonlySet<string> = new Set(["channelHz", "offsetHz"])
+
+/** The keys a decoder of `type` can change at runtime (the patch policy's own rule). */
+function patchableKeys(type: string | undefined): string[] {
+	if (type === undefined) return []
+	return (decoderOptionDescriptors(type) ?? [])
+		.map(d => d.key)
+		.filter(key => isPatchableOption(type, key))
+}
+
+/**
+ * What a refused key's field says: not changeable at runtime, and what is. A refused rate-plan
+ * key that places the channel (channelHz, offsetHz) points at `channelsHz` where the type has it.
+ */
+function notPatchableExpected(type: string | undefined, key: string): string {
+	const keys = patchableKeys(type)
+	const alternative =
+		PLACEMENT_KEYS.has(key) && keys.includes("channelsHz")
+			? "; to move the channel of a decoder with useChannelizer: true in the config (or a catalogue decoder) set channelsHz (absolute channel centres in Hz) instead; otherwise change it in the config file"
+			: ""
+	return keys.length > 0
+		? `not changeable at runtime (set it in the config file)${alternative}; runtime-changeable options of this decoder: ${keys.join(", ")}`
+		: "not changeable at runtime (set it in the config file); GET /api/decoders/:id/settings marks the options that are"
+}
+
 /** `fields` for a settings 400: option issues by documented path, else the body. */
-function settingsFields(error: DecoderSettingsError): ValidationField[] {
+function settingsFields(
+	error: DecoderSettingsError,
+	type?: string,
+): ValidationField[] {
 	const fields = new Map<string, string>()
 	for (const issue of error.issues ?? []) {
 		// An unknown key's path is the client's key: name the options object instead.
@@ -294,21 +324,56 @@ function settingsFields(error: DecoderSettingsError): ValidationField[] {
 				"a value of the documented option type and bounds (GET /api/decoders/:id/settings)",
 			)
 	}
-	if (fields.size === 0 && error.code === "DECODER_OPTION_NOT_PATCHABLE")
+	// Refused keys are documented option names (the policy never lists an unknown key).
+	if (error.code === "DECODER_OPTION_NOT_PATCHABLE")
+		for (const key of error.keys ?? [])
+			fields.set(`options.${key}`, notPatchableExpected(type, key))
+	if (
+		error.code === "DECODER_OPTION_NOT_PATCHABLE" &&
+		(fields.size === 0 || (error.unknownKeys ?? 0) > 0)
+	) {
+		const keys = patchableKeys(type)
 		fields.set(
 			"options",
-			"only options this decoder can change at runtime (GET /api/decoders/:id/settings marks them)",
+			keys.length > 0
+				? `only options this decoder can change at runtime: ${keys.join(", ")}`
+				: "only options this decoder can change at runtime (GET /api/decoders/:id/settings marks them)",
 		)
+	}
 	if (fields.size === 0) fields.set("body", SETTINGS_BODY_EXPECTED)
 	return [...fields].map(([field, expected]) => ({ field, expected }))
 }
 
 /** A settings error body; a 400 also names its fields. */
-function settingsErrorBody(error: DecoderSettingsError): object {
+function settingsErrorBody(error: DecoderSettingsError, type?: string): object {
 	const body = error.toBody()
 	return error.statusCode === 400
-		? { ...body, fields: settingsFields(error) }
+		? { ...body, fields: settingsFields(error, type) }
 		: body
+}
+
+/**
+ * The patch names channels: a non-empty `channelsHz` array of positive Hz values, for a type
+ * that documents the option. A revert (null), an empty list and a malformed value fall through
+ * to the settings service, which validates them; a type without the option gets the normal
+ * patch-policy answer.
+ */
+function setsChannelList(body: unknown, type: string | undefined): boolean {
+	if (type === undefined) return false
+	if (!(decoderOptionDescriptors(type) ?? []).some(d => d.key === "channelsHz"))
+		return false
+	if (typeof body !== "object" || body === null) return false
+	const options: unknown = Reflect.get(body, "options")
+	if (typeof options !== "object" || options === null) return false
+	if (!Object.hasOwn(options, "channelsHz")) return false
+	const channels: unknown = Reflect.get(options, "channelsHz")
+	return (
+		Array.isArray(channels) &&
+		channels.length > 0 &&
+		channels.every(
+			(hz: unknown) => typeof hz === "number" && Number.isFinite(hz) && hz > 0,
+		)
+	)
 }
 
 const StartBodySchema = z
@@ -1364,6 +1429,42 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 							: settingsErrorBody(err),
 					)
 				}
+				const type = settings.view(id)?.type
+				// A channel list on a decoder without channel placements would be stored and the
+				// decoder would keep decoding the capture centre: refuse it and name the supported
+				// ways. A stale If-Match is answered first (412, as the settings service would), so
+				// the client re-reads before fixing anything else; the service checks the revision
+				// again under its write lock.
+				const refusal = setsChannelList(body, type)
+					? decoderManager.channelListRefusal(id)
+					: null
+				if (
+					refusal &&
+					ifMatch !== undefined &&
+					ifMatch !== settings.revision()
+				) {
+					const err = new DecoderSettingsError(
+						"DECODER_SETTINGS_REVISION_MISMATCH",
+						"Decoder settings revision does not match",
+					)
+					return sendJson(reply, err.statusCode, settingsErrorBody(err, type))
+				}
+				if (refusal) {
+					const err = new DecoderSettingsError(
+						"DECODER_OPTION_NOT_PATCHABLE",
+						`channelsHz cannot be set at runtime here: ${refusal}`,
+						{ keys: ["channelsHz"], unknownKeys: 0 },
+					)
+					return sendJson(reply, err.statusCode, {
+						...err.toBody(),
+						fields: [
+							{
+								field: "options.channelsHz",
+								expected: `${refusal}; to decode a channel list set useChannelizer: true with channelsHz on this decoder in the YAML config, or use the activity slots`,
+							},
+						],
+					})
+				}
 				try {
 					const result = await settings.update(
 						id,
@@ -1377,7 +1478,11 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					)
 				} catch (error) {
 					if (error instanceof DecoderSettingsError)
-						return sendJson(reply, error.statusCode, settingsErrorBody(error))
+						return sendJson(
+							reply,
+							error.statusCode,
+							settingsErrorBody(error, type),
+						)
 					request.log.error(
 						{ err: safeErrorFields(error) },
 						"decoder settings update failed",

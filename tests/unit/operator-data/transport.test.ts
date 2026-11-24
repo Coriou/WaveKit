@@ -247,10 +247,42 @@ describe("operator-data pure transport mappings", () => {
 					...(code === "OPERATOR_DATA_CONFLICT"
 						? { details: { current: { storeId, revision: 1 } } }
 						: {}),
+					// A 400 or 428 always names what to send, even without a field of its own.
+					...(code === "OPERATOR_DATA_INVALID" ||
+					code === "OPERATOR_DATA_PRECONDITION_REQUIRED"
+						? {
+								fields: [
+									expect.objectContaining({ field: expect.any(String) }),
+								],
+							}
+						: {}),
 				},
 			})
 		},
 	)
+
+	it("copies only well-formed fields and never a tampered one", () => {
+		const error = new OperatorDataError("OPERATOR_DATA_INVALID", undefined, [
+			{
+				field: "frequency.frequencyHz",
+				expected: "integer (1 to 100000000000), Hz",
+			},
+		])
+		expect(toOperatorDataErrorResponse(error).body.fields).toEqual([
+			{
+				field: "frequency.frequencyHz",
+				expected: "integer (1 to 100000000000), Hz",
+			},
+		])
+		Object.assign(error, { fields: [{ field: 1, expected: "secret value" }] })
+		const tampered = toOperatorDataErrorResponse(error).body
+		expect(tampered.fields).toHaveLength(1)
+		expect(JSON.stringify(tampered)).not.toContain("secret")
+		const busy = new OperatorDataError("OPERATOR_DATA_BUSY", undefined, [
+			{ field: "body", expected: "x" },
+		])
+		expect(toOperatorDataErrorResponse(busy).body).not.toHaveProperty("fields")
+	})
 
 	it("includes only validated detached current tokens for conflicts", () => {
 		const error = new OperatorDataError("OPERATOR_DATA_CONFLICT", {

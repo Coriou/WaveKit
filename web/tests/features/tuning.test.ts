@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import type { LiveAudioStatus, TunerState } from "@wavekit/api-types"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
@@ -10,8 +10,13 @@ import {
 	tuneContext,
 	TuningController,
 	captureOf,
+	tuneTo,
 	type TuneContext,
 } from "../../src/features/tuning.ts"
+import {
+	recallSaved,
+	recallTuneOptions,
+} from "../../src/features/tuner/saved.ts"
 import { fakeSockets } from "../data/fake-socket.ts"
 
 const ctx = (over: Partial<TuneContext> = {}): TuneContext => ({
@@ -141,6 +146,58 @@ describe("tuneContext", () => {
 	})
 })
 
+describe("tuneTo with the centre already on the target", () => {
+	const fake = (sweep: "running" | null) => {
+		const tune = vi.fn(async () => {})
+		const setConfig = vi.fn(async () => {})
+		const data = {
+			tuner: {
+				state: () =>
+					({
+						sourceId: "pi",
+						frequency: 161_500_000,
+						sampleRate: 2_400_000,
+					}) as TunerState,
+				tune,
+			},
+			liveAudio: {
+				get: () => ({
+					status: {
+						sourceId: "pi",
+						config: { bandwidth: 12_500, offsetHz: 100_000 },
+					} as LiveAudioStatus,
+				}),
+				setConfig,
+			},
+			scanner: { get: () => ({ sweep: sweep ? { state: sweep } : null }) },
+		} as unknown as Parameters<typeof tuneTo>[0]
+		return { data, tune, setConfig }
+	}
+
+	it("a sweep has the receiver: the tuner is written even on the centre, so the scan pauses", async () => {
+		const f = fake("running")
+		await tuneTo(f.data, 161_500_000)
+		expect(f.tune).toHaveBeenCalledWith(161_500_000, "pi")
+	})
+
+	it.each([["asked to recentre", null, { recentre: true }]])(
+		"%s: only the offset resets, the tuner is not written (no pause for nothing)",
+		async (_label, sweep, options) => {
+			const f = fake(sweep)
+			const plan = await tuneTo(f.data, 161_500_000, options)
+			expect(plan).toEqual({ kind: "offset", hz: 161_500_000, offsetHz: 0 })
+			expect(f.tune).not.toHaveBeenCalled()
+			expect(f.setConfig).toHaveBeenCalledWith({ offsetHz: 0 })
+		},
+	)
+
+	it("a sweep still recentres onto a target off the centre", async () => {
+		const f = fake("running")
+		await tuneTo(f.data, 161_700_000)
+		expect(f.tune).toHaveBeenCalledWith(161_700_000, "pi")
+	})
+})
+
 describe("TuningController against the mock core", () => {
 	let server: MockServer
 	let data: DataLayer
@@ -198,6 +255,105 @@ describe("TuningController against the mock core", () => {
 		// 161.0 recentred; 161.15 is then inside the window: one offset PATCH, 161.1 skipped
 		expect(data.tuner.state()?.frequency).toBe(161_000_000)
 		expect(data.liveAudio.get().status?.config.offsetHz).toBe(150_000)
+	})
+
+	it("a saved frequency recalled in Click to tune Centre recentres the receiver, Free only moves the channel", async () => {
+		const tuning = new TuningController(data)
+		const saved = {
+			frequencyHz: 0,
+			mode: "nfm" as const,
+			bandwidthHz: 12_500,
+			tone: { kind: "none" as const },
+		}
+		const ports = (clickTuning: "free" | "centre") => ({
+			config: () => data.liveAudio.get().status?.config,
+			setConfig: (patch: Parameters<typeof data.liveAudio.setConfig>[0]) =>
+				data.liveAudio.setConfig(patch),
+			tune: (hz: number) => tuning.tune(hz, recallTuneOptions(clickTuning)),
+		})
+		await tuning.tune(161_500_000)
+		const centre = data.tuner.state()?.frequency ?? 0
+		// A band-middle bookmark well inside the capture.
+		const inside = { ...saved, frequencyHz: centre + 300_000 }
+		await recallSaved(ports("free"), inside)
+		expect(data.tuner.state()?.frequency).toBe(centre)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(300_000)
+
+		await recallSaved(ports("centre"), inside)
+		expect(data.tuner.state()?.frequency).toBe(centre + 300_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
+		expect(tuning.displayHz()).toBe(centre + 300_000)
+	})
+
+	it("a saved frequency marked centre recentres even in Free; the setting alone decides otherwise", async () => {
+		expect(recallTuneOptions("free", { centre: true })).toEqual({
+			recentre: true,
+		})
+		expect(recallTuneOptions("free", { centre: false })).toEqual({})
+		expect(recallTuneOptions("free", {})).toEqual({})
+		expect(recallTuneOptions("centre", { centre: false })).toEqual({
+			recentre: true,
+		})
+		const tuning = new TuningController(data)
+		await tuning.tune(161_500_000)
+		const centre = data.tuner.state()?.frequency ?? 0
+		const marked = {
+			frequencyHz: centre + 250_000,
+			mode: "nfm" as const,
+			bandwidthHz: 12_500,
+			tone: { kind: "none" as const },
+			centre: true,
+		}
+		await recallSaved(
+			{
+				config: () => data.liveAudio.get().status?.config,
+				setConfig: patch => data.liveAudio.setConfig(patch),
+				tune: hz => tuning.tune(hz, recallTuneOptions("free", marked)),
+			},
+			marked,
+		)
+		expect(data.tuner.state()?.frequency).toBe(centre + 250_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
+	})
+
+	it("a centreHz tune restores an earlier centre and offset exactly", async () => {
+		const tuning = new TuningController(data)
+		await tuning.tune(161_500_000, { recentre: true })
+		await tuning.tune(161_150_000)
+		expect(data.tuner.state()?.frequency).toBe(161_500_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(-350_000)
+		await tuning.tune(161_300_000, { recentre: true })
+		expect(data.tuner.state()?.frequency).toBe(161_300_000)
+		await tuning.tune(161_150_000, { centreHz: 161_500_000 })
+		expect(data.tuner.state()?.frequency).toBe(161_500_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(-350_000)
+		expect(tuning.displayHz()).toBe(161_150_000)
+	})
+
+	it("a centreHz tune past that centre's usable span tunes by the usual rule, never an out-of-span offset", async () => {
+		const tuning = new TuningController(data)
+		await tuning.tune(161_300_000, { recentre: true })
+		// 8.5 MHz from the asked centre: no offset reaches it from there.
+		await tuning.tune(170_000_000, { centreHz: 161_500_000 })
+		expect(data.tuner.state()?.frequency).toBe(170_000_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
+		expect(tuning.displayHz()).toBe(170_000_000)
+		// Inside the asked centre's span but past its usable edge (the capture's last 10 %): the same.
+		const rate = data.tuner.state()?.sampleRate ?? 0
+		const edge = 161_500_000 + rate / 2 - 1_000
+		await tuning.tune(edge, { centreHz: 161_500_000 })
+		expect(data.tuner.state()?.frequency).toBe(edge)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
+	})
+
+	it("the latest coalesced target keeps its own recentre option", async () => {
+		const tuning = new TuningController(data)
+		await tuning.tune(161_500_000)
+		const first = tuning.tune(161_000_000)
+		void tuning.tune(161_100_000, { recentre: true })
+		await first
+		expect(data.tuner.state()?.frequency).toBe(161_100_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
 	})
 
 	it("keeps the core's error and clears the target", async () => {

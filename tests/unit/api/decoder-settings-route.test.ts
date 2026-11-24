@@ -494,6 +494,12 @@ describe("protected PATCH", () => {
 							},
 						]
 					: [
+							// Each refused (documented) key is named with what to do instead.
+							{
+								field: "options.mode",
+								expected:
+									"not changeable at runtime (set it in the config file); GET /api/decoders/:id/settings marks the options that are",
+							},
 							{
 								field: "options",
 								expected:

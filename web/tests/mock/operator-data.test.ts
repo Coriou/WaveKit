@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import WebSocket from "ws"
+import { z } from "zod"
 import {
 	operatorDataErrorDtoSchema,
 	operatorDataReadDtoSchema,
@@ -12,6 +13,13 @@ import type {
 } from "@wavekit/api-types"
 import { MOCK_SAVED_FREQUENCIES } from "../../mock/data.ts"
 import { buildMockServer } from "../../mock/server.ts"
+import {
+	EXPECTED_TOKEN_TEXT as MOCK_EXPECTED_TOKEN_TEXT,
+	INVALID_FALLBACK as MOCK_INVALID_FALLBACK,
+	mockIssueField,
+} from "../../mock/operator-data.ts"
+import { EXPECTED_TOKEN_TEXT as CORE_EXPECTED_TOKEN_TEXT } from "../../../src/operator-data/schema.ts"
+import { INVALID_FALLBACK as CORE_INVALID_FALLBACK } from "../../../src/operator-data/transport.ts"
 import type { MockServer } from "../../mock/server.ts"
 
 const harbour: SavedFrequencyInput = {
@@ -105,6 +113,55 @@ describe("mock operator data REST", () => {
 		expect(d.snapshot.revision).toBe(expected.revision + 3)
 	})
 
+	it("round-trips the per-bookmark centre flag as core does", async () => {
+		const before = await read()
+		const expected = {
+			storeId: before.snapshot.storeId,
+			revision: before.snapshot.revision,
+		}
+		const created = await send("POST", "/api/operator-data/saved-frequencies", {
+			expected,
+			frequency: { ...harbour, centre: true },
+		})
+		expect(created.statusCode).toBe(201)
+		const c = operatorDataWriteDtoSchema.parse(created.json())
+		const id = c.savedFrequencyId ?? ""
+		expect(c.snapshot.savedFrequencies.find(f => f.id === id)?.centre).toBe(
+			true,
+		)
+		expect(
+			(await read()).snapshot.savedFrequencies.find(f => f.id === id)?.centre,
+		).toBe(true)
+		const cleared = await send(
+			"PUT",
+			`/api/operator-data/saved-frequencies/${id}`,
+			{
+				expected: { ...expected, revision: c.snapshot.revision },
+				frequency: harbour,
+			},
+		)
+		expect(cleared.statusCode).toBe(200)
+		const r = operatorDataWriteDtoSchema.parse(cleared.json())
+		expect(r.snapshot.revision).toBe(c.snapshot.revision + 1)
+		expect(
+			Object.hasOwn(
+				r.snapshot.savedFrequencies.find(f => f.id === id)!,
+				"centre",
+			),
+		).toBe(false)
+		const bad = await send("POST", "/api/operator-data/saved-frequencies", {
+			expected: { ...expected, revision: r.snapshot.revision },
+			frequency: { ...harbour, centre: "yes" },
+		})
+		expect(bad.statusCode).toBe(400)
+		const deleted = await send(
+			"DELETE",
+			`/api/operator-data/saved-frequencies/${id}`,
+			{ expected: { ...expected, revision: r.snapshot.revision } },
+		)
+		expect(deleted.statusCode).toBe(200)
+	})
+
 	it("answers core's error codes and bodies", async () => {
 		const dto = await read()
 		const token = {
@@ -123,11 +180,24 @@ describe("mock operator data REST", () => {
 		})
 		const missing = await send("POST", url, { frequency: harbour })
 		expect(missing.statusCode).toBe(428)
+		// As core: a 428 and a 400 name the field and what it takes.
+		expect(missing.json()).toMatchObject({
+			code: "OPERATOR_DATA_PRECONDITION_REQUIRED",
+			fields: [
+				{
+					field: "expected",
+					expected: expect.stringContaining("storeId, revision"),
+				},
+			],
+		})
 		const invalid = await send("POST", url, {
 			expected: token,
 			frequency: { ...harbour, mode: "raw" },
 		})
-		expect(invalid.json()).toMatchObject({ code: "OPERATOR_DATA_INVALID" })
+		expect(invalid.json()).toMatchObject({
+			code: "OPERATOR_DATA_INVALID",
+			fields: [{ field: "frequency.bandwidthHz" }],
+		})
 		expect(invalid.statusCode).toBe(400)
 		const extra = await send("POST", url, {
 			expected: token,
@@ -135,6 +205,11 @@ describe("mock operator data REST", () => {
 			id: "x",
 		})
 		expect(extra.statusCode).toBe(400)
+		expect(extra.json()).toMatchObject({
+			fields: [
+				{ field: "body", expected: "only the fields expected, frequency" },
+			],
+		})
 		const gone = await send(
 			"DELETE",
 			`${url}/00000000-0000-4000-8000-000000000000`,
@@ -205,5 +280,31 @@ describe("mock operator data WebSocket", () => {
 			"Harbour",
 		)
 		socket.close()
+	})
+})
+
+describe("mock operator data hint texts", () => {
+	it("match core's hint texts word for word", () => {
+		expect(MOCK_EXPECTED_TOKEN_TEXT).toBe(CORE_EXPECTED_TOKEN_TEXT)
+		expect(MOCK_INVALID_FALLBACK).toEqual(CORE_INVALID_FALLBACK)
+	})
+})
+
+describe("mock operator data field paths", () => {
+	it("walks the schema as core does: client keys are * or cut, never echoed", () => {
+		const schema = z
+			.object({
+				named: z.object({ inner: z.string() }).strict(),
+				map: z.record(z.object({ hz: z.number() })),
+				list: z.array(z.object({ hz: z.number() })).optional(),
+			})
+			.strict()
+		const key = "s3ntinelKEYzq"
+		expect(mockIssueField(schema, ["named", "inner"])).toBe("named.inner")
+		expect(mockIssueField(schema, ["map", key, "hz"])).toBe("map.*.hz")
+		expect(mockIssueField(schema, ["list", 3, "hz"])).toBe("list.3.hz")
+		expect(mockIssueField(schema, ["named", key])).toBe("named")
+		expect(mockIssueField(schema, [key])).toBe("body")
+		expect(mockIssueField(schema, [])).toBe("body")
 	})
 })
