@@ -232,6 +232,51 @@ describe("TuningController against the mock core", () => {
 		expect(tuning.displayHz()).toBe(centre + 300_000)
 	})
 
+	it("a saved frequency marked centre recentres even in Free; the setting alone decides otherwise", async () => {
+		expect(recallTuneOptions("free", { centre: true })).toEqual({
+			recentre: true,
+		})
+		expect(recallTuneOptions("free", { centre: false })).toEqual({})
+		expect(recallTuneOptions("free", {})).toEqual({})
+		expect(recallTuneOptions("centre", { centre: false })).toEqual({
+			recentre: true,
+		})
+		const tuning = new TuningController(data)
+		await tuning.tune(161_500_000)
+		const centre = data.tuner.state()?.frequency ?? 0
+		const marked = {
+			frequencyHz: centre + 250_000,
+			mode: "nfm" as const,
+			bandwidthHz: 12_500,
+			tone: { kind: "none" as const },
+			centre: true,
+		}
+		await recallSaved(
+			{
+				config: () => data.liveAudio.get().status?.config,
+				setConfig: patch => data.liveAudio.setConfig(patch),
+				tune: hz => tuning.tune(hz, recallTuneOptions("free", marked)),
+			},
+			marked,
+		)
+		expect(data.tuner.state()?.frequency).toBe(centre + 250_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
+	})
+
+	it("a centreHz tune restores an earlier centre and offset exactly", async () => {
+		const tuning = new TuningController(data)
+		await tuning.tune(161_500_000, { recentre: true })
+		await tuning.tune(161_150_000)
+		expect(data.tuner.state()?.frequency).toBe(161_500_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(-350_000)
+		await tuning.tune(161_300_000, { recentre: true })
+		expect(data.tuner.state()?.frequency).toBe(161_300_000)
+		await tuning.tune(161_150_000, { centreHz: 161_500_000 })
+		expect(data.tuner.state()?.frequency).toBe(161_500_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(-350_000)
+		expect(tuning.displayHz()).toBe(161_150_000)
+	})
+
 	it("the latest coalesced target keeps its own recentre option", async () => {
 		const tuning = new TuningController(data)
 		await tuning.tune(161_500_000)

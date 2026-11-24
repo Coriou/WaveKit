@@ -29,6 +29,7 @@ import { modeSpec } from "../tuner/modes.ts"
 import { recallSaved, recallTuneOptions, saveInput } from "../tuner/saved.ts"
 import { devicePrefsStore } from "../../shell/device-prefs.ts"
 import { modulationOf } from "../tuner/modes.ts"
+import { tuneContext } from "../tuning.ts"
 import { bandAt } from "../../data/bandplan-store.ts"
 import { promptInstall } from "../../pwa/pwa.ts"
 import type { ActivityToken, PaletteAction, Preview } from "./model.ts"
@@ -164,7 +165,17 @@ export async function runAction(
 			case "recall": {
 				const before = s.tuning.displayHz()
 				const config = s.data.liveAudio.get().status?.config
-				const how = recallTuneOptions(devicePrefsStore.getState().clickTuning)
+				const how = recallTuneOptions(
+					devicePrefsStore.getState().clickTuning,
+					action.saved,
+				)
+				// A recentring recall moves the hardware: its undo puts back that centre and offset.
+				const prior = tuneContext(
+					s.data.tuner.state(),
+					s.data.liveAudio.get().status ?? null,
+				)
+				const undoHow =
+					how.recentre === true && prior ? { centreHz: prior.centreHz } : {}
 				await recallSaved(
 					{
 						config: () => s.data.liveAudio.get().status?.config,
@@ -187,7 +198,7 @@ export async function runAction(
 												bandwidth: config.bandwidth,
 											})
 											.catch(() => undefined)
-									void s.tuning.tune(before, how)
+									void s.tuning.tune(before, undoHow)
 								},
 							}
 						: {}),

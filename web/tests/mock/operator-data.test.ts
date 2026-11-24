@@ -13,7 +13,13 @@ import type {
 } from "@wavekit/api-types"
 import { MOCK_SAVED_FREQUENCIES } from "../../mock/data.ts"
 import { buildMockServer } from "../../mock/server.ts"
-import { mockIssueField } from "../../mock/operator-data.ts"
+import {
+	EXPECTED_TOKEN_TEXT as MOCK_EXPECTED_TOKEN_TEXT,
+	INVALID_FALLBACK as MOCK_INVALID_FALLBACK,
+	mockIssueField,
+} from "../../mock/operator-data.ts"
+import { EXPECTED_TOKEN_TEXT as CORE_EXPECTED_TOKEN_TEXT } from "../../../src/operator-data/schema.ts"
+import { INVALID_FALLBACK as CORE_INVALID_FALLBACK } from "../../../src/operator-data/transport.ts"
 import type { MockServer } from "../../mock/server.ts"
 
 const harbour: SavedFrequencyInput = {
@@ -105,6 +111,55 @@ describe("mock operator data REST", () => {
 		const d = deleted.json<OperatorDataWriteDto>()
 		expect(d.snapshot.savedFrequencies.some(f => f.id === id)).toBe(false)
 		expect(d.snapshot.revision).toBe(expected.revision + 3)
+	})
+
+	it("round-trips the per-bookmark centre flag as core does", async () => {
+		const before = await read()
+		const expected = {
+			storeId: before.snapshot.storeId,
+			revision: before.snapshot.revision,
+		}
+		const created = await send("POST", "/api/operator-data/saved-frequencies", {
+			expected,
+			frequency: { ...harbour, centre: true },
+		})
+		expect(created.statusCode).toBe(201)
+		const c = operatorDataWriteDtoSchema.parse(created.json())
+		const id = c.savedFrequencyId ?? ""
+		expect(c.snapshot.savedFrequencies.find(f => f.id === id)?.centre).toBe(
+			true,
+		)
+		expect(
+			(await read()).snapshot.savedFrequencies.find(f => f.id === id)?.centre,
+		).toBe(true)
+		const cleared = await send(
+			"PUT",
+			`/api/operator-data/saved-frequencies/${id}`,
+			{
+				expected: { ...expected, revision: c.snapshot.revision },
+				frequency: harbour,
+			},
+		)
+		expect(cleared.statusCode).toBe(200)
+		const r = operatorDataWriteDtoSchema.parse(cleared.json())
+		expect(r.snapshot.revision).toBe(c.snapshot.revision + 1)
+		expect(
+			Object.hasOwn(
+				r.snapshot.savedFrequencies.find(f => f.id === id)!,
+				"centre",
+			),
+		).toBe(false)
+		const bad = await send("POST", "/api/operator-data/saved-frequencies", {
+			expected: { ...expected, revision: r.snapshot.revision },
+			frequency: { ...harbour, centre: "yes" },
+		})
+		expect(bad.statusCode).toBe(400)
+		const deleted = await send(
+			"DELETE",
+			`/api/operator-data/saved-frequencies/${id}`,
+			{ expected: { ...expected, revision: r.snapshot.revision } },
+		)
+		expect(deleted.statusCode).toBe(200)
 	})
 
 	it("answers core's error codes and bodies", async () => {
@@ -225,6 +280,13 @@ describe("mock operator data WebSocket", () => {
 			"Harbour",
 		)
 		socket.close()
+	})
+})
+
+describe("mock operator data hint texts", () => {
+	it("match core's hint texts word for word", () => {
+		expect(MOCK_EXPECTED_TOKEN_TEXT).toBe(CORE_EXPECTED_TOKEN_TEXT)
+		expect(MOCK_INVALID_FALLBACK).toEqual(CORE_INVALID_FALLBACK)
 	})
 })
 

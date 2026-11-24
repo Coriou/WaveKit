@@ -25,7 +25,6 @@ import {
 	toOperatorDataWriteDto,
 } from "../../../src/operator-data/transport.js"
 import type * as transport from "../../../src/operator-data/transport.js"
-import { parseErrorBody } from "./error-body.js"
 
 const storeId = "00000000-0000-4000-8000-000000000001"
 const id = "abcdefab-1234-4000-8000-abcdefabcdef"
@@ -231,8 +230,10 @@ describe("canonical public operator-data contract", () => {
 			expect(response.statusCode).toBe(
 				publicContract.OPERATOR_DATA_ERROR_DEFINITIONS[code][0],
 			)
-			// `fields` (400 and 428 only) is read by parseErrorBody; the rest is the strict DTO.
-			expect(parseErrorBody(response.body)).toEqual(response.body)
+			// The strict public DTO covers `fields` (400 and 428 only) too.
+			expect(
+				publicContract.operatorDataErrorDtoSchema.parse(response.body),
+			).toEqual(response.body)
 			expect(Object.hasOwn(response.body, "fields")).toBe(
 				code === "OPERATOR_DATA_INVALID" ||
 					code === "OPERATOR_DATA_PRECONDITION_REQUIRED",
@@ -273,6 +274,52 @@ describe("canonical public operator-data contract", () => {
 			).toBe(false)
 		},
 	)
+
+	it("allows error fields on 400 and 428 only, bounded and strict", () => {
+		const fields = [
+			{ field: "frequency.name", expected: "1 to 128 characters" },
+		]
+		for (const code of publicContract.operatorDataErrorCodeSchema.options) {
+			const body = {
+				error: "OperatorDataError",
+				code,
+				message: publicContract.OPERATOR_DATA_ERROR_DEFINITIONS[code][1],
+				fields,
+			}
+			const result = publicContract.operatorDataErrorDtoSchema.safeParse(body)
+			const allowed =
+				code === "OPERATOR_DATA_INVALID" ||
+				code === "OPERATOR_DATA_PRECONDITION_REQUIRED"
+			expect(result.success).toBe(allowed)
+			if (!result.success)
+				expect(result.error.issues).toContainEqual(
+					expect.objectContaining({
+						path: ["fields"],
+						message: "Fields only on 400 and 428",
+					}),
+				)
+		}
+		const invalid = {
+			error: "OperatorDataError",
+			code: "OPERATOR_DATA_INVALID",
+			message:
+				publicContract.OPERATOR_DATA_ERROR_DEFINITIONS.OPERATOR_DATA_INVALID[1],
+		}
+		for (const bad of [
+			[],
+			Array.from({ length: 9 }, () => fields[0]),
+			[{ field: "x".repeat(129), expected: "y" }],
+			[{ field: "x", expected: "y".repeat(513) }],
+			[{ field: "x", expected: "y", value: "secret" }],
+			undefined,
+		])
+			expect(
+				publicContract.operatorDataErrorDtoSchema.safeParse({
+					...invalid,
+					fields: bad,
+				}).success,
+			).toBe(false)
+	})
 
 	it("accepts conflict responses without details when internal tokens are absent or malformed", () => {
 		for (const current of [

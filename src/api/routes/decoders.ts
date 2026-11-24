@@ -1429,10 +1429,23 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				}
 				const type = settings.view(id)?.type
 				// A channel list this core could not place would be stored and silently decode
-				// the capture centre instead: refuse it and say why.
+				// the capture centre instead: refuse it and say why. A stale If-Match is answered
+				// first (412, as the settings service would), so the client re-reads before fixing
+				// anything else; the service checks the revision again under its write lock.
 				const refusal = setsChannelList(body, type)
 					? decoderManager.channelListRefusal(id)
 					: null
+				if (
+					refusal &&
+					ifMatch !== undefined &&
+					ifMatch !== settings.revision()
+				) {
+					const err = new DecoderSettingsError(
+						"DECODER_SETTINGS_REVISION_MISMATCH",
+						"Decoder settings revision does not match",
+					)
+					return sendJson(reply, err.statusCode, settingsErrorBody(err, type))
+				}
 				if (refusal) {
 					const err = new DecoderSettingsError(
 						"DECODER_OPTION_NOT_PATCHABLE",

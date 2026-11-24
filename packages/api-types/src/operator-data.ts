@@ -87,10 +87,12 @@ const frequencyFields = (normalize: boolean) => ({
 	bandwidthHz: z.number().int().min(0).max(10_000_000),
 	tone: toneSchema,
 	group: textSchema(64, normalize).optional(),
+	centre: z.boolean().optional(),
 })
 function validateFrequency(
 	value: {
 		group?: string | undefined
+		centre?: boolean | undefined
 		mode: z.infer<typeof modeSchema>
 		bandwidthHz: number
 		tone: z.infer<typeof toneSchema>
@@ -102,6 +104,12 @@ function validateFrequency(
 			code: "custom",
 			path: ["group"],
 			message: "Explicit undefined is not a group",
+		})
+	if (Object.hasOwn(value, "centre") && value.centre === undefined)
+		ctx.addIssue({
+			code: "custom",
+			path: ["centre"],
+			message: "Explicit undefined is not a centre flag",
 		})
 	if ((value.mode === "raw") !== (value.bandwidthHz === 0))
 		ctx.addIssue({
@@ -519,6 +527,18 @@ const errorDtoObjectSchema = z
 		code: operatorDataErrorCodeSchema,
 		message: z.string(),
 		details: z.object({ current: expectedTokenSchema }).strict().optional(),
+		fields: z
+			.array(
+				z
+					.object({
+						field: z.string().max(128),
+						expected: z.string().max(512),
+					})
+					.strict(),
+			)
+			.min(1)
+			.max(8)
+			.optional(),
 	})
 	.strict()
 export const operatorDataErrorDtoSchema = errorDtoObjectSchema.superRefine(
@@ -540,6 +560,17 @@ export const operatorDataErrorDtoSchema = errorDtoObjectSchema.superRefine(
 				code: "custom",
 				path: ["details"],
 				message: "Only conflict token details are allowed",
+			})
+		if (
+			Object.hasOwn(value, "fields") &&
+			(value.fields === undefined ||
+				(value.code !== "OPERATOR_DATA_INVALID" &&
+					value.code !== "OPERATOR_DATA_PRECONDITION_REQUIRED"))
+		)
+			ctx.addIssue({
+				code: "custom",
+				path: ["fields"],
+				message: "Fields only on 400 and 428",
 			})
 		return true
 	},

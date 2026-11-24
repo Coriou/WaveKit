@@ -81,13 +81,11 @@ function knownCode(code: unknown): code is OperatorDataErrorCode {
 	}
 }
 
-/** An error body: the canonical DTO, plus `fields` on a 400 or 428 (the shape of every other route's 400). */
-export type OperatorDataErrorBody = OperatorDataErrorDto & {
-	fields?: ValidationField[]
-}
+/** An error body: the canonical DTO, whose `fields` (400 and 428 only) has the shape of every other route's 400. */
+export type OperatorDataErrorBody = OperatorDataErrorDto
 
 /** A 400 whose cause has no field of its own (an internal check) still names what to send. */
-const INVALID_FALLBACK: ValidationField = {
+export const INVALID_FALLBACK: Readonly<ValidationField> = {
 	field: "body",
 	expected:
 		"a valid operator-data request: see docs/API.md, operator data, for each route's body",

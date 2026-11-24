@@ -3658,11 +3658,11 @@ patch `channelsHz`, the absolute channel centres in Hz. Naming channels in
 does: after its next start it decodes one channel per entry (its
 `targetFrequenciesHz` lists them). Entries outside the capture or the decoder's
 band are dropped, and a decoder with none in view is left unplaced (it used to read
-the raw capture at its centre). A core without the channelizer, without decoder
-placements, or whose channelizer cannot serve the decoder's source cannot place
-them, so a PATCH that sets `channelsHz` there is refused with
+the raw capture at its centre). A core without the channelizer or without decoder
+placements cannot place them, so a PATCH that sets `channelsHz` there is refused with
 `DECODER_OPTION_NOT_PATCHABLE` (`keys: ["channelsHz"]`, the reason in `fields`)
-instead of being stored and decoding the capture centre. A type without the
+instead of being stored and decoding the capture centre; a stale `If-Match` is answered
+412 `DECODER_SETTINGS_REVISION_MISMATCH` first. A type without the
 `channelsHz` option (acarsdec, readsb) gets the usual answer for an undocumented
 key. A string `gain` (readsb,
 dumpvdl2) and options an adapter does not use (acarsdec `gain`, dumpvdl2 `ppm`)
@@ -6892,7 +6892,11 @@ usage that every paired browser shares, stored in the state directory.
 
 - `GET /api/operator-data`: the whole store.
 - `POST /api/operator-data/saved-frequencies`, `PUT` and `DELETE
-/api/operator-data/saved-frequencies/:id`: manage saved frequencies.
+/api/operator-data/saved-frequencies/:id`: manage saved frequencies. A saved frequency is
+  `{ name, frequencyHz, mode, bandwidthHz, tone, group?, centre? }`; `centre: true` ("Tune as
+  centre") asks clients to recentre the receiver on it when recalled, whatever their Click to tune
+  setting. Leave it out for no preference (`false` is stored as sent); changing it is a change
+  like any other field and moves the revision.
 - `PATCH /api/operator-data/preferences`: change preferences.
 - `POST` and `DELETE /api/operator-data/command-usage`: record or reset command-palette
   usage.
@@ -6906,9 +6910,9 @@ Writes take the normal protected mutation admission (session, CSRF, Origin). The
 Every write sends `expected`, the token of the snapshot it is based on:
 `{ "storeId": snapshot.storeId, "revision": snapshot.revision }` from
 `GET /api/operator-data`. Error bodies are `{ error: "OperatorDataError", code,
-message, details?, fields? }`. A 400 `OPERATOR_DATA_INVALID` and a 428
-`OPERATOR_DATA_PRECONDITION_REQUIRED` (no `expected`) carry `fields: [{ field,
-expected }]`, the same shape as every other route's 400: the field that failed
+message, details?, fields? }`, all in the strict `operatorDataErrorDtoSchema`. A 400
+`OPERATOR_DATA_INVALID` and a 428 `OPERATOR_DATA_PRECONDITION_REQUIRED` (no `expected`) carry
+`fields: [{ field, expected }]` (1 to 8 entries; no other code has `fields`), the same shape as every other route's 400: the field that failed
 (`expected`, `frequency`, `frequency.bandwidthHz`, `set.units`, the path `id`,
 or `body` for the body as a whole) and what it accepts, never a submitted value.
 A 409 `OPERATOR_DATA_CONFLICT` carries `details.current`, the token to retry with.

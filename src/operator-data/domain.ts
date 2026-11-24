@@ -85,6 +85,7 @@ function sameFrequency(
 		a.mode === b.mode &&
 		a.bandwidthHz === b.bandwidthHz &&
 		a.group === b.group &&
+		a.centre === b.centre &&
 		JSON.stringify(a.tone) === JSON.stringify(b.tone)
 	)
 }

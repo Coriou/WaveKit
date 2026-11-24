@@ -139,13 +139,17 @@ async function setup({
 		authorizeSettings: () => undefined,
 	})
 	await app.ready()
-	const patch = (options: Record<string, unknown>) =>
+	const patch = (
+		options: Record<string, unknown>,
+		headers: Record<string, string> = {},
+	) =>
 		app.inject({
 			method: "PATCH",
 			url: "/api/decoders/voice",
 			payload: { options },
+			headers,
 		})
-	return { manager, provider, patch }
+	return { manager, provider, patch, settings }
 }
 
 interface Field {
@@ -203,6 +207,27 @@ it.each([
 	},
 )
 
+it("a stale If-Match is a 412 before the channel-list refusal; the current revision gets the refusal", async () => {
+	const f = await setup({ channelizer: false })
+	const current = f.settings.revision()
+	const stale = await f.patch(
+		{ channelsHz: CHANNELS },
+		{ "if-match": `"${current + 1}"` },
+	)
+	expect(stale.statusCode).toBe(412)
+	expect(stale.json<{ code: string }>().code).toBe(
+		"DECODER_SETTINGS_REVISION_MISMATCH",
+	)
+	const fresh = await f.patch(
+		{ channelsHz: CHANNELS },
+		{ "if-match": `"${current}"` },
+	)
+	expect(fresh.statusCode).toBe(400)
+	expect(fresh.json<{ code: string }>().code).toBe(
+		"DECODER_OPTION_NOT_PATCHABLE",
+	)
+})
+
 it("offsetHz stays a config-file key and its refusal names channelsHz and the patchable keys", async () => {
 	const f = await setup()
 	for (const key of ["offsetHz", "channelHz"]) {
@@ -224,7 +249,9 @@ it("offsetHz stays a config-file key and its refusal names channelsHz and the pa
 	)
 })
 
-it("the refusal checks the decoder's own source: a source the channelizer cannot serve refuses channelsHz", async () => {
+// Guards a seam: today channelizerAvailableFor answers for every source alike; the refusal must
+// still ask about the decoder's own source once it answers per source.
+it("the refusal asks the per-source seam about the decoder's own source", async () => {
 	const f = await setup()
 	const available = vi
 		.spyOn(

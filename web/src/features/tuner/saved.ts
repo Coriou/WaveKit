@@ -67,6 +67,17 @@ export function saveInput(
 	return input
 }
 
+/** The input with "Tune as centre" set (`centre: true`) or cleared (the field left out, as core stores "off"). */
+export function withCentre(
+	input: SavedFrequencyInput,
+	centre: boolean,
+): SavedFrequencyInput {
+	const next = { ...input }
+	if (centre) next.centre = true
+	else delete next.centre
+	return next
+}
+
 /** "12.5 kHz" etc. without the trailing unit noise for RAW. */
 function widthText(f: Pick<SavedFrequency, "mode" | "bandwidthHz">): string {
 	return f.mode === "raw" ? "no filter" : formatWidth(f.bandwidthHz)
@@ -141,10 +152,16 @@ export interface RecallPorts {
 /**
  * How a recall tunes, from Display › Click to tune: "Centre" makes every tune recentre the receiver on
  * the frequency (as the spectrum's own recall does); "Free" moves the listening channel inside the
- * capture and recentres only past its usable edge (DESIGN.md "Spectrum interaction").
+ * capture and recentres only past its usable edge (DESIGN.md "Spectrum interaction"). A saved frequency
+ * marked "Tune as centre" (`centre: true`) always recentres, whatever the setting.
  */
-export function recallTuneOptions(clickTuning: ClickTuning): TuneOptions {
-	return clickTuning === "centre" ? { recentre: true } : {}
+export function recallTuneOptions(
+	clickTuning: ClickTuning,
+	f?: Pick<SavedFrequency, "centre">,
+): TuneOptions {
+	return clickTuning === "centre" || f?.centre === true
+		? { recentre: true }
+		: {}
 }
 
 /**

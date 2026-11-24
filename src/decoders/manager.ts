@@ -2325,7 +2325,11 @@ export class DecoderManager extends EventEmitter {
 		return null
 	}
 
-	/** Whether the channelizer can serve channels of `sourceId` (the planner's per-source `channelizerAvailable`). */
+	/**
+	 * Whether the channelizer can serve channels of `sourceId` (the planner's per-source
+	 * `channelizerAvailable`). A seam: today one channelizer serves every source, so this is true
+	 * whenever a channelizer is attached; a per-source answer belongs here.
+	 */
 	private channelizerAvailableFor(_sourceId: string): boolean {
 		return this.channelizer !== null
 	}

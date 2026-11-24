@@ -631,6 +631,87 @@ describe("palette: running rows", async () => {
 		expect(down.text).toContain("once data returns")
 	})
 
+	it("a recall under Centre undoes to the earlier centre and offset, not a recentre", async () => {
+		const { devicePrefsStore } = await import("../../src/shell/device-prefs.ts")
+		const prefsBefore = devicePrefsStore.getState().clickTuning
+		const calls: unknown[] = []
+		const services = {
+			data: {
+				tuner: {
+					state: () => ({
+						sourceId: "rtl-0",
+						frequency: 161_500_000,
+						sampleRate: 2_400_000,
+					}),
+				},
+				liveAudio: {
+					get: () => ({
+						status: {
+							sourceId: "rtl-0",
+							config: config({ offsetHz: -350_000 }),
+						},
+					}),
+					setConfig: async (p: unknown) => void calls.push(["audio", p]),
+				},
+			},
+			tuning: {
+				displayHz: () => 161_150_000,
+				tune: async (hz: number, o: unknown) =>
+					void calls.push(["tune", hz, o]),
+				get: () => ({ error: null }),
+			},
+		}
+		const saved = {
+			id: "00000000-0000-4000-8000-000000000009",
+			name: "Inside",
+			frequencyHz: 161_800_000,
+			mode: "nfm" as const,
+			bandwidthHz: 12_500,
+			tone: { kind: "none" as const },
+			createdAt: "2026-01-01T00:00:00.000Z",
+			updatedAt: "2026-01-01T00:00:00.000Z",
+		}
+		try {
+			devicePrefsStore.set({ clickTuning: "centre" })
+			const r = await runAction(
+				services as never,
+				{ kind: "recall", saved } as never,
+				"Tuned",
+			)
+			expect(calls.at(-1)).toEqual(["tune", 161_800_000, { recentre: true }])
+			r.undo?.()
+			expect(calls.at(-1)).toEqual([
+				"tune",
+				161_150_000,
+				{ centreHz: 161_500_000 },
+			])
+			// Free, with no centre flag: the undo tunes back by the usual rule.
+			devicePrefsStore.set({ clickTuning: "free" })
+			const free = await runAction(
+				services as never,
+				{ kind: "recall", saved } as never,
+				"Tuned",
+			)
+			free.undo?.()
+			expect(calls.at(-1)).toEqual(["tune", 161_150_000, {}])
+			// A saved frequency marked centre recentres in Free too, and undoes the same way.
+			const marked = await runAction(
+				services as never,
+				{ kind: "recall", saved: { ...saved, centre: true } } as never,
+				"Tuned",
+			)
+			expect(calls.at(-1)).toEqual(["tune", 161_800_000, { recentre: true }])
+			marked.undo?.()
+			expect(calls.at(-1)).toEqual([
+				"tune",
+				161_150_000,
+				{ centreHz: 161_500_000 },
+			])
+		} finally {
+			devicePrefsStore.set({ clickTuning: prefsBefore })
+		}
+	})
+
 	it("sets the theme with Undo", async () => {
 		const before = themeStore.getState()
 		const f = fakes()

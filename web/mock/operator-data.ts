@@ -42,12 +42,12 @@ interface MockField {
 	expected: string
 }
 
-/** Core's `expected` hint (src/operator-data/schema.ts EXPECTED_TOKEN_TEXT). */
-const EXPECTED_TOKEN_TEXT =
+/** Core's `expected` hint (src/operator-data/schema.ts EXPECTED_TOKEN_TEXT; a parity test keeps them equal). */
+export const EXPECTED_TOKEN_TEXT =
 	"object with fields storeId, revision: the snapshot.storeId and snapshot.revision of GET /api/operator-data"
 
-/** Core's fallback when a 400 has no field of its own (src/operator-data/transport.ts). */
-const INVALID_FALLBACK: MockField = {
+/** Core's fallback when a 400 has no field of its own (src/operator-data/transport.ts; parity-tested). */
+export const INVALID_FALLBACK: Readonly<MockField> = {
 	field: "body",
 	expected:
 		"a valid operator-data request: see docs/API.md, operator data, for each route's body",
@@ -200,7 +200,7 @@ function sendFailure(reply: FastifyReply, failure: OperatorFailure) {
 			: failure.code === "OPERATOR_DATA_PRECONDITION_REQUIRED"
 				? [{ field: "expected", expected: `required; ${EXPECTED_TOKEN_TEXT}` }]
 				: []
-	const body: OperatorDataErrorDto & { fields?: MockField[] } = {
+	const body: OperatorDataErrorDto = {
 		error: "OperatorDataError",
 		code: failure.code,
 		message: OPERATOR_DATA_ERROR_DEFINITIONS[failure.code][1],

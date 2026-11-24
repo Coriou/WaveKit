@@ -119,6 +119,31 @@ export interface TuneOptions {
 	 * "Centre": "every tune recentres the receiver"). The plot's tuneTo reads the same setting.
 	 */
 	recentre?: boolean
+	/**
+	 * Put the hardware centre here and reach the frequency by the live-audio offset: an undo that
+	 * restores an earlier centre and offset exactly. Without an offset (no live audio, or a scan owns
+	 * the receiver) the frequency is tuned as usual.
+	 */
+	centreHz?: number
+}
+
+/** Moves the hardware centre to `centreHz` (when it is elsewhere), then the offset onto `target`. */
+async function restoreCentre(
+	data: TuningData,
+	ctx: TuneContext,
+	target: number,
+	centreHz: number,
+	sourceId: string,
+): Promise<TunePlan> {
+	const moved = ctx.centreHz !== centreHz
+	if (moved) await data.tuner.tune(centreHz, sourceId)
+	const offsetHz = target - centreHz
+	const current = data.liveAudio.get().status?.config.offsetHz ?? 0
+	if (current !== offsetHz) await data.liveAudio.setConfig({ offsetHz })
+	if (offsetHz !== 0) return { kind: "offset", hz: target, offsetHz }
+	return moved
+		? { kind: "recentre", hz: target, centreHz, offsetHz: 0 }
+		: { kind: "none", hz: target }
 }
 
 /** Plans against the current state and applies. Rejects with the API error. */
@@ -132,6 +157,14 @@ export async function tuneTo(
 	if (!tuner || !ctx) throw new Error("No tuner source")
 	const scanning = scanHasReceiver(data.scanner?.get().sweep)
 	const target = Math.round(hz)
+	if (options.centreHz !== undefined && ctx.offsetAvailable && !scanning)
+		return restoreCentre(
+			data,
+			ctx,
+			target,
+			Math.round(options.centreHz),
+			tuner.sourceId,
+		)
 	// Asked to recentre, a frequency already reached by offset still moves the centre onto it.
 	const plan: TunePlan =
 		options.recentre === true && ctx.centreHz !== target
