@@ -96,14 +96,12 @@ function table(): Map<number, number> {
 	return map
 }
 
-/** Packed reading (code | INVERTED) of a register, or NONE. */
-function readRegister(
-	map: Map<number, number>,
-	reg: number,
+/** Packed reading (code | INVERTED) of a register's two table entries, or NONE. */
+function readEntries(
+	normal: number | undefined,
+	inverted: number | undefined,
 	standard: boolean,
 ): number {
-	const normal = map.get(reg)
-	const inverted = map.get(~reg & MASK23)
 	if (standard) {
 		if (normal !== undefined && (normal & 0x3ff) !== 0)
 			return (normal & 0x3ff) - 1
@@ -188,6 +186,17 @@ export class DcsDecoder {
 	private candidateWord = 0
 	private hits = 0
 	private confirmed = NONE
+	/** Samples pushed (sampleCount). */
+	private samples = 0
+	/** Most consecutive matching words any chain reached (longestChain). */
+	private bestHits = 0
+	/** Word chains started (loneHitCount). */
+	private loneHits = 0
+	/** Any-valid-word side chain (anyValidChain): its last hit's bit, register and length. */
+	private anyBit = 0
+	private anyWord = 0
+	private anyHits = 0
+	private bestAnyHits = 0
 
 	constructor(options?: { codeSet?: DcsCodeSet }) {
 		this.standard = (options?.codeSet ?? DCS_CODE_SET) === "standard"
@@ -213,6 +222,7 @@ export class DcsDecoder {
 	}
 
 	pushSample(sample: number): void {
+		this.samples += 1
 		const x = Number.isFinite(sample) ? sample : 0
 		// Section A (direct form II transposed; b2 = b0).
 		const ya = this.lb0 * x + this.s1a
@@ -279,6 +289,48 @@ export class DcsDecoder {
 		return this.candidate === NONE ? 0 : this.hits
 	}
 
+	/** Samples pushed since construction or the last reset (8 kHz). Does not affect `result()`. */
+	sampleCount(): number {
+		return this.samples
+	}
+
+	/**
+	 * The most consecutive matching words (`wordHits()`) any chain reached since construction or
+	 * the last reset, whether or not it confirmed: 1 for a lone hit, DCS_MIN_WORDS or more once a
+	 * code confirmed. Does not affect `result()`.
+	 */
+	longestChain(): number {
+		return this.bestHits
+	}
+
+	/**
+	 * Word chains started since construction or the last reset: every register that matched a
+	 * valid word while no chain was pending (wordHits() = 1), whether or not the chain went on.
+	 * Noise or voice hits by chance about once per 13 s (DCS_CHANCE_HIT_SECONDS in
+	 * recording-facts.ts); a DCS code too broken to chain still hits many times a second. Does not
+	 * affect `result()`.
+	 */
+	loneHitCount(): number {
+		return this.loneHits
+	}
+
+	/**
+	 * The most consecutive words any chain of valid Golay words reached since construction or the
+	 * last reset, whatever the code set (a non-standard code too, which `result()` never reports
+	 * under DCS_CODE_SET "standard"): the same register, a rotation of any of the 512 words or of
+	 * a complement, exactly 23 bits after the previous one. Those are 4 094 distinct registers
+	 * (the code is cyclic, so rotations of one word are often other words), p ≈ 4 094 / 2^23 ≈
+	 * 4.9e-4 per bit for a random register, and then the same register 23 bits later with p =
+	 * 2^-23: a chance chain of 2 starts with p ≈ 5.8e-11 per bit, ≈ 7.8e-9 per second at
+	 * 134.4 bit/s (once in about 4 years of audio). No pattern of one or two runs of ones is a
+	 * valid word (the code's minimum weight is 7, its complement's too), so the long runs a sliced
+	 * voice gives never hit. Does not affect `result()`; it adds no table lookup (the same two
+	 * entries the reading uses) and a few integer operations per bit.
+	 */
+	anyValidChain(): number {
+		return this.bestAnyHits
+	}
+
 	result(): AnalogTransmissionDcs | null {
 		return this.confirmed === NONE ? null : toDcs(this.confirmed)
 	}
@@ -303,6 +355,13 @@ export class DcsDecoder {
 		this.candidateWord = 0
 		this.hits = 0
 		this.confirmed = NONE
+		this.samples = 0
+		this.bestHits = 0
+		this.loneHits = 0
+		this.anyBit = 0
+		this.anyWord = 0
+		this.anyHits = 0
+		this.bestAnyHits = 0
 	}
 
 	private pushBit(bit: number, quiet: boolean): void {
@@ -314,15 +373,17 @@ export class DcsDecoder {
 			this.register = ((this.register >>> 1) | (bit << 22)) & MASK23
 			if (this.filled < WORD_BITS) this.filled += 1
 		}
-		const reading =
-			this.filled === WORD_BITS
-				? readRegister(this.map, this.register, this.standard)
-				: NONE
+		const full = this.filled === WORD_BITS
+		const normal = full ? this.map.get(this.register) : undefined
+		const inverted = full ? this.map.get(~this.register & MASK23) : undefined
+		this.trackAnyValid(normal !== undefined || inverted !== undefined)
+		const reading = full ? readEntries(normal, inverted, this.standard) : NONE
 		if (this.candidate !== NONE) {
 			if (this.bitIndex - this.candidateBit < WORD_BITS) return
 			// Check point: exactly 23 bits after the previous hit.
 			if (reading === this.candidate && this.register === this.candidateWord) {
 				this.hits += 1
+				if (this.hits > this.bestHits) this.bestHits = this.hits
 				this.candidateBit = this.bitIndex
 				if (this.hits >= DCS_MIN_WORDS) this.confirmed = reading
 				return
@@ -335,5 +396,26 @@ export class DcsDecoder {
 		this.candidateBit = this.bitIndex
 		this.candidateWord = this.register
 		this.hits = 1
+		this.loneHits += 1
+		if (this.bestHits < 1) this.bestHits = 1
+	}
+
+	/** The anyValidChain side chain: the same confirmation rule as the reading's, any valid word. */
+	private trackAnyValid(valid: boolean): void {
+		if (this.anyHits > 0) {
+			if (this.bitIndex - this.anyBit < WORD_BITS) return
+			if (valid && this.register === this.anyWord) {
+				this.anyHits += 1
+				if (this.anyHits > this.bestAnyHits) this.bestAnyHits = this.anyHits
+				this.anyBit = this.bitIndex
+				return
+			}
+			this.anyHits = 0
+		}
+		if (!valid) return
+		this.anyBit = this.bitIndex
+		this.anyWord = this.register
+		this.anyHits = 1
+		if (this.bestAnyHits < 1) this.bestAnyHits = 1
 	}
 }

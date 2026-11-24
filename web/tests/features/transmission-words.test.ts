@@ -40,6 +40,16 @@ describe("tone words", () => {
 		expect(toneText({ kind: "dcs", code: "023" })).toBe("DCS 023")
 		expect(toneText({ kind: "dcs", code: "23" })).toBe("DCS 023")
 		expect(toneText({ kind: "dcs", code: "7" })).toBe("DCS 007")
+		// the polarity the core stores: normal says none, inverted says so
+		expect(toneText({ kind: "dcs", code: "023", polarity: "normal" })).toBe(
+			"DCS 023",
+		)
+		expect(toneText({ kind: "dcs", code: "023", polarity: "inverted" })).toBe(
+			"DCS 023 inverted",
+		)
+		expect(toneText({ kind: "dcs", code: "023", polarity: "up" })).toBe(
+			"Not measured",
+		)
 		expect(toneText(null)).toBe("No tone heard")
 		expect(toneText(undefined)).toBe("Not measured")
 	})
@@ -107,9 +117,22 @@ describe("tone words", () => {
 		expect(toneRow({ ...base, state: "none", ctcssHz: null }).value).toBe(
 			"No tone heard",
 		)
-		expect(toneRow({ ...base, state: "none", ctcssHz: null }).hint).toMatch(
-			/DCS/,
-		)
+		// the recorder checks DCS codes: its stored null needs no DCS hint
+		expect(toneRow({ ...base, state: "none", ctcssHz: null }).hint).toBeNull()
+		expect(
+			toneRow({
+				...base,
+				ctcssHz: null,
+				dcs: { code: "023", polarity: "inverted" },
+			}),
+		).toEqual({ value: "DCS 023 inverted", hint: null })
+		expect(
+			toneRow({
+				...base,
+				ctcssHz: null,
+				dcs: { code: "023", polarity: "normal" },
+			}),
+		).toEqual({ value: "DCS 023", hint: null })
 		const notMeasured = {
 			...base,
 			state: "not-measured" as const,
@@ -152,8 +175,24 @@ describe("tone words", () => {
 		})
 		expect(recorderTone(facts({ kind: "dcs", code: "23" }))).toMatchObject({
 			state: "heard",
-			dcs: { code: "023" },
+			dcs: { code: "023", polarity: null },
 		})
+		// the stored polarity reaches the Tone row
+		const inverted = recorderTone(
+			facts({ kind: "dcs", code: "023", polarity: "inverted" }),
+			"content",
+		)
+		expect(inverted).toMatchObject({
+			state: "heard",
+			dcs: { code: "023", polarity: "inverted" },
+		})
+		expect(toneRow(inverted).value).toBe("DCS 023 inverted")
+		expect(
+			recorderTone(
+				facts({ kind: "dcs", code: "023", polarity: "normal" }),
+				"content",
+			),
+		).toMatchObject({ dcs: { code: "023", polarity: "normal" } })
 		expect(recorderTone(facts({ kind: "ctcss", hz: "x" }))).toMatchObject({
 			state: "not-measured",
 			why: "malformed",
