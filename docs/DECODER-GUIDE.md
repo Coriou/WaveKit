@@ -666,8 +666,79 @@ describe("HfdlDecoder", () => {
    after that one has run 20 s, at most 6 times a minute per source, and never one that is
    receiving. A dsd-fme channel must also have been heard for at least 10 s before it may
    replace a running one: two energy observations at least 10 s apart (one transmission of
-   10 s or more, or two transmissions 10 s apart) within the last 120 s, so a single short
-   burst never moves a slot; free slots still fill at once. dsd-fme also considers
+   10 s or more, or two transmissions 10 s apart) within the last 120 s, or a burst pair: a
+   burst of 1 to 60 s, then at least a minute of silence, then a new burst 2 to 15 minutes
+   after the first one began (it counts for 120 s). A steady carrier never makes a burst
+   pair. A single short burst never moves a slot, but a site heard in 3 s bursts every few
+   minutes still gets in; free slots still fill at once.
+   dsd-fme ranks its extra channels by evidence. A channel is remembered after a checked
+   (CRC/FEC-clean) dsd-fme sync on it, for 6 hours whatever runs or retunes in between;
+   only those 6 hours ever forget the sync. For 30 minutes after its last sync a remembered
+   channel is held: it ranks first and keeps its slot between bursts, even while its
+   dsd-fme process is not running (a restart, for example). A remembered channel decays
+   once dsd-fme listened to it for 60 minutes without a sync, or for 10 minutes while it
+   had energy (listened means a dsd-fme process ran on it with the source connected, from
+   2 s after the start). Quiet runs alone do not count against it, so a site that bursts
+   every half hour stays remembered; a decayed channel still remembers its sync, ranks
+   ahead of unknown channels, and any new sync restores it. A remembered channel that comes
+   back live takes a slot at once, without the 10 s rule, so a 2 to 5 s DMR burst is
+   caught: it replaces an unknown, analog or no-sync channel at once, a quiet remembered
+   one past its 20 s, and even a held one that is not receiving and has had no sync for a
+   minute. A channel that is held or remembered (not decayed) also replaces a decayed
+   one that is receiving once that one's run passed 20 s without a sync (a channel that
+   once carried a digital call and is now busy analog never pins the slot). When several
+   slots may go, a busy unknown channel still inside its first 20 s (a new site's trial)
+   is replaced only after every quiet held or remembered one. A live return may happen
+   twice in 30 minutes without a sync in between; after that a burst
+   there waits until those 30 minutes have passed (so a false sync costs at most 4 such
+   moves an hour). A decayed channel returns live this way once: when that run ends
+   without a sync it has no live return until its next sync (it can still enter through
+   the trial token below). Two of the 6 moves a minute are always kept for these live returns:
+   the other moves stop once only 2 of the 6 moves of the last 60 s are left (the moves
+   already made in that window count, whatever their kind), so a busy minute of other
+   moves never uses those 2.
+   Then come channels the scanner identified as digital voice (no sync here yet), then
+   channels it knows nothing about, then analog. An unknown or decayed channel that is
+   receiving now enters an occupied slot through the trial token (a silent one waits for
+   its next transmission), which has two lanes per source and decoder: a
+   channel never tried uses the fresh lane, at most once every 5 minutes; a channel that
+   failed before uses the retry lane, at most once every 10 minutes. So channels that keep
+   failing never hold up a new site (among unknown and decayed channels, those never tried
+   go first, then the fewest failures, then the one tried longest ago; remembered channels
+   keep their rank). A site that failed once and later decays uses the retry lane for up to
+   6 hours (its failures are kept 6 hours after its last try). It replaces only an analog or no-sync channel, a quiet
+   one that ranks below it, or a remembered channel past its hold that is quiet with no
+   sync for 2 minutes. With at least two extra dsd-fme channels per source all held, a busy
+   unknown channel receiving now and not tried in the last 30 minutes may take the lowest-ranked held one
+   without a sync for 2 minutes (one per planning pass; never with a single extra
+   channel). A channel with a burst pair that is receiving now gets a burst trial, with the
+   same two lanes on their own times (never tried: at most one per 5 minutes; failed
+   before: at most one per 10 minutes, and only once its last try is 30 minutes old), into any slot but a held one with a sync in the last 2 minutes, a
+   receiving remembered one, or a receiving unknown. A decayed channel whose run passed
+   20 s without a sync counts as a no-sync channel when it is the one replaced. A channel
+   is analog while the scanner classed it analog FM (voice or tone, within 15 minutes);
+   a run of 20 s without a checked sync (20 s of a connected source: a disconnect or a
+   reconnect less than 20 s ago never counts) on a channel that is not remembered, or is
+   decayed, puts it in a cooldown of 2, 4, 8, 16, then at most 32 minutes, counted from the
+   end of that run; its failures are kept 6 hours after its last try. Analog channels fill
+   a free slot only when no other channel waits, and an analog channel never replaces
+   another analog one, except one try per source and decoder every 32 minutes (at most
+   1.875 an hour): the scanner-analog channel tried least recently, so a DMR channel that
+   also carries analog FM is still found. A dsd-fme channel that is replaced is stopped at
+   once (SIGKILL after 1 s if it does not exit; one already stopping is killed 1 s after
+   its stop began, and so is one whose stop is still pending), and its replacement starts
+   after it exited. That 1 s is the latency budget of a live return into a 3 s burst: the
+   replaced channel's SIGTERM to exit is at most 1 s, its last output drained (at most
+   500 ms) inside it; the replaced channels of one planning pass stop one after another,
+   and a live return replaces one; then the replacement's spawn to first sample (at most
+   1 s) and one 360 ms DMR superframe. With the 250 ms change notice and the 100 ms
+   coalescing: 0.25 + 0.1 + 1 + 1 + 0.36 = 2.71 s, inside the 3 s burst; a longer kill
+   delay, or two victims stopped in series before it, would miss it. The replaced channel is
+   never one receiving, but a SIGKILL while dsd-fme still had a per-call WAV recording
+   open can leave that file with stale header sizes, so its listed duration may be short
+   or zero. For one move the gates are tried in the order live return, ranked entry (the
+   trial token), burst trial, then the held-slot entry of a busy unknown. Each placement's `activity.reasons` then also says `digital-memory`,
+   `analog-voice` or `no-sync`. dsd-fme also considers
    scanner-observed energy centres when no explicit decoder channels are configured,
    including channels absent from the protocol band plan, but its extra channels sit only
    inside a digital-voice range of your region's built-in band plan (VHF and UHF land mobile,

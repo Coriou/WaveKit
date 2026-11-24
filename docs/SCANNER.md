@@ -16,6 +16,11 @@ to receive a decoder without a protocol hint or VFO selection. Suggestions remai
 subject to decoder band, passband fit, source ownership and CPU limits; energy alone
 does not verify a protocol. Checked dsd-fme output must pass the existing verification
 and receiver provenance rules. See [decoder activity placement](DECODER-GUIDE.md).
+The scanner also marks each dsd-fme candidate with its evidence: `digital` when a
+digital-voice decode or replay success on that channel is under 6 h old, otherwise
+`analog` when analog FM proof is under 15 min old (at most 512 analog proofs, newest
+kept). The planner uses this to keep digital channels in their slots and to rank
+analog FM voice below unknown carriers.
 
 ## What it does and does not do
 

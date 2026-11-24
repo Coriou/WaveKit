@@ -12,6 +12,7 @@ import {
 	ACTIVITY_HOT_HOLD_MS,
 	ACTIVITY_LIVE_TTL_MS,
 	ACTIVITY_MAX_CANDIDATES,
+	ACTIVITY_MAX_HISTORY,
 	ACTIVITY_MAX_INTERESTS,
 	ACTIVITY_MAX_NOTES,
 	ACTIVITY_MAX_SEGMENTS,
@@ -978,5 +979,147 @@ describe("dsd-fme non-voice decode exclusion", () => {
 			ranker.port.snapshot([q], clock.now())[0]!.channels[0]!.excluded,
 		).toBe(true)
 		ranker.dispose()
+	})
+})
+
+describe("dsd-fme evidence tier", () => {
+	const voice = query({
+		decoderId: "voice",
+		decoderType: "dsd-fme",
+		protocols: ["dmr"],
+		candidatesHz: [CENTRE, CENTRE + RASTER],
+	})
+	const withAnalog = (ageMs: number) =>
+		setup(() => ({
+			decodes: [],
+			successes: [],
+			occupancy: [],
+			analog: [{ hz: CENTRE, ageMs }],
+		}))
+
+	it.each([
+		[0, "analog"],
+		[ACTIVITY_WARM_HOLD_MS - 1, "analog"],
+		[ACTIVITY_WARM_HOLD_MS, undefined],
+		[-1, undefined],
+		[NaN, undefined],
+	] as const)(
+		"analog FM proof aged %s ms gives evidence %s, dsd-fme only",
+		(age, want) => {
+			const { ranker, clock } = withAnalog(age)
+			ranker.ingestEpoch("rtl", "e1", 1)
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			const [c, other] = one(ranker, voice, clock.now()).channels
+			expect(c!.evidence).toBe(want)
+			expect(other!.evidence).toBeUndefined()
+			expect(
+				one(ranker, query({ candidatesHz: [CENTRE] }), clock.now()).channels[0]!
+					.evidence,
+			).toBeUndefined()
+			ranker.dispose()
+		},
+	)
+
+	// A clock-aged proof (made at t0), re-pulled by the block after each jump.
+	const aged = () => {
+		let t0 = 0
+		const f = setup(() => ({
+			decodes: [],
+			successes: [],
+			occupancy: [],
+			analog: [{ hz: CENTRE, ageMs: f.clock.now() - t0 }],
+		}))
+		t0 = f.clock.now()
+		f.ranker.ingestEpoch("rtl", "e1", 1)
+		f.ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+		const at = (dt: number) => {
+			f.clock.advance(t0 + dt - f.clock.now())
+			f.ranker.ingestBlock("rtl", "e1", block([]))
+			return one(f.ranker, voice, f.clock.now()).channels[0]!.evidence
+		}
+		return { ...f, at }
+	}
+
+	it("ages analog evidence out strictly at 15 min after the proof (-1 / 0 / +1 ms)", () => {
+		const f = aged()
+		expect(f.at(ACTIVITY_WARM_HOLD_MS - 1)).toBe("analog")
+		expect(f.at(ACTIVITY_WARM_HOLD_MS)).toBeUndefined()
+		expect(f.at(ACTIVITY_WARM_HOLD_MS + 1)).toBeUndefined()
+		f.ranker.dispose()
+	})
+
+	it.each(["analog", "digital"] as const)(
+		"a multimon-ng query never carries %s evidence (dsd-fme only)",
+		kind => {
+			const { ranker, clock } = withAnalog(0)
+			ranker.ingestEpoch("rtl", "e1", 1)
+			ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+			if (kind === "digital") ranker.noteDecode("rtl", CENTRE, "dmr")
+			const pager = query({
+				decoderId: "pager",
+				decoderType: "multimon-ng",
+				protocols: ["pocsag", "dmr"],
+				candidatesHz: [CENTRE],
+			})
+			expect(one(ranker, pager, clock.now()).channels[0]!).not.toHaveProperty(
+				"evidence",
+			)
+			// The same channel on a dsd-fme query does carry it.
+			expect(one(ranker, voice, clock.now()).channels[0]!.evidence).toBe(kind)
+			ranker.dispose()
+		},
+	)
+
+	it.each(["decode", "trial"] as const)(
+		"a digital-voice %s outranks analog proof and lasts 6 h",
+		kind => {
+			const f = aged()
+			if (kind === "decode") f.ranker.noteDecode("rtl", CENTRE, "dmr")
+			else f.ranker.noteReplayTrial("rtl", CENTRE, "dmr", "success")
+			expect(f.at(0)).toBe("digital")
+			expect(f.at(ACTIVITY_DECODE_WARM_MS - 1)).toBe("digital")
+			f.ranker.dispose()
+			// A non-voice success is no digital evidence.
+			const { ranker: r2, clock: c2 } = setup()
+			r2.ingestEpoch("rtl", "e1", 1)
+			r2.ingestBlock("rtl", "e1", block([CENTRE]))
+			r2.noteReplayTrial("rtl", CENTRE, "pocsag", "success")
+			expect(one(r2, voice, c2.now()).channels[0]!.evidence).toBeUndefined()
+			r2.dispose()
+		},
+	)
+
+	// The ranker keeps the newest ACTIVITY_MAX_HISTORY = 512 analog proofs of a
+	// refresh (smallest age first), not the first 512 it is handed.
+	const bounded = (centreAgeMs: number, far: number) => {
+		const { ranker, clock } = setup(() => ({
+			decodes: [],
+			successes: [],
+			occupancy: [],
+			analog: [
+				...Array.from({ length: far }, () => ({
+					hz: CENTRE + 400_000,
+					ageMs: 1_000,
+				})),
+				{ hz: CENTRE, ageMs: centreAgeMs },
+			],
+		}))
+		ranker.ingestEpoch("rtl", "e1", 1)
+		ranker.ingestBlock("rtl", "e1", block([CENTRE]))
+		const evidence = one(ranker, voice, clock.now()).channels[0]!.evidence
+		ranker.dispose()
+		return evidence
+	}
+
+	it("keeps every analog proof at the 512 bound", () => {
+		// 511 far proofs + CENTRE = 512: all kept, even an older CENTRE proof.
+		expect(bounded(2_000, ACTIVITY_MAX_HISTORY - 1)).toBe("analog")
+	})
+
+	it("past the 512 bound keeps the newest proofs, not the first", () => {
+		// 512 far proofs aged 1 s, then a fresher 513th on CENTRE: it is kept.
+		expect(bounded(0, ACTIVITY_MAX_HISTORY)).toBe("analog")
+		// The same 513th but older than all the others: it is the one dropped.
+		expect(bounded(2_000, ACTIVITY_MAX_HISTORY)).toBeUndefined()
 	})
 })

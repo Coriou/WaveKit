@@ -1,4 +1,5 @@
 import { DECODER_LAST_ERROR_MAX_LENGTH } from "@wavekit/api-types"
+import { REASONS } from "../../decoders/enablement/activity-contract.js"
 import {
 	decoderBandAssessmentSchema,
 	decoderRateAssessmentSchema,
@@ -67,17 +68,11 @@ export const decoderStatusExtensionProperties = {
 						live: { type: "boolean" },
 						reasons: {
 							type: "array",
-							maxItems: 6,
+							// One of each reason at most; the enum is REASONS (activity-contract.ts).
+							maxItems: REASONS.length,
 							items: {
 								type: "string",
-								enum: [
-									"live-energy",
-									"track",
-									"occupancy",
-									"decoded",
-									"trial-success",
-									"trial-backoff",
-								],
+								enum: [...REASONS],
 							},
 						},
 					},
