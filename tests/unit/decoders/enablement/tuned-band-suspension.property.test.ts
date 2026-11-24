@@ -272,9 +272,12 @@ function unlisted(f: Fixture): string | null {
 // Validates: Requirements R2, R3
 // Each run's live prefix waits out a 60 000 ms refusal retry that the real
 // manager re-checks every sample: most of a run's time, all of it manager
-// work. Timeout: 4 132 ms, the slowest run measured under `vitest run
-// tests/unit/decoders --maxWorkers=2`, × 3 = 12 396, so 12 400 ms (the
-// 5 000 ms default timed out in the full suite on 2-core CI runners).
+// work on fake timers, so only host load stretches it. The 100 runs took
+// 4 132 ms under `vitest run tests/unit/decoders --maxWorkers=2` on a quiet
+// host and 18 140 ms alone at load average 91 to 143 on 8 cores (the old
+// 12 400 ms budget timed out there). Scaled to load average 400:
+// 18 140 × 400 / 143 ≈ 50 700 ms; twice that is 101 400, so 120 000 ms. It
+// bounds a hang, never speed.
 it("keeps every efficiency suspension listed by the gate and admits a clean tuned-band decoder within one sample", async () => {
 	await fc.assert(
 		fc.asyncProperty(
@@ -328,4 +331,4 @@ it("keeps every efficiency suspension listed by the gate and admits a clean tune
 		),
 		{ numRuns: 100 },
 	)
-}, 12_400)
+}, 120_000)
