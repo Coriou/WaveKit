@@ -81,6 +81,115 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+/** A Zod schema node as the field walk reads it (by `_def.typeName`, so any Zod copy works). */
+interface ZodNode {
+	_def: {
+		typeName?: string
+		innerType?: ZodNode
+		schema?: ZodNode
+		in?: ZodNode
+		type?: ZodNode
+		valueType?: ZodNode
+		catchall?: ZodNode
+		items?: readonly ZodNode[]
+		options?: readonly ZodNode[] | Map<unknown, ZodNode>
+		left?: ZodNode
+		right?: ZodNode
+		getter?: () => ZodNode
+		shape?: () => Record<string, ZodNode>
+	}
+}
+
+const WRAPPERS = new Set([
+	"ZodOptional",
+	"ZodNullable",
+	"ZodDefault",
+	"ZodCatch",
+	"ZodReadonly",
+	"ZodBranded",
+])
+
+function unwrap(node: ZodNode): ZodNode {
+	let current = node
+	for (let i = 0; i < 16; i++) {
+		const def = current._def
+		const next =
+			def.typeName !== undefined && WRAPPERS.has(def.typeName)
+				? (def.innerType ?? def.type)
+				: def.typeName === "ZodEffects"
+					? def.schema
+					: def.typeName === "ZodPipeline"
+						? def.in
+						: def.typeName === "ZodLazy"
+							? def.getter?.()
+							: undefined
+		if (next === undefined) return current
+		current = next
+	}
+	return current
+}
+
+function options(node: ZodNode): ZodNode[] {
+	const def = node._def
+	if (def.typeName === "ZodUnion" || def.typeName === "ZodDiscriminatedUnion")
+		return def.options instanceof Map
+			? [...def.options.values()]
+			: [...(def.options ?? [])]
+	if (def.typeName === "ZodIntersection")
+		return [def.left, def.right].filter((n): n is ZodNode => n !== undefined)
+	return []
+}
+
+function child(
+	node: ZodNode,
+	segment: string | number,
+	depth = 0,
+): { node: ZodNode | undefined; named: boolean } {
+	const inner = unwrap(node)
+	const def = inner._def
+	if (def.typeName === "ZodObject") {
+		const shape = def.shape?.() ?? {}
+		if (typeof segment === "string" && Object.hasOwn(shape, segment))
+			return { node: shape[segment], named: true }
+		return def.catchall === undefined ||
+			def.catchall._def.typeName === "ZodNever"
+			? { node: undefined, named: false }
+			: { node: def.catchall, named: false }
+	}
+	if (def.typeName === "ZodArray" && typeof segment === "number")
+		return { node: def.type, named: true }
+	if (def.typeName === "ZodTuple" && typeof segment === "number")
+		return { node: def.items?.[segment], named: true }
+	if (def.typeName === "ZodRecord") return { node: def.valueType, named: false }
+	if (depth < 4)
+		for (const option of options(inner)) {
+			const found = child(option, segment, depth + 1)
+			if (found.named) return found
+		}
+	return { node: undefined, named: false }
+}
+
+/**
+ * The core's field path for a Zod issue (src/api/validation-errors.ts walkZod): schema-named
+ * segments as sent, a client-chosen key (record or catchall) as "*", and the walk stops where the
+ * schema names nothing, so a client key is never echoed. "body" for the request body itself.
+ */
+export function mockIssueField(
+	schema: unknown,
+	segments: readonly (string | number)[],
+): string {
+	const path: string[] = []
+	let node = schema as ZodNode | undefined
+	for (const segment of segments) {
+		if (node === undefined) break
+		const next = child(node, segment)
+		if (!next.named && next.node === undefined) break
+		path.push(next.named ? String(segment) : "*")
+		node = next.node
+	}
+	return path.length > 0 ? path.join(".") : "body"
+}
+
 function sendFailure(reply: FastifyReply, failure: OperatorFailure) {
 	// Core names the failing fields on a 400 and a 428 (static text, never a value).
 	const fields =
@@ -177,7 +286,7 @@ export function registerOperatorData(
 				[
 					...new Set(
 						result.error.issues.map(i =>
-							i.path.length > 0 ? i.path.join(".") : "body",
+							mockIssueField(mutationSchema, i.path),
 						),
 					),
 				]

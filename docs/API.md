@@ -3656,10 +3656,15 @@ because they set the raw input's rate plan; to move such a decoder at runtime
 patch `channelsHz`, the absolute channel centres in Hz. Naming channels in
 `channelsHz` opts a YAML decoder into channel placements as `useChannelizer: true`
 does: after its next start it decodes one channel per entry (its
-`targetFrequenciesHz` lists them). A core without the channelizer or without
-decoder placements cannot place them, so a PATCH that sets `channelsHz` there is
-refused with `DECODER_OPTION_NOT_PATCHABLE` (`keys: ["channelsHz"]`, the reason
-in `fields`) instead of being stored and decoding the capture centre. A string `gain` (readsb,
+`targetFrequenciesHz` lists them). Entries outside the capture or the decoder's
+band are dropped, and a decoder with none in view is left unplaced (it used to read
+the raw capture at its centre). A core without the channelizer, without decoder
+placements, or whose channelizer cannot serve the decoder's source cannot place
+them, so a PATCH that sets `channelsHz` there is refused with
+`DECODER_OPTION_NOT_PATCHABLE` (`keys: ["channelsHz"]`, the reason in `fields`)
+instead of being stored and decoding the capture centre. A type without the
+`channelsHz` option (acarsdec, readsb) gets the usual answer for an undocumented
+key. A string `gain` (readsb,
 dumpvdl2) and options an adapter does not use (acarsdec `gain`, dumpvdl2 `ppm`)
 stay false. The core re-checks these rules at runtime, not only through the
 descriptors.

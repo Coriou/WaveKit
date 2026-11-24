@@ -29,9 +29,11 @@ details.
 
 For dsd-fme, multimon-ng and direwolf a non-empty `channelsHz` list (absolute channel centres in
 Hz, at most 16, in YAML or by `PATCH /api/decoders/:id`) opts the decoder into channel placements
-the same way: with the channelizer on it decodes one channel per entry. Without the channelizer
-(or without decoder placements) the core cannot place them; the PATCH is then refused, and a YAML
-list falls back to one raw placement at the capture centre, as before. `channelHz` and `offsetHz`
+the same way: with the channelizer on it decodes one channel per entry. Entries outside the
+capture or the decoder's band are dropped; a decoder with none in view is left unplaced, where it
+used to read the raw capture at its centre. Without the channelizer (or without decoder placements,
+or when the channelizer cannot serve the decoder's source) the core cannot place them; the PATCH
+is then refused, and a YAML list falls back to one raw placement at the capture centre, as before. `channelHz` and `offsetHz`
 set one channel on the raw input and are config-file keys only.
 
 The three walkthroughs below show the older, simpler patterns (pure consumer, network producer,

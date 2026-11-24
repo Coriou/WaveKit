@@ -352,14 +352,25 @@ function settingsErrorBody(error: DecoderSettingsError, type?: string): object {
 		: body
 }
 
-/** A `channelsHz` value the patch sets (not a revert). */
-function setsChannelList(body: unknown): boolean {
+/**
+ * The patch names channels: a `channelsHz` array with a positive Hz entry, for a type that
+ * documents the option. A revert (null), an empty list and a malformed value fall through to the settings service, which
+ * validates them; a type without the option gets the normal patch-policy answer.
+ */
+function setsChannelList(body: unknown, type: string | undefined): boolean {
+	if (type === undefined) return false
+	if (!(decoderOptionDescriptors(type) ?? []).some(d => d.key === "channelsHz"))
+		return false
 	if (typeof body !== "object" || body === null) return false
 	const options: unknown = Reflect.get(body, "options")
 	if (typeof options !== "object" || options === null) return false
+	if (!Object.hasOwn(options, "channelsHz")) return false
+	const channels: unknown = Reflect.get(options, "channelsHz")
 	return (
-		Object.hasOwn(options, "channelsHz") &&
-		Reflect.get(options, "channelsHz") !== null
+		Array.isArray(channels) &&
+		channels.some(
+			(hz: unknown) => typeof hz === "number" && Number.isFinite(hz) && hz > 0,
+		)
 	)
 }
 
@@ -1419,7 +1430,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				const type = settings.view(id)?.type
 				// A channel list this core could not place would be stored and silently decode
 				// the capture centre instead: refuse it and say why.
-				const refusal = setsChannelList(body)
+				const refusal = setsChannelList(body, type)
 					? decoderManager.channelListRefusal(id)
 					: null
 				if (refusal) {

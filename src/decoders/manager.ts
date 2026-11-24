@@ -2317,7 +2317,17 @@ export class DecoderManager extends EventEmitter {
 			return "this core runs without decoder placements"
 		if (!this.channelizer)
 			return "the channelizer is off (channelizer.enabled: false)"
+		// The planner reads availability per source: a source the channelizer cannot serve
+		// places the decoder raw at that source's centre.
+		const sourceId = this.selectedSourceId(state)
+		if (sourceId !== undefined && !this.channelizerAvailableFor(sourceId))
+			return `the channelizer cannot serve source ${sourceId}`
 		return null
+	}
+
+	/** Whether the channelizer can serve channels of `sourceId` (the planner's per-source `channelizerAvailable`). */
+	private channelizerAvailableFor(_sourceId: string): boolean {
+		return this.channelizer !== null
 	}
 
 	/** An explicit, non-empty `channelsHz` list: the operator named channels to decode. */
@@ -2560,7 +2570,7 @@ export class DecoderManager extends EventEmitter {
 						dedicatedScanner: config?.scanner?.role === "dedicated",
 						held: this.isSourceHeld(source.id),
 						reservedBy: exclusive?.decoderId ?? null,
-						channelizerAvailable: this.channelizer !== null,
+						channelizerAvailable: this.channelizerAvailableFor(source.id),
 						order,
 					}
 				},

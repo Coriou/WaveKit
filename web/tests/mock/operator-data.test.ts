@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import WebSocket from "ws"
+import { z } from "zod"
 import {
 	operatorDataErrorDtoSchema,
 	operatorDataReadDtoSchema,
@@ -12,6 +13,7 @@ import type {
 } from "@wavekit/api-types"
 import { MOCK_SAVED_FREQUENCIES } from "../../mock/data.ts"
 import { buildMockServer } from "../../mock/server.ts"
+import { mockIssueField } from "../../mock/operator-data.ts"
 import type { MockServer } from "../../mock/server.ts"
 
 const harbour: SavedFrequencyInput = {
@@ -223,5 +225,24 @@ describe("mock operator data WebSocket", () => {
 			"Harbour",
 		)
 		socket.close()
+	})
+})
+
+describe("mock operator data field paths", () => {
+	it("walks the schema as core does: client keys are * or cut, never echoed", () => {
+		const schema = z
+			.object({
+				named: z.object({ inner: z.string() }).strict(),
+				map: z.record(z.object({ hz: z.number() })),
+				list: z.array(z.object({ hz: z.number() })).optional(),
+			})
+			.strict()
+		const key = "s3ntinelKEYzq"
+		expect(mockIssueField(schema, ["named", "inner"])).toBe("named.inner")
+		expect(mockIssueField(schema, ["map", key, "hz"])).toBe("map.*.hz")
+		expect(mockIssueField(schema, ["list", 3, "hz"])).toBe("list.3.hz")
+		expect(mockIssueField(schema, ["named", key])).toBe("named")
+		expect(mockIssueField(schema, [key])).toBe("body")
+		expect(mockIssueField(schema, [])).toBe("body")
 	})
 })

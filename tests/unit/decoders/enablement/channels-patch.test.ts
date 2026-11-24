@@ -36,12 +36,13 @@ afterEach(async () => {
 async function setup({
 	channelizer = true,
 	enablement = true,
-}: { channelizer?: boolean; enablement?: boolean } = {}) {
+	type = "dsd-fme",
+}: { channelizer?: boolean; enablement?: boolean; type?: string } = {}) {
 	const sources = new FakeSources()
 	sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: CENTRE })
 	const registry = new DecoderRegistry()
 	registry.register(
-		"dsd-fme",
+		type,
 		config => {
 			const decoder: RateDecoder & Pick<Decoder, "getChannelRequest"> =
 				new RateDecoder(config.id, {
@@ -112,10 +113,10 @@ async function setup({
 	})
 	if (channelizer)
 		manager.setChannelizer(provider as unknown as ChannelProvider)
-	// A YAML dsd-fme: no useChannelizer, no explicit channel.
+	// A YAML decoder (dsd-fme by default): no useChannelizer, no explicit channel.
 	const config: DecoderConfig = {
 		id: "voice",
-		type: "dsd-fme",
+		type,
 		enabled: true,
 		sourceId: "rtl",
 		options: {},
@@ -222,3 +223,63 @@ it("offsetHz stays a config-file key and its refusal names channelsHz and the pa
 		200,
 	)
 })
+
+it("the refusal checks the decoder's own source: a source the channelizer cannot serve refuses channelsHz", async () => {
+	const f = await setup()
+	const available = vi
+		.spyOn(
+			f.manager as unknown as {
+				channelizerAvailableFor: (sourceId: string) => boolean
+			},
+			"channelizerAvailableFor",
+		)
+		.mockImplementation(sourceId => sourceId !== "rtl")
+	const response = await f.patch({ channelsHz: CHANNELS })
+	expect(available).toHaveBeenCalledWith("rtl")
+	expect(response.statusCode).toBe(400)
+	const body = response.json<{
+		code: string
+		keys: string[]
+		fields: Field[]
+	}>()
+	expect(body.code).toBe("DECODER_OPTION_NOT_PATCHABLE")
+	expect(body.keys).toEqual(["channelsHz"])
+	expect(
+		body.fields.find(x => x.field === "options.channelsHz")?.expected,
+	).toContain("cannot serve source rtl")
+})
+
+it("an empty or malformed channelsHz is no channel list: the settings service answers, not the refusal", async () => {
+	const f = await setup({ channelizer: false })
+	const empty = await f.patch({ channelsHz: [] })
+	expect(empty.json<{ code?: string }>().code).not.toBe(
+		"DECODER_OPTION_NOT_PATCHABLE",
+	)
+	for (const value of ["abc", ["abc"]]) {
+		const response = await f.patch({ channelsHz: value })
+		expect(response.statusCode).toBe(400)
+		expect(response.json<{ code: string }>().code).toBe(
+			"DECODER_OPTIONS_INVALID",
+		)
+	}
+})
+
+it.each(["acarsdec", "readsb"])(
+	"a %s decoder (no channelsHz option) gets the normal patch-policy answer, never a named channelsHz refusal",
+	async type => {
+		const f = await setup({ type, channelizer: false })
+		const response = await f.patch({ channelsHz: CHANNELS })
+		expect(response.statusCode).toBe(400)
+		const body = response.json<{
+			code: string
+			keys?: string[]
+			unknownKeys?: number
+			fields: Field[]
+		}>()
+		expect(body.code).toBe("DECODER_OPTION_NOT_PATCHABLE")
+		expect(body.keys ?? []).not.toContain("channelsHz")
+		expect(body.unknownKeys).toBe(1)
+		expect(body.fields.map(x => x.field)).not.toContain("options.channelsHz")
+		expect(response.body).not.toContain("cannot place channels")
+	},
+)
