@@ -7089,11 +7089,12 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   or not: a clean non-standard code reads absent, never null), and DCS word hits
   stayed at chance (fewer than 2, or fewer than one per 3 s analysed; noise hits
   about once per 13 s). Absent when it measured less, when a tone or DCS word was
-  heard but did not settle (a weak or broken-up tone, a DCS code too broken to
-  confirm, a toned over joined to an untoned one), or when the file was kept for
+  heard but did not settle (a weak or broken-up tone, a standard DCS code too
+  broken to confirm, a toned over joined to an untoned one), or when the file was kept for
   its own tone; and absent on older files. Null does not rule out a non-standard
   tone under 67 Hz (33-64 Hz: those tones are not checked) or a CTCSS tone more
-  than about 12 dB under the sub-audible noise; the lean bounds are calibrated on
+  than about 12 dB under the sub-audible noise, nor a non-standard DCS code too
+  broken to repeat two words; the lean bounds are calibrated on
   modelled audio only, until labelled recordings exist. A non-standard code whose
   word is a rotation of a standard code's word (or of its complement) reads as
   that standard code, as on the live path (645 reads 526, 736 reads 263). A
