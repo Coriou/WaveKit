@@ -7100,7 +7100,7 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   Audio missing from the source (a gap the file fills with silence) is not
   analysed. A tone at 250 Hz of deviation or more keeps every block it fills from
   being quiet, so a file reads null only if such a tone filled at most 2 blocks
-  (it was on for under 1.25 s, in a file of any length). Absent when it
+  (it was heard for under 1.25 s, in a file of any length; an input gap inside the tone is not heard). Absent when it
   measured less, when a tone or DCS word was heard but did not settle (a weak or
   broken-up tone, a standard DCS code too broken to confirm, a toned over joined
   to an untoned one), when fewer than ten blocks were quiet or more than 2 were

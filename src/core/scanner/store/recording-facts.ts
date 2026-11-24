@@ -187,7 +187,7 @@ export const TONE_QUIET_MIN_BLOCKS = 10
  * What survives: a tone of TONE_MIN_CREDIBLE_DEVIATION_HZ or more makes every block it fills loud
  * (RECORDER_TONE_QUIET), so a file reads null only when such a tone filled at most 2 blocks: three
  * whole blocks span 8 000 samples (1 s) on the hop grid, and any 10 000 samples (1.25 s) hold
- * three whole blocks, so a tone on for 1.25 s or more never reads null, in a file of any length.
+ * three whole blocks, so a tone heard for 1.25 s or more (input gaps are not heard) never reads null, in any file.
  */
 export const TONE_LOUD_EDGE_BLOCKS = 2
 
