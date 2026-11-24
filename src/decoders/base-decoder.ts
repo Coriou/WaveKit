@@ -342,7 +342,9 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 	/**
 	 * SIGKILL this long after SIGTERM when a stop has not finished (a manager
-	 * may shorten it). Read when a stop arms its kill timer; a stop already
+	 * may shorten it). Read, and reset to the default, when a stop arms its
+	 * kill timer, so a shortened delay serves the next stop that reaches this
+	 * class (also one a subclass defers) and no later one; a stop already
 	 * pending follows a shorter value through shortenStopKill.
 	 */
 	stopKillAfterMs = GRACEFUL_STOP_TIMEOUT
@@ -403,10 +405,12 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 				signalDecoder(proc, "SIGKILL")
 			}
 			const termAtMs = performance.now()
+			const killAfterMs = this.stopKillAfterMs
+			this.stopKillAfterMs = GRACEFUL_STOP_TIMEOUT
 			const kill = {
 				termAtMs,
-				dueAtMs: termAtMs + this.stopKillAfterMs,
-				timer: setTimeout(fire, this.stopKillAfterMs),
+				dueAtMs: termAtMs + killAfterMs,
+				timer: setTimeout(fire, killAfterMs),
 				fire,
 			}
 			// A second stop of the same run arms its own timer; the earlier one
@@ -752,4 +756,29 @@ export function shortenDecoderStopKill(decoder: object, ms: number): void {
 export function resetDecoderStopKill(decoder: object): void {
 	if (decoder instanceof BaseDecoder)
 		decoder.stopKillAfterMs = GRACEFUL_STOP_TIMEOUT
+}
+
+/**
+ * Runs `stop` (a removal of `decoder`) with its SIGKILL `ms` after SIGTERM.
+ * A stop left pending (DECODER_STOP_PENDING: a subclass may defer its
+ * super.stop()) keeps the short delay for the stop that arms it later; any
+ * other outcome restores the default.
+ */
+export async function stopDecoderWithKill(
+	decoder: object,
+	ms: number,
+	stop: () => Promise<void>,
+): Promise<void> {
+	shortenDecoderStopKill(decoder, ms)
+	let pending = false
+	try {
+		await stop()
+	} catch (err) {
+		pending =
+			err instanceof Error &&
+			(err as { code?: unknown }).code === "DECODER_STOP_PENDING"
+		throw err
+	} finally {
+		if (!pending) resetDecoderStopKill(decoder)
+	}
 }

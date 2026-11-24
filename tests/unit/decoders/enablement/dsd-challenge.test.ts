@@ -863,7 +863,7 @@ describe("dsd-fme slot challenge/yield table (mayTake)", () => {
 		)
 	})
 
-	it("M-c: a D/DN victim whose run passed its dwell without a sync is an A/N victim for T2, TB and T4, not for T1", () => {
+	it("M-c / MJ-A: a D/DN victim whose run passed its dwell without a sync is an A/N victim for T2, TB, T4 and for T1 by H/R, not for T1 by D/DN", () => {
 		for (const cls of ["D", "DN"] as const) {
 			const v: TakeVictim = {
 				cls,
@@ -891,10 +891,26 @@ describe("dsd-fme slot challenge/yield table (mayTake)", () => {
 			expect(
 				mayTake(chal("A", { retry: true }), v, ctxOf({ analogTryOpen: true })),
 			).toBe("analog-try")
-			// T1 still reads it as a live D: no.
-			expect(
-				mayTake(chal("R", { live: true, reclaimOk: true }), v, ctxOf()),
-			).toBeNull()
+			// MJ-A: T1 by a held or remembered site reads it as A/N.
+			for (const c of ["H", "R"] as const) {
+				expect(
+					mayTake(chal(c, { live: true, reclaimOk: true }), v, ctxOf()),
+				).toBe("reclaim")
+				expect(victimColumn(v, ctxOf(), true)).toBe("AN")
+				// Non-vacuous: without the no-sync run it is a live D, never taken.
+				expect(
+					mayTake(
+						chal(c, { live: true, reclaimOk: true }),
+						{ ...v, noSyncRun: false },
+						ctxOf(),
+					),
+				).toBeNull()
+			}
+			// A decayed challenger (D/DN) still reads it as a live D: no.
+			for (const c of ["D", "DN"] as const)
+				expect(
+					mayTake(chal(c, { live: true, reclaimOk: true }), v, ctxOf()),
+				).toBeNull()
 			expect(
 				mayTake(
 					chal("U", { confirmed: true, live: true }),
@@ -1091,6 +1107,115 @@ describe("dsd-fme slot selection by class (selectChannels)", () => {
 		}
 		expect(at(t0 + DSD_RECLAIM_WINDOW_MS - 1)).toBe(0)
 		expect(at(t0 + DSD_RECLAIM_WINDOW_MS)).toBe(1)
+	})
+
+	it("MJ-A: at 2 slots two live decayed no-sync runs never hold both slots against a held site's live burst", () => {
+		const decayed = {
+			cls: "D" as const,
+			lastSyncMonoMs: NOW - 4_000_000,
+			noSyncRun: true,
+		}
+		const two = (noSyncRun: boolean) =>
+			selectChannels({
+				order: [1, 2, 3],
+				ranked: true,
+				activity: new Map([
+					[1, ch(1, true)],
+					[2, ch(2, true)],
+					[3, ch(3, true)],
+				]),
+				count: 2,
+				incumbents: [
+					{ key: "a", hz: 2, dwellSinceMonoMs: 0 },
+					{ key: "b", hz: 3, dwellSinceMonoMs: 1 },
+				],
+				nowMonoMs: NOW,
+				dwellMs: ACTIVITY_DWELL_MS,
+				movesLeft: 6,
+				moveWindowFreesMonoMs: null,
+				canChallenge: () => false,
+				tierOf: tierOf({
+					1: { cls: "R", reclaimOk: true, lastSyncMonoMs: NOW - 600_000 },
+					2: { ...decayed, noSyncRun },
+					3: { ...decayed, noSyncRun },
+				}),
+				reclaimReserve: 2,
+				quietVictimMs: DSD_QUIET_VICTIM_MS,
+				syncCooldownMs: 120_000,
+				triedRecentMs: DSD_DIGITAL_HOLD_MS,
+			})
+		const r = two(true)
+		expect(r.moves).toBe(1)
+		// The oldest A/N run goes.
+		expect(r.chosen.find(c => c.movedFrom)).toEqual({
+			hz: 1,
+			movedFrom: { key: "a", hz: 2 },
+			kind: "reclaim",
+		})
+		// Non-vacuous: inside their run's dwell window (a sync possible) they hold.
+		expect(two(false).moves).toBe(0)
+	})
+
+	it("m-3: a live reclaim takes a quiet held slot before a new site's trial still inside its dwell; past the dwell the trial goes first", () => {
+		const pick = (trialStart: number) =>
+			selectChannels({
+				order: [1, 2, 3],
+				ranked: true,
+				activity: new Map([
+					[1, ch(1, true)],
+					[2, ch(2, false)],
+					[3, ch(3, true)],
+				]),
+				count: 2,
+				incumbents: [
+					{ key: "held", hz: 2, dwellSinceMonoMs: 0 },
+					{ key: "trial", hz: 3, dwellSinceMonoMs: trialStart },
+				],
+				nowMonoMs: NOW,
+				dwellMs: ACTIVITY_DWELL_MS,
+				movesLeft: 6,
+				moveWindowFreesMonoMs: null,
+				canChallenge: () => false,
+				tierOf: tierOf({
+					1: { cls: "H", reclaimOk: true, lastSyncMonoMs: NOW - 600_000 },
+					2: { cls: "H", lastSyncMonoMs: NOW - 120_000 },
+					3: { cls: "U" },
+				}),
+				reclaimReserve: 2,
+				quietVictimMs: DSD_QUIET_VICTIM_MS,
+				syncCooldownMs: 120_000,
+				triedRecentMs: DSD_DIGITAL_HOLD_MS,
+			}).chosen.find(c => c.movedFrom)?.movedFrom?.key
+		// The trial started 5 s ago (a burst under way): the quiet held slot goes.
+		expect(pick(NOW - 5_000)).toBe("held")
+		// Its dwell passed: the unknown is the cheaper victim again.
+		expect(pick(NOW - ACTIVITY_DWELL_MS)).toBe("trial")
+	})
+
+	it("MJ-A (b): a decayed channel's first live reclaim is noted until a sync", () => {
+		const tiers = new DsdChannelTiers()
+		const k = dsdTierKey("voice", "rtl", 466_100_000)!
+		tiers.noteSync(k, 0)
+		// Not decayed: a reclaim is no withdrawal mark.
+		tiers.noteReclaim(k, 1_000)
+		expect(
+			tiers.snapshot(1_000, policy).tiers[0]!.decayedReclaimMonoMs,
+		).toBeUndefined()
+		// Decays by live listened time, then reclaims twice: the first is kept.
+		tiers.account(k, 2_000, 2_000 + DSD_DECAY_LIVE_MS, true)
+		const t = 2_000 + DSD_DECAY_LIVE_MS
+		tiers.noteReclaim(k, t)
+		tiers.noteFailure(k, t + 30_000, policy)
+		tiers.noteReclaim(k, t + 60_000)
+		expect(tiers.snapshot(t + 60_000, policy).tiers[0]).toMatchObject({
+			decayed: true,
+			decayedReclaimMonoMs: t,
+		})
+		// A sync clears it.
+		tiers.noteSync(k, t + 90_000)
+		expect(
+			tiers.snapshot(t + 90_000, policy).tiers[0]!.decayedReclaimMonoMs,
+		).toBeUndefined()
 	})
 
 	it("the move reserve: other gates stop 2 moves short, T1 may use them", () => {

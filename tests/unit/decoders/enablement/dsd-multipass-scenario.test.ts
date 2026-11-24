@@ -15,7 +15,9 @@
  * - 10 unclassified carriers (k = 4..13), never a sync: 5 steady, 5 on
  *   U(30, 300) s / off U(30, 300) s;
  * - 6 busy analog voices with modelled scanner analog FM proof (k = 14..19):
- *   overs U(5, 40) s, gaps U(2, 30) s.
+ *   overs U(5, 40) s, gaps U(2, 30) s. A variant gives 2 of them (k = 14,
+ *   15) one modelled checked sync at t = 0 (a once-digital channel or a
+ *   false sync), never again: they decay while busy analog.
  * The spectrum is a list of tracks per BLOCK_MS = 900 ms block (not IQ):
  * 900 < ACTIVITY_LIVE_TTL_MS = 1,000, so live never lapses inside a
  * transmission, and a 3 s burst spans >= 3 blocks. (The design's 250 ms
@@ -298,6 +300,9 @@ export interface MultipassMetrics {
 	reasonViolations: string[]
 	firstSync: Record<string, number | null>
 	stopKill: { short: number; other: number }
+	/** Variant: analog voices given one modelled sync at t = 0, and the live reclaims into them per hour. */
+	rememberedAnalog: number[]
+	reclaimsIntoRememberedAnalog: number[]
 	wallMs: number
 }
 
@@ -308,7 +313,12 @@ afterEach(async () => {
 	vi.useRealTimers()
 })
 
-async function runScenario(seed: number, slots: number, spawnMs = 500) {
+async function runScenario(
+	seed: number,
+	slots: number,
+	spawnMs = 500,
+	rememberedAnalog = 0,
+) {
 	SPAWN_MS = spawnMs
 	// Real wall time (Date and performance are faked below).
 	const wallStart = process.hrtime.bigint()
@@ -494,6 +504,15 @@ async function runScenario(seed: number, slots: number, spawnMs = 500) {
 	})
 	await manager.startAll()
 	ranker.ingestEpoch("rtl", "engine", 1)
+	// MODELLED (variant): one checked sync at t = 0 on the first analog voices.
+	const synced = ANALOG.slice(0, rememberedAnalog)
+	const tierStore = (
+		manager as unknown as {
+			dsdChannelTiers: { noteSync(key: string, now: number): boolean }
+		}
+	).dsdChannelTiers
+	for (const hz of synced)
+		tierStore.noteSync(dsdTierKey("voice", "rtl", hz)!, performance.now())
 
 	const placements = () =>
 		(manager.getStatus("voice")?.placements ?? []).filter(
@@ -620,9 +639,11 @@ async function runScenario(seed: number, slots: number, spawnMs = 500) {
 		plan.tx.filter(
 			x => x.end > h * HOUR_MS - 120_000 && x.start < (h + 1) * HOUR_MS,
 		).length
+	// Variant: each once-synced analog voice adds at most 2 live reclaims per
+	// 30 min (4 an hour) and as many tiered re-entries (8 an hour).
 	const m2Bound = Array.from(
 		{ length: hours },
-		(_, h) => 12 + 6 + (12 + 6) + 2 + 2 * oversNear(h),
+		(_, h) => 12 + 6 + (12 + 6) + 2 + 2 * oversNear(h) + 8 * rememberedAnalog,
 	)
 	const kinds = [
 		"trial",
@@ -685,9 +706,13 @@ async function runScenario(seed: number, slots: number, spawnMs = 500) {
 			moves.find(n => n.at > m.at && n.fromHz === m.toHz)?.at ?? DURATION_MS
 		return (syncs.get(m.toHz) ?? []).some(s => s > m.at && s <= leave)
 	}).length
-	// M5: analog -> analog moves.
+	// M5: analog -> analog moves (variant: not into or out of a once-synced one).
 	const a2a = moves.filter(
-		m => ANALOG.includes(m.fromHz) && ANALOG.includes(m.toHz),
+		m =>
+			ANALOG.includes(m.fromHz) &&
+			ANALOG.includes(m.toHz) &&
+			!synced.includes(m.fromHz) &&
+			!synced.includes(m.toHz),
 	)
 	// M6 from the sampled planner tiers.
 	const siteDecayedSamples: string[] = []
@@ -743,6 +768,14 @@ async function runScenario(seed: number, slots: number, spawnMs = 500) {
 			Object.entries(SITE).map(([k, hz]) => [k, firstSyncOf(hz)]),
 		),
 		stopKill,
+		rememberedAnalog: synced,
+		reclaimsIntoRememberedAnalog: Array.from(
+			{ length: hours },
+			(_, h) =>
+				moves
+					.filter(inHour(h))
+					.filter(x => x.kind === "reclaim" && synced.includes(x.toHz)).length,
+		),
 		wallMs: Number((process.hrtime.bigint() - wallStart) / 1_000_000n),
 	}
 	return m
@@ -773,7 +806,9 @@ const summary = (m: MultipassMetrics) =>
  * - M4: <= 12 swaps per unordered pair per clock hour; no move takes the
  *   slot of a channel synced less than 60 s before; >= 95 % of the live
  *   reclaims into sites A-D are followed by a sync in that run.
- * - M5: every analog -> analog move is an analog try, <= 2 per clock hour.
+ * - M5: every analog -> analog move is an analog try, <= 2 per clock hour
+ *   (variant: moves into or out of a once-synced analog voice are remembered
+ *   moves, not analog tries, and are left out).
  * - M6: sites never decayed and keep their last sync after the first;
  *   carriers never remembered.
  * - M7: every carrier placed within 2 h; reasons right at every sampled minute.
@@ -784,7 +819,10 @@ const summary = (m: MultipassMetrics) =>
  *   gap). The gap is U(300, 1,800) s, so the strict worst case is 4,800 s;
  *   3,600 s allows 600 s, and the site may win the lane earlier.
  */
-function expectPass(m: MultipassMetrics, opts: { m4Reclaims?: boolean } = {}) {
+function expectPass(
+	m: MultipassMetrics,
+	opts: { m4Reclaims?: boolean; m8Ms?: number } = {},
+) {
 	expect(m.firstSync["A"]).not.toBeNull()
 	expect(m.m1.counted).toBeGreaterThan(20)
 	expect(m.m1.share).toBeGreaterThanOrEqual(m.slots >= 4 ? 0.95 : 0.9)
@@ -824,7 +862,9 @@ function expectPass(m: MultipassMetrics, opts: { m4Reclaims?: boolean } = {}) {
 	expect(m.carriersPlacedBy2h).toBe(CARRIERS.length)
 	for (const site of ["B", "C"]) {
 		expect(m.firstSync[site], `M8 ${site}`).not.toBeNull()
-		expect(m.firstSync[site]!, `M8 ${site}`).toBeLessThanOrEqual(3_600_000)
+		expect(m.firstSync[site]!, `M8 ${site}`).toBeLessThanOrEqual(
+			opts.m8Ms ?? 3_600_000,
+		)
 	}
 	expect(m.reasonViolations).toEqual([])
 	// B-1: every dsd-fme stop during the run was a short victim stop.
@@ -859,6 +899,31 @@ describe("dsd-fme slot transitions over 4 h, production composition (modelled tr
 		summary(m)
 		expectPass(m, { m4Reclaims: false })
 	}, 600_000)
+
+	// MJ-A variant: 2 of the 6 analog voices hold one modelled sync at t = 0
+	// and then stay busy analog (decayed after 10 min of live listening).
+	// Before the fix the two decayed live channels reclaimed both slots by T1
+	// for 6 h; every criterion of the 500 ms runs is asserted unchanged
+	// (M1 at 2 slots: >= 90 % per seed, >= 95 % over both seeds), M2 with
+	// the 8 an hour per once-synced voice above and M5 without their moves.
+	const variant: MultipassMetrics[] = []
+	for (const seed of SEEDS)
+		it(`slots 2, seed ${seed}, two once-synced analog voices`, async () => {
+			const m = await runScenario(seed, 2, 500, 2)
+			summary(m)
+			variant.push(m)
+			// M8 here: the two once-synced voices are held (30 min after their
+			// t = 0 sync) and fill both slots, which no trial may take, so a
+			// calling site's first sync may slip by that hold and one more call
+			// gap (at most 1,800 s): 3,600 + 1,800 + 1,800 = 7,200 s.
+			expectPass(m, { m8Ms: 7_200_000 })
+		}, 600_000)
+	it("slots 2, two once-synced analog voices: M1 aggregated over seeds", () => {
+		expect(variant).toHaveLength(SEEDS.length)
+		const counted = variant.reduce((n, m) => n + m.m1.counted, 0)
+		const caught = variant.reduce((n, m) => n + m.m1.caught, 0)
+		expect(caught / counted).toBeGreaterThanOrEqual(0.95)
+	})
 
 	for (const slots of [4, 2])
 		it(`slots ${slots}: M1 aggregated over seeds`, () => {

@@ -813,6 +813,39 @@ describe("dsd-fme no-sync failures follow the source link (m1/m2)", () => {
 		expect(f.runningHz()).toContain(incumbent.hz)
 	})
 
+	it("m-3: a trial evicted by a live reclaim before its dwell is not noted as a failed try", async () => {
+		const { f, incumbent } = await start()
+		const tiers = (f.m as unknown as { dsdChannelTiers: DsdChannelTiers })
+			.dsdChannelTiers
+		const noteFailure = vi.spyOn(DsdChannelTiers.prototype, "noteFailure")
+		const other = f.inputs.at(-1)!.activity!.incumbents.find(i => i.primary)!
+		// The other band-plan channel: a remembered site (synced 31 min ago), live now.
+		const siteHz = [CENTRE + 25_000, FAR].find(hz => hz !== incumbent.hz)!
+		expect(other.hz).toBe(CENTRE)
+		tiers.noteSync(
+			dsdTierKey(incumbent.decoderId, "rtl", siteHz)!,
+			f.mono() - 1_860_000,
+		)
+		f.heat.set(siteHz, { state: "hot", score: 101, live: true })
+		// 5 s into the trial's 20 s dwell the site reclaims its slot.
+		await f.advance(5_000)
+		f.notify()
+		for (let i = 0; i < 20; i++) await f.advance(100)
+		expect(f.runningHz()).toContain(siteHz)
+		expect(f.runningHz()).not.toContain(incumbent.hz)
+		// Past the trial's would-be dwell: no failure, no try noted for it.
+		await f.advance(30_000)
+		f.notify()
+		await f.advance(100)
+		expect(noteFailure).not.toHaveBeenCalledWith(
+			dsdTierKey(incumbent.decoderId, "rtl", incumbent.hz),
+			expect.anything(),
+			expect.anything(),
+		)
+		expect(tierOf(f, incumbent)).toBeUndefined()
+		noteFailure.mockRestore()
+	})
+
 	it("a placement without a channel frequency is never keyed (no sync, no failure)", async () => {
 		const { f, incumbent } = await start()
 		const noteSync = vi.spyOn(DsdChannelTiers.prototype, "noteSync")

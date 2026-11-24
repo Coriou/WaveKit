@@ -242,6 +242,11 @@ export interface DsdTierView {
 	/** Live reclaims (T1) in the current 30 min window without a sync. */
 	reclaims?: number
 	reclaimWindowMonoMs?: number
+	/**
+	 * A live reclaim (T1) made while decayed, since the last sync: once that
+	 * run ended without a sync the channel has no live reclaim until a sync.
+	 */
+	decayedReclaimMonoMs?: number
 }
 
 /** One gate time of a slot group: the trial token or the burst trial (per lane), or the analog try. */
@@ -259,6 +264,7 @@ interface TierEntry {
 	triedMonoMs: number | null
 	reclaims: number
 	reclaimWindowMonoMs: number | null
+	decayedReclaimMonoMs: number | null
 }
 
 const forgetOf = (e: TierEntry): number =>
@@ -288,7 +294,8 @@ const remembered = (e: TierEntry | undefined): e is TierEntry =>
  *   remembered and not decayed; otherwise failures + 1, cooldown =
  *   now + cooldown(failures), last try = now. While that run goes on, each
  *   pass renews the cooldown from now (renewFailure);
- * - a live reclaim (T1): reclaims + 1 in a 30 min window;
+ * - a live reclaim (T1): reclaims + 1 in a 30 min window; the first while
+ *   decayed is noted until a sync (once that run ended, no live reclaim);
  * - last sync + 6 h: the sync is forgotten (not remembered any more); at
  *   max(last sync + 6 h, last try + 6 h, cooldown end) the entry is deleted.
  * Insertion order is renewed by delete-then-set on every write.
@@ -359,6 +366,7 @@ export class DsdChannelTiers {
 			e.decayed = false
 			e.reclaims = 0
 			e.reclaimWindowMonoMs = null
+			e.decayedReclaimMonoMs = null
 		}
 		return e
 	}
@@ -381,6 +389,7 @@ export class DsdChannelTiers {
 				triedMonoMs: old?.triedMonoMs ?? null,
 				reclaims: 0,
 				reclaimWindowMonoMs: null,
+				decayedReclaimMonoMs: null,
 			},
 			now,
 		)
@@ -448,6 +457,7 @@ export class DsdChannelTiers {
 				triedMonoMs: now,
 				reclaims: old?.reclaims ?? 0,
 				reclaimWindowMonoMs: old?.reclaimWindowMonoMs ?? null,
+				decayedReclaimMonoMs: old?.decayedReclaimMonoMs ?? null,
 			},
 			now,
 		)
@@ -477,11 +487,16 @@ export class DsdChannelTiers {
 		)
 	}
 
-	/** Records a live reclaim (T1) into a slot: +1 in the 30 min window (DSD_RECLAIM_WINDOW_MS). */
+	/**
+	 * Records a live reclaim (T1) into a slot: +1 in the 30 min window
+	 * (DSD_RECLAIM_WINDOW_MS); the first one while decayed is kept until a
+	 * sync (decayedReclaimMonoMs).
+	 */
 	noteReclaim(key: string, now: number): void {
 		if (!Number.isFinite(now)) return
 		const e = this.live(key, now)
 		if (!remembered(e)) return
+		if (e.decayed) e.decayedReclaimMonoMs ??= now
 		if (
 			e.reclaimWindowMonoMs === null ||
 			now - e.reclaimWindowMonoMs >= DSD_RECLAIM_WINDOW_MS
@@ -585,6 +600,9 @@ export class DsdChannelTiers {
 							reclaims: e.reclaims,
 							...(e.reclaimWindowMonoMs !== null
 								? { reclaimWindowMonoMs: e.reclaimWindowMonoMs }
+								: {}),
+							...(e.decayedReclaimMonoMs !== null
+								? { decayedReclaimMonoMs: e.decayedReclaimMonoMs }
 								: {}),
 						}
 					: {}),

@@ -1099,6 +1099,7 @@ describe("dsd-fme tiers: a manager no-sync in cooldown demotes scanner-only digi
 		extra: {
 			analog?: readonly number[]
 			analogRetries?: PlannerActivity["analogRetries"]
+			trials?: PlannerActivity["trials"]
 		} = {},
 	) => {
 		const act = activity({
@@ -1108,6 +1109,7 @@ describe("dsd-fme tiers: a manager no-sync in cooldown demotes scanner-only digi
 			incumbents,
 			...(tiers ? { tiers } : {}),
 			...(extra.analogRetries ? { analogRetries: extra.analogRetries } : {}),
+			...(extra.trials ? { trials: extra.trials } : {}),
 			confirmedChallengers: [A, B].map(hz => dsdChallengeKey("dsd", "s", hz)),
 		})
 		const withAct = { ...input, activity: act }
@@ -1177,6 +1179,59 @@ describe("dsd-fme tiers: a manager no-sync in cooldown demotes scanner-only digi
 		}
 		expect(moves).toBe(0)
 		expect(incumbents.map(i => i.hz)).toEqual([CENTRE, B])
+	})
+
+	it("MJ-A (b): a decayed channel whose live reclaim ended without a sync has no live reclaim until its next sync", () => {
+		const now = 10_000_000
+		const incumbents = seedB()
+		const heat = new Map([[A, hotLive]])
+		const decayedA = (reclaimedAt?: number) => ({
+			key: dsdTierKey("dsd", "s", A)!,
+			tier: "digital" as const,
+			untilMonoMs: now - 3_600_000 + 6 * 3_600_000,
+			failures: 0,
+			lastSyncMonoMs: now - 3_600_000,
+			decayed: true,
+			quietMs: 0,
+			quietLiveMs: 600_000,
+			reclaims: 1,
+			reclaimWindowMonoMs: now - 3_000_000,
+			...(reclaimedAt !== undefined
+				? { decayedReclaimMonoMs: reclaimedAt }
+				: {}),
+		})
+		const groupKey = dsdGroupKey("dsd", "s")
+		// Trial token and burst gap both just used: only T1 could move A.
+		const closed = {
+			trials: (
+				["trial:fresh", "trial:retry", "burst:fresh", "burst:retry"] as const
+			).map(gate => ({ groupKey, gate, atMonoMs: now })),
+		}
+		// Non-vacuous: a decayed A that never reclaimed since its last sync does.
+		const first = pass(now, heat, incumbents, [decayedA()], [], closed)
+		expect(first.activity!.moves).toMatchObject([{ toHz: A, kind: "reclaim" }])
+		// Its reclaim ran and ended without a sync (A is no incumbent): none.
+		const spent = pass(
+			now,
+			heat,
+			incumbents,
+			[decayedA(now - 60_000)],
+			[],
+			closed,
+		)
+		expect(spent.activity!.moves).toEqual([])
+		expect(channels(spent, "dsd")).toEqual([CENTRE, B])
+		// While that reclaimed run still runs it keeps its slot (no withdrawal of a run).
+		const running = pass(
+			now,
+			heat,
+			[incumbents[0]!, { ...incumbents[1]!, key: "a-run", hz: A }],
+			[decayedA(now - 60_000)],
+			[],
+			closed,
+		)
+		expect(running.activity!.moves).toEqual([])
+		expect(channels(running, "dsd")).toEqual([CENTRE, A])
 	})
 
 	it("a non-finite group analog try time keeps the analog try gate closed", () => {

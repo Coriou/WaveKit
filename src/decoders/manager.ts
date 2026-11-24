@@ -184,8 +184,7 @@ import { processChannelInputMode } from "./channel-input-mode.js"
 import {
 	abandonDecoderOutput,
 	decoderOutputDrained,
-	resetDecoderStopKill,
-	shortenDecoderStopKill,
+	stopDecoderWithKill,
 } from "./base-decoder.js"
 import {
 	CHANNEL_FATE_MS,
@@ -2890,15 +2889,15 @@ export class DecoderManager extends EventEmitter {
 					worker.config.type === "dsd-fme" &&
 					worker.placement !== undefined &&
 					victimKeys.has(worker.placement.key)
+				// A removal left pending (DECODER_STOP_PENDING) keeps the short
+				// kill for the stop that arms it; other outcomes restore 5 s.
 				if (fastStop)
-					shortenDecoderStopKill(worker.decoder, DSD_VICTIM_STOP_KILL_MS)
-				try {
-					await this.removeDecoder(worker.config.id)
-				} finally {
-					// A removal left pending (DECODER_STOP_PENDING) keeps the worker:
-					// its later stops use the default timeout again.
-					if (fastStop) resetDecoderStopKill(worker.decoder)
-				}
+					await stopDecoderWithKill(
+						worker.decoder,
+						DSD_VICTIM_STOP_KILL_MS,
+						() => this.removeDecoder(worker.config.id),
+					)
+				else await this.removeDecoder(worker.config.id)
 			}
 			for (const parent of [...this.decoders.values()]) {
 				if (parent.owner !== "config") continue

@@ -550,3 +550,75 @@ describe("stop: shortenStopKill on a pending stop", () => {
 		},
 	)
 })
+
+describe("stop: a short victim kill survives a deferred subclass stop (DECODER_STOP_PENDING)", () => {
+	/** Its first stop defers super.stop() and throws DECODER_STOP_PENDING. */
+	class DeferringDecoder extends LineDecoder {
+		deferred: (() => Promise<void>) | null = null
+		override async stop(): Promise<void> {
+			if (this.deferred === null) {
+				this.deferred = () => super.stop()
+				const { WaveKitError } = await import("../../../src/utils/errors.js")
+				throw new WaveKitError("Stop deferred", "DECODER_STOP_PENDING")
+			}
+			return super.stop()
+		}
+	}
+
+	it("the removal throws pending, the later super.stop() still kills at 1 s, and the next stop is back at 5 s", async () => {
+		const { signalDecoder } =
+			await import("../../../src/decoders/process-tools.js")
+		const { stopDecoderWithKill } =
+			await import("../../../src/decoders/base-decoder.js")
+		const signals = vi.mocked(signalDecoder)
+		signals.mockClear()
+		const decoder = new DeferringDecoder(
+			{ id: "kill-deferred", type: "test", enabled: true, options: {} },
+			testLogger,
+		)
+		const child = fakeChild()
+		vi.mocked(spawn).mockImplementationOnce(() => {
+			queueMicrotask(() => child.emit("spawn"))
+			return child as unknown as ChildProcess
+		})
+		await decoder.start()
+		vi.useFakeTimers()
+		try {
+			await expect(
+				stopDecoderWithKill(decoder, 1_000, () => decoder.stop()),
+			).rejects.toMatchObject({ code: "DECODER_STOP_PENDING" })
+			// Nothing signalled yet; the short delay is kept for the deferred stop.
+			expect(signals).not.toHaveBeenCalled()
+			expect(decoder.stopKillAfterMs).toBe(1_000)
+			const stopped = decoder.deferred!()
+			expect(signals.mock.calls.map(c => c[1])).toEqual(["SIGTERM"])
+			// Consumed by the stop that armed it.
+			expect(decoder.stopKillAfterMs).toBe(5_000)
+			await vi.advanceTimersByTimeAsync(999)
+			expect(signals.mock.calls.map(c => c[1])).toEqual(["SIGTERM"])
+			await vi.advanceTimersByTimeAsync(1)
+			expect(signals.mock.calls.map(c => c[1])).toEqual(["SIGTERM", "SIGKILL"])
+			child.emit("exit", null, "SIGKILL")
+			await stopped
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("a removal that completes or fails otherwise restores the default", async () => {
+		const { stopDecoderWithKill } =
+			await import("../../../src/decoders/base-decoder.js")
+		const decoder = new LineDecoder(
+			{ id: "kill-done", type: "test", enabled: true, options: {} },
+			testLogger,
+		)
+		await stopDecoderWithKill(decoder, 1_000, async () => {})
+		expect(decoder.stopKillAfterMs).toBe(5_000)
+		await expect(
+			stopDecoderWithKill(decoder, 1_000, async () => {
+				throw new Error("boom")
+			}),
+		).rejects.toThrow("boom")
+		expect(decoder.stopKillAfterMs).toBe(5_000)
+	})
+})

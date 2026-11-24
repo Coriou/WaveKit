@@ -684,9 +684,16 @@ describe("HfdlDecoder", () => {
    back live takes a slot at once, without the 10 s rule, so a 2 to 5 s DMR burst is
    caught: it replaces an unknown, analog or no-sync channel at once, a quiet remembered
    one past its 20 s, and even a held one that is not receiving and has had no sync for a
-   minute. It may do so twice in 30 minutes without a sync in between; after that a burst
+   minute. A channel that is held or remembered (not decayed) also replaces a decayed
+   one that is receiving once that one's run passed 20 s without a sync (a channel that
+   once carried a digital call and is now busy analog never pins the slot). When several
+   slots may go, a busy unknown channel still inside its first 20 s (a new site's trial)
+   is replaced only after every quiet held or remembered one. A live return may happen
+   twice in 30 minutes without a sync in between; after that a burst
    there waits until those 30 minutes have passed (so a false sync costs at most 4 such
-   moves an hour). Two of the 6 moves a minute are always kept for these live returns:
+   moves an hour). A decayed channel returns live this way once: when that run ends
+   without a sync it has no live return until its next sync (it can still enter through
+   the trial token below). Two of the 6 moves a minute are always kept for these live returns:
    the other moves stop once only 2 of the 6 moves of the last 60 s are left (the moves
    already made in that window count, whatever their kind), so a busy minute of other
    moves never uses those 2.
@@ -719,7 +726,14 @@ describe("HfdlDecoder", () => {
    1.875 an hour): the scanner-analog channel tried least recently, so a DMR channel that
    also carries analog FM is still found. A dsd-fme channel that is replaced is stopped at
    once (SIGKILL after 1 s if it does not exit; one already stopping is killed 1 s after
-   its stop began), and its replacement starts after it exited. The replaced channel is
+   its stop began, and so is one whose stop is still pending), and its replacement starts
+   after it exited. That 1 s is the latency budget of a live return into a 3 s burst: the
+   replaced channel's SIGTERM to exit is at most 1 s, its last output drained (at most
+   500 ms) inside it; the replaced channels of one planning pass stop one after another,
+   and a live return replaces one; then the replacement's spawn to first sample (at most
+   1 s) and one 360 ms DMR superframe. With the 250 ms change notice and the 100 ms
+   coalescing: 0.25 + 0.1 + 1 + 1 + 0.36 = 2.71 s, inside the 3 s burst; a longer kill
+   delay, or two victims stopped in series before it, would miss it. The replaced channel is
    never one receiving, but a SIGKILL while dsd-fme still had a per-call WAV recording
    open can leave that file with stale header sizes, so its listed duration may be short
    or zero. For one move the gates are tried in the order live return, ranked entry (the

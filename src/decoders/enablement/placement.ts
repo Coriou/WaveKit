@@ -1589,12 +1589,20 @@ export const planPlacements: PlacementPlanner = input => {
 				const demoted =
 					cls === "N" || cls === "DN" || (cls === "A" && (backoff || tryGap))
 				const window = finiteAt(e?.reclaimWindowMonoMs)
+				// A decayed channel whose live reclaim ran and ended without a
+				// sync has no live reclaim until its next sync (a once-synced
+				// channel now busy analog, or a false sync, never cycles T1).
+				const reclaimSpent =
+					decayed &&
+					inc === undefined &&
+					finiteAt(e?.decayedReclaimMonoMs) !== null
 				const reclaimOk =
 					remembered &&
+					!reclaimSpent &&
 					(window === null ||
 						now - window >= DSD_RECLAIM_WINDOW_MS ||
 						!((e?.reclaims ?? 0) >= DSD_RECLAIM_BUDGET))
-				if (remembered && !reclaimOk && window !== null)
+				if (remembered && !reclaimOk && !reclaimSpent && window !== null)
 					later(window + DSD_RECLAIM_WINDOW_MS)
 				const reasons: ActivityReason[] = []
 				if (remembered || scannerDigital) reasons.push("digital-memory")

@@ -634,6 +634,10 @@ export function victimColumn(
 	}
 }
 
+/** T1 judges a D/DN victim's no-sync run (as A/N) only for an H or R challenger. */
+const t1NoSync = (c: Pick<TakeChallenger, "cls">) =>
+	c.cls === "H" || c.cls === "R"
+
 const oldSync = (v: TakeVictim, now: number, ms: number) =>
 	v.lastSyncMonoMs === null || now - v.lastSyncMonoMs >= ms
 
@@ -645,15 +649,16 @@ const oldSync = (v: TakeVictim, now: number, ms: number) =>
  * move budget is the caller's (selectChannels).
  *
  * | C ↓ / V →          | Hl | Hr | Hq        | Rl | Rq        | Dl / Dq        | Ul / Uq        | A / N        |
- * | T1 H/R/D/DN live   | no | no | yes       | no | yes       | no / yes       | yes, no dwell  | yes, no dwell|
+ * | T1 H/R/D/DN live   | no | no | yes       | no | yes       | no / yes  (1)  | yes, no dwell  | yes, no dwell|
  * | T2 H, R (not live) | no | no | no        | no | if below  | yes            | yes            | yes          |
  * | T2 D, S, U (token, live) | no | no | no  | no | sync≥120s | no / if below  | no / if below  | yes          |
  * | T3 D, S, U (≥2, all H, live) | no | no | sync≥120s | n/a | n/a | n/a     | n/a            | n/a          |
  * | TB D, S, U burst   | no | no | sync≥120s | no | yes       | no / yes       | no / yes       | yes          |
  * | T4 A (analog try)  | no | no | no        | no | no        | no             | no             | A/N, oldest  |
  *
- * Hr / Hq split at quietVictimMs (60 s). For T2, TB and T4 a D/DN victim
- * whose current run passed its dwell without a sync is an A/N victim. Every
+ * Hr / Hq split at quietVictimMs (60 s). For T2, TB and T4, and for T1 by
+ * an H or R challenger (1), a D/DN victim whose current run passed its
+ * dwell without a sync is an A/N victim. Every
  * victim needs its dwell except a non-remembered one (S, U, A, N) taken by
  * T1; a pinned victim (start in flight) never is one. A discovery challenger
  * (D, S, U) takes a token (T2), burst (TB) or yield (T3) move only while live:
@@ -672,8 +677,10 @@ export function mayTake(
 	const recentTry =
 		c.triedMonoMs !== null && now - c.triedMonoMs < ctx.triedRecentMs
 	// T1 live reclaim: no hysteresis; a non-remembered victim without its dwell.
+	// For an H or R challenger a D/DN victim past its dwell without a sync
+	// is an A/N victim (a decayed channel kept live by analog or a false sync).
 	if (remembered && c.live && c.reclaimOk) {
-		const col = victimColumn(v, ctx)
+		const col = victimColumn(v, ctx, t1NoSync(c))
 		const ok =
 			col === "Hq" ||
 			col === "Rq" ||
@@ -755,7 +762,14 @@ export function mayTake(
 	return null
 }
 
-/** Victim preference: A/N first, then U/S, D, R, H; lowest-ranked first (A/N: the oldest run). */
+/**
+ * Victim preference: A/N first, then U/S, D, R, H; lowest-ranked first (A/N:
+ * the oldest run). A U/S victim still inside its dwell (only T1 takes one)
+ * goes after every quiet remembered victim: a new site's trial is not cut
+ * mid-burst while a quiet held slot is free to take.
+ */
+const victimRank = (col: VictimColumn, dwellPassed: boolean): number =>
+	!dwellPassed && (col === "Ul" || col === "Uq") ? 5 : VICTIM_RANK[col]
 const VICTIM_RANK: Readonly<Record<VictimColumn, number>> = {
 	AN: 0,
 	Ul: 1,
@@ -1035,10 +1049,11 @@ export function selectChannels(args: {
 				.sort((x, y) => {
 					const vx = victimOf(x)
 					const vy = victimOf(y)
-					const cx = victimColumn(vx, ctx, kind !== "reclaim")
-					const cy = victimColumn(vy, ctx, kind !== "reclaim")
+					const asNoSync = kind !== "reclaim" || t1NoSync(c)
+					const cx = victimColumn(vx, ctx, asNoSync)
+					const cy = victimColumn(vy, ctx, asNoSync)
 					return (
-						VICTIM_RANK[cx] - VICTIM_RANK[cy] ||
+						victimRank(cx, vx.dwellPassed) - victimRank(cy, vy.dwellPassed) ||
 						(cx === "AN" && cy === "AN"
 							? x.incumbent!.dwellSinceMonoMs - y.incumbent!.dwellSinceMonoMs
 							: 0) ||
