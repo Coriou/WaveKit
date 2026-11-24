@@ -124,6 +124,8 @@ function validDecoder(d: PlannerDecoder): boolean {
 		typeof d.unavailable === "boolean" &&
 		typeof d.ownDevice === "boolean" &&
 		typeof d.channelPlacements === "boolean" &&
+		(d.gateListedChannels === undefined ||
+			typeof d.gateListedChannels === "boolean") &&
 		(d.followVfo === undefined || typeof d.followVfo === "boolean") &&
 		Array.isArray(d.configuredChannelsHz) &&
 		Array.isArray(d.protocols) &&
@@ -777,6 +779,11 @@ function groupPlacements(input: PlannerInput): PlannerGrouping {
 						: [])
 						add(hz, "band")
 				} else configured.forEach((hz, i) => add(hz, "configured", i))
+				// A list-only opt-in: every channel of the list (and direwolf's band
+				// targets beside it) is gated; emit() leaves the first placed one
+				// ungated as the primary, so only the extra channels need admission.
+				if (d.gateListedChannels === true)
+					for (const c of local) c.gatedSecondary = true
 				if (
 					d.origin === "catalogue" &&
 					(d.type === "dsd-fme" || d.type === "multimon-ng")

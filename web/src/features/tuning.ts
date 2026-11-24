@@ -185,7 +185,7 @@ export async function tuneTo(
 	)
 		return restoreCentre(data, ctx, target, restoreHz, tuner.sourceId)
 	// Asked to recentre, a frequency already reached by offset still moves the centre onto it.
-	const plan: TunePlan =
+	const planned: TunePlan =
 		options.recentre === true && ctx.centreHz !== target
 			? { kind: "recentre", hz: target, centreHz: target, offsetHz: 0 }
 			: planTune(
@@ -194,6 +194,12 @@ export async function tuneTo(
 						? { ...ctx, offsetAvailable: false }
 						: ctx,
 				)
+	// The centre is already the target (a recentre or a sweep found an offset): only the offset goes
+	// back to 0. No tuner write, so a sweep is not paused for nothing.
+	const plan: TunePlan =
+		planned.kind === "recentre" && planned.centreHz === ctx.centreHz
+			? { kind: "offset", hz: target, offsetHz: 0 }
+			: planned
 	await applyTunePlan(data, plan, tuner.sourceId)
 	return plan
 }

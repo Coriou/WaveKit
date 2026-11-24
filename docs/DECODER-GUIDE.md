@@ -34,7 +34,19 @@ capture or the decoder's band are dropped; a decoder with none in view is left u
 used to read the raw capture at its centre. Without the channelizer (or without decoder placements)
 the core cannot place them; the PATCH is then refused, and a YAML list falls back to one raw
 placement at the capture centre, as before. `channelHz` and `offsetHz` set one channel on the raw
-input and are config-file keys only.
+input and are config-file keys only. direwolf adds its band targets (the region's APRS frequency)
+on top of the listed channels, so it can decode one channel more than the list names.
+
+Each channel costs CPU: the decoder's share plus 0.11 core for the channel (dsd-fme 0.155,
+multimon-ng 0.14, direwolf 0.16 core), so a full 16-entry dsd-fme list asks for about 2.5 cores,
+beyond the 1.5-core x86-64 budget. When the list alone opted the decoder in (no `useChannelizer:
+true`, not a catalogue decoder), its first placed channel starts as before, and every other channel
+is a gated secondary like the extra paging channels: it passes the efficiency gate and the CPU
+budget one probation at a time, takes only spare budget (it displaces no other decoder's
+secondaries, the tuned-band rule aside), and when the budget
+is full its placement stays stopped with `suspension.reasonCode: "efficiency-budget"` and
+`efficiencyDetail: "budget"`, retried with the usual backoff. `useChannelizer: true` keeps every
+listed channel ungated, as a YAML decoder's placements always were.
 
 > **Operator note.** A `channelsHz` list in YAML now opts its decoder into channel placements, as
 > `useChannelizer: true` does. If none of its channels is in the current capture, the decoder is

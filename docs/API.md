@@ -3656,7 +3656,15 @@ because they set the raw input's rate plan; to move such a decoder at runtime
 patch `channelsHz`, the absolute channel centres in Hz. Naming channels in
 `channelsHz` opts a YAML decoder into channel placements as `useChannelizer: true`
 does: after its next start it decodes one channel per entry (its
-`targetFrequenciesHz` lists them). Entries outside the capture or the decoder's
+`targetFrequenciesHz` lists them; direwolf also adds its band targets on top of
+them). Each channel costs CPU (dsd-fme 0.155, multimon-ng 0.14, direwolf 0.16 core,
+so a 16-entry dsd-fme list asks for about 2.5 cores): when `channelsHz` alone opted
+the decoder in (no `useChannelizer: true`, not a catalogue decoder), only the first
+placed channel starts ungated; every other one is a gated secondary that passes the
+efficiency gate and the CPU budget, takes only spare budget (no other decoder's
+secondaries yield to it, the tuned-band rule aside), and when the budget is full shows in `placements[]` stopped with
+`suspension.reasonCode: "efficiency-budget"` and `efficiencyDetail: "budget"` until
+a retry fits. Entries outside the capture or the decoder's
 band are dropped, and a decoder with none in view is left unplaced (it used to read
 the raw capture at its centre). A core without the channelizer or without decoder
 placements cannot place them, so a PATCH that sets `channelsHz` there is refused with

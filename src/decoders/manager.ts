@@ -1496,7 +1496,9 @@ export class DecoderManager extends EventEmitter {
 	 * admitted without a gate verdict and never suspended by probation; their
 	 * declared cost still counts in the budget and the efficiency view.
 	 * Exception (3.18): generated secondary paging channels (`gated`) are
-	 * admitted and probated like catalogue placements.
+	 * admitted and probated like catalogue placements, and so is every channel
+	 * after the first of a list that alone opted the decoder in
+	 * (`gateListedChannels`: `channelsHz` without the catalogue or useChannelizer).
 	 */
 	private gateExempt(state: DecoderState): boolean {
 		const enablement = this.config.enablement
@@ -2531,6 +2533,13 @@ export class DecoderManager extends EventEmitter {
 							catalogue ||
 							config.useChannelizer === true ||
 							this.namesChannelList(config),
+						// The list alone (no catalogue, no useChannelizer) opted in: only its first
+						// channel is admitted ungated; the rest pass the gate and the CPU budget.
+						...(!catalogue &&
+						config.useChannelizer !== true &&
+						this.namesChannelList(config)
+							? { gateListedChannels: true }
+							: {}),
 						unavailable: this.isUnavailable(state),
 						ownDevice:
 							state.decoder.getBandDeclaration?.().ownSource === true ||

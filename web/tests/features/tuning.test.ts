@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import type { LiveAudioStatus, TunerState } from "@wavekit/api-types"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
@@ -10,6 +10,7 @@ import {
 	tuneContext,
 	TuningController,
 	captureOf,
+	tuneTo,
 	type TuneContext,
 } from "../../src/features/tuning.ts"
 import {
@@ -142,6 +143,55 @@ describe("tuneContext", () => {
 		expect(tuneContext(tuner, status("other"))?.offsetAvailable).toBe(false)
 		expect(tuneContext(tuner, null)?.offsetAvailable).toBe(false)
 		expect(tuneContext(undefined, status("pi"))).toBeNull()
+	})
+})
+
+describe("tuneTo with the centre already on the target", () => {
+	const fake = (sweep: "running" | null) => {
+		const tune = vi.fn(async () => {})
+		const setConfig = vi.fn(async () => {})
+		const data = {
+			tuner: {
+				state: () =>
+					({
+						sourceId: "pi",
+						frequency: 161_500_000,
+						sampleRate: 2_400_000,
+					}) as TunerState,
+				tune,
+			},
+			liveAudio: {
+				get: () => ({
+					status: {
+						sourceId: "pi",
+						config: { bandwidth: 12_500, offsetHz: 100_000 },
+					} as LiveAudioStatus,
+				}),
+				setConfig,
+			},
+			scanner: { get: () => ({ sweep: sweep ? { state: sweep } : null }) },
+		} as unknown as Parameters<typeof tuneTo>[0]
+		return { data, tune, setConfig }
+	}
+
+	it.each([
+		["a sweep has the receiver", "running" as const, {}],
+		["asked to recentre", null, { recentre: true }],
+	])(
+		"%s: only the offset resets, the tuner is not written (no pause for nothing)",
+		async (_label, sweep, options) => {
+			const f = fake(sweep)
+			const plan = await tuneTo(f.data, 161_500_000, options)
+			expect(plan).toEqual({ kind: "offset", hz: 161_500_000, offsetHz: 0 })
+			expect(f.tune).not.toHaveBeenCalled()
+			expect(f.setConfig).toHaveBeenCalledWith({ offsetHz: 0 })
+		},
+	)
+
+	it("a sweep still recentres onto a target off the centre", async () => {
+		const f = fake("running")
+		await tuneTo(f.data, 161_700_000)
+		expect(f.tune).toHaveBeenCalledWith(161_700_000, "pi")
 	})
 })
 
