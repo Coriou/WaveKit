@@ -1018,7 +1018,11 @@ export const planPlacements: PlacementPlanner = input => {
 		if (typeof at === "number" && Number.isFinite(at) && at > now)
 			next = next === null ? at : Math.min(next, at)
 	}
-	const demotions = new Map(act.demotions?.map(d => [d.key, d.untilMonoMs]))
+	// The frozen planner's input member, removed from PlannerActivity since.
+	const frozen = act as {
+		demotions?: readonly { key: string; untilMonoMs: number }[]
+	}
+	const demotions = new Map(frozen.demotions?.map(d => [d.key, d.untilMonoMs]))
 	const confirmed = new Set(
 		Array.isArray(act.confirmedChallengers) ? act.confirmedChallengers : [],
 	)

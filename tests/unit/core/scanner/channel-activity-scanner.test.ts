@@ -395,4 +395,118 @@ describe("review regressions (scanner side)", () => {
 			await h.service.stop()
 		}
 	})
+
+	// dsd-fme evidence tiers: analog FM proof the scanner already holds, aged
+	// on the service clock, within the 15 min window and its own 512 bound.
+	it("history carries analog FM proof by age; decoded wins; malformed or future times skipped; bounded at 512", async () => {
+		const { h, internals } = setup()
+		await h.service.start()
+		try {
+			const clock = 2_000_000_000_000
+			const svc = h.service as unknown as {
+				now: () => number
+				activityHistory(
+					sourceId: string,
+					w: { lowHz: number; highHz: number },
+				): {
+					decodes: { hz: number }[]
+					analog: { hz: number; ageMs: number }[]
+				}
+			}
+			svc.now = () => clock
+			const at = (ageMs: number) => new Date(clock - ageMs).toISOString()
+			const analog = (
+				id: string,
+				hz: number,
+				proofAt: string,
+				kind = "analog-voice",
+			) => ({
+				id,
+				protocol: "analog-fm",
+				confidence: "detected",
+				frequencyHz: hz,
+				sourceIds: ["rtl"],
+				proof: { kind, at: proofAt },
+			})
+			const w = { lowHz: CENTRE - 512_000, highHz: CENTRE + 512_000 }
+			vi.spyOn(internals.store, "near" as never).mockReturnValue([
+				analog("a", RF, at(60_000)),
+				analog("b", RF + 12_500, at(0), "analog-tone"),
+				// Mixed: a decoded discovery is never analog evidence.
+				{ ...analog("c", RF + 25_000, at(1_000)), confidence: "decoded" },
+				analog("d", RF + 37_500, "not a time"),
+				analog("e", RF + 50_000, at(-5_000)),
+				// At and past the 15 min window.
+				analog("f", RF + 62_500, at(900_000 - 1)),
+				analog("g", RF + 75_000, at(900_000)),
+				analog("g2", RF + 81_250, at(900_000 + 1)),
+				analog("h", RF + 87_500, at(1_000), "carrier-only"),
+			] as never)
+			expect(svc.activityHistory("rtl", w).analog).toEqual([
+				{ hz: RF, ageMs: 60_000 },
+				{ hz: RF + 12_500, ageMs: 0 },
+				{ hz: RF + 62_500, ageMs: 900_000 - 1 },
+			])
+			// The analog list has its own bound (ACTIVITY_MAX_HISTORY = 512): the
+			// service keeps the nearest 512 to the window centre, which is the
+			// store's order (|Δf| first). At the bound every proof is kept.
+			const proofs = (n: number) =>
+				Array.from({ length: n }, (_, i) =>
+					analog(`x${i}`, RF + i * 12_500, at(i)),
+				)
+			vi.spyOn(internals.store, "near" as never).mockReturnValue(
+				proofs(512) as never,
+			)
+			const atBound = svc.activityHistory("rtl", w).analog
+			expect(atBound).toHaveLength(512)
+			expect(atBound.at(-1)).toEqual({ hz: RF + 511 * 12_500, ageMs: 511 })
+			// Past the bound the 513th (the farthest) is cut; decodes unaffected.
+			const decoded = {
+				...analog("dec", RF, at(0)),
+				confidence: "decoded",
+				protocol: "dmr",
+			}
+			const svcTimes = h.service as unknown as {
+				decodeTimes: Map<string, number>
+			}
+			svcTimes.decodeTimes.set("dec", clock - 1_000)
+			vi.spyOn(internals.store, "near" as never).mockReturnValue([
+				...proofs(513),
+				decoded,
+			] as never)
+			const past = svc.activityHistory("rtl", w)
+			expect(past.analog).toHaveLength(512)
+			expect(past.analog.at(-1)).toEqual({
+				hz: RF + 511 * 12_500,
+				ageMs: 511,
+			})
+			expect(past.decodes).toEqual([
+				expect.objectContaining({ hz: RF, protocol: "dmr" }),
+			])
+			// Both lists full (512 decodes, 512 analog): the walk stops there.
+			for (let i = 0; i < 512; i++) svcTimes.decodeTimes.set(`d${i}`, clock)
+			let touched = 0
+			const after = {
+				...analog("late", RF, at(0)),
+				get confidence() {
+					touched++
+					return "detected"
+				},
+			}
+			vi.spyOn(internals.store, "near" as never).mockReturnValue([
+				...proofs(512),
+				...Array.from({ length: 512 }, (_, i) => ({
+					...decoded,
+					id: `d${i}`,
+				})),
+				after,
+			] as never)
+			const both = svc.activityHistory("rtl", w)
+			expect(both.decodes).toHaveLength(512)
+			expect(both.analog).toHaveLength(512)
+			expect(touched).toBe(0)
+		} finally {
+			await h.service.stop()
+		}
+	})
 })

@@ -340,7 +340,7 @@ function build() {
 
 describe("mixed-channel activity sequence", () => {
 	// Three simulated minutes of production paths can exceed 5 s on a loaded host.
-	it("finds bursty DMR, rejects a decoded pager and preserves paging moves over three minutes", async () => {
+	it("finds bursty DMR, rejects a decoded pager and preserves paging moves over seven minutes", async () => {
 		vi.useFakeTimers({
 			toFake: [
 				"Date",
@@ -392,7 +392,12 @@ describe("mixed-channel activity sequence", () => {
 		let pagerDecodes = 0
 		// Deliberately off both 50 ms spectrum integration and 3 s burst boundaries.
 		await vi.advanceTimersByTimeAsync(137.3)
-		for (let step = 0; step < 1800; step++) {
+		// 7 min: an unknown channel enters an occupied dsd-fme slot at most once
+		// per 300 s (the trial token, docs/DECODER-GUIDE.md item 8), and the
+		// first token may go to one of the always-on unknown voices, so the
+		// bursty DMR channel may wait one token gap: 20 s dwell + 300 s + the
+		// 10 s rule, inside 420 s.
+		for (let step = 0; step < 4200; step++) {
 			const elapsed = step * 100
 			const active = [
 				PAGER,
@@ -453,8 +458,9 @@ describe("mixed-channel activity sequence", () => {
 		expect(
 			moves.filter(m => m.decoderId === "voice").every(m => m.toHz !== PAGER),
 		).toBe(true)
-		// A new run of the same placement must earn sync again; a quick restart
-		// can occur entirely between planner passes. Its fresh dwell still holds.
+		// Sync memory belongs to the RF channel, not the run: a restart of the
+		// same placement keeps its digital slot through the hold window, even
+		// with no carrier, rather than earning sync again.
 		const placement = f.plans
 			.at(-1)
 			?.wanted.find(p => p.decoderId === "voice" && p.channelHz === decodedHz)
@@ -465,9 +471,8 @@ describe("mixed-channel activity sequence", () => {
 		for (let step = 0; step < 202; step++) {
 			block([PAGER, ...ANALOG])
 			await vi.advanceTimersByTimeAsync(100)
-			if (step < 199) expect(f.runningHz()).toContain(decodedHz)
+			expect(f.runningHz()).toContain(decodedHz)
 		}
-		expect(f.runningHz()).not.toContain(decodedHz)
 	}, 60_000)
 
 	it("keeps a no-sync incumbent replaceable when DMR arrives after its cooldown", async () => {

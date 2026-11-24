@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
-import { afterEach, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import pino from "pino"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
@@ -27,6 +27,11 @@ import {
 	resolveActivityPolicy,
 } from "../../../../src/decoders/enablement/activity-plan.js"
 import { planPlacements } from "../../../../src/decoders/enablement/placement.js"
+import {
+	DsdChannelTiers,
+	dsdNoSyncCooldownAfter,
+	dsdTierKey,
+} from "../../../../src/decoders/enablement/dsd-activity.js"
 import {
 	FakeSources,
 	RateDecoder,
@@ -90,6 +95,8 @@ function setup(withActivity = true, type = "multimon-ng") {
 			score: number
 			live: boolean
 			excluded?: boolean
+			/** Scanner evidence tier (dsd-fme). */
+			evidence?: "digital" | "analog"
 			/** Scripted last energy; default now when live, else none. */
 			energyMonoMs?: number
 		}
@@ -111,6 +118,9 @@ function setup(withActivity = true, type = "multimon-ng") {
 				channels: query.candidatesHz.map(hz => ({
 					hz,
 					excluded: heat.get(hz)?.excluded ?? false,
+					...(heat.get(hz)?.evidence
+						? { evidence: heat.get(hz)!.evidence! }
+						: {}),
 					score: heat.get(hz)?.score ?? 0,
 					state: heat.get(hz)?.state ?? "cold",
 					reasons: heat.has(hz) ? ["live-energy" as const] : [],
@@ -204,6 +214,7 @@ function setup(withActivity = true, type = "multimon-ng") {
 			.map(p => p.channelHz)
 	return {
 		m,
+		sources,
 		port,
 		hooks,
 		heat,
@@ -216,6 +227,7 @@ function setup(withActivity = true, type = "multimon-ng") {
 		listeners,
 		placements,
 		runningHz,
+		mono: () => mono,
 		advance: async (ms: number) => {
 			mono += ms
 			await vi.advanceTimersByTimeAsync(ms)
@@ -453,22 +465,24 @@ it.each([false, true])(
 		f.notify()
 		await f.advance(100)
 		expect(f.runningHz()).toContain(oldHz)
-		f.heat.set(oldHz, { state: "hot", score: 102, live: true })
-		// Weak hints keep only the initial dwell (20 s from process start).
-		// Clean protection lasts cooldown=120 s from receipt at mono=1,000.
+		// Weak hints keep only the initial dwell (20 s from process start); a
+		// weak run then has no sync, so a confirmed unknown replaces it whether
+		// live or not. A clean sync holds the channel for DSD_DIGITAL_HOLD_MS =
+		// 30 min from receipt at mono = 1,000; past the hold a digital channel
+		// yields to a confirmed unknown only while it is not live.
+		f.heat.set(oldHz, { state: "hot", score: 102, live: !clean })
 		const deadline = clean
-			? 121_000
+			? 1_801_000
 			: f.inputs
 					.at(-1)!
 					.activity!.incumbents.find(i => i.key === incumbent.key)!
 					.dwellSinceMonoMs + 20_000
 		const now = f.inputs.at(-1)!.activity!.nowMonoMs
-		// A pass mid-way sees the challenger still live: its evidence spans the
-		// wait within the 120 s challenge memory (R2 hysteresis).
-		const half = Math.floor((deadline - now - 1) / 2)
-		await f.advance(half)
+		// Two passes 12 s apart before the deadline: the challenger's evidence
+		// spans the 10 s hysteresis within the 120 s challenge memory (R2).
+		await f.advance(deadline - now - 12_001)
 		f.notify()
-		await f.advance(deadline - now - 1 - half)
+		await f.advance(12_000)
 		f.notify()
 		await f.advance(0)
 		expect(f.runningHz()).toContain(oldHz)
@@ -481,8 +495,12 @@ it.each([false, true])(
 		f.notify()
 		await f.advance(100)
 		expect(
-			f.inputs.at(-1)!.activity!.demotions?.some(d => d.key === incumbent.key),
-		).toBe(true)
+			f.inputs
+				.at(-1)!
+				.activity!.tiers?.find(
+					t => t.key === dsdTierKey(incumbent.decoderId, "rtl", oldHz),
+				)?.tier,
+		).toBe(clean ? "digital" : "nosync")
 		const moves = f.inputs.flatMap(i => i.activity?.recentMoves ?? [])
 		expect(moves.some(m => m.sourceId === "rtl")).toBe(true)
 	},
@@ -530,6 +548,41 @@ it("a one-off burst never moves a dsd-fme slot; a sustained transmission does", 
 	expect(f.runningHz()).not.toContain(oldHz)
 })
 
+// A burst shorter than DSD_CHALLENGE_MIN_SPAN_MS (10 s) reclaims a slot at
+// once only on a channel with a checked dsd-fme sync (live reclaim, T1). A
+// channel with scanner digital evidence but no sync here (class S) has no
+// live reclaim: like an unknown one it needs the 10 s rule or a burst pair.
+it.each([true, false])(
+	"a 3 s burst without a dsd-fme sync never reclaims a dsd-fme slot (scanner digital=%s)",
+	async digital => {
+		const f = setup(true, "dsd-fme")
+		await f.m.startAll()
+		await f.advance(1000)
+		const incumbent = f.inputs
+			.at(-1)!
+			.activity!.incumbents.find(i => !i.primary)!
+		const challenger = incumbent.hz === FAR ? CENTRE + 25_000 : FAR
+		// Past the incumbent's 20 s dwell: it has no sync, so it is replaceable.
+		await f.advance(25_000)
+		for (let i = 0; i < 6; i++) {
+			f.heat.set(challenger, {
+				state: "hot",
+				score: 105,
+				live: true,
+				...(digital ? { evidence: "digital" as const } : {}),
+			})
+			f.notify()
+			await f.advance(500)
+		}
+		await f.advance(1_000)
+		expect(f.runningHz().includes(challenger)).toBe(false)
+		expect(f.runningHz().includes(incumbent.hz)).toBe(true)
+		expect(
+			f.inputs.at(-1)!.activity!.snapshots.flatMap(s => s.channels),
+		).toContainEqual(expect.objectContaining({ hz: challenger, live: true }))
+	},
+)
+
 it("renewed clean evidence keeps a dsd incumbent past its original deadline", async () => {
 	const f = setup(true, "dsd-fme")
 	await f.m.startAll()
@@ -562,7 +615,260 @@ it("renewed clean evidence keeps a dsd incumbent past its original deadline", as
 	const latest = f.inputs.at(-1)!.activity!
 	expect(latest.incumbents.find(i => i.key === incumbent.key)).toMatchObject({
 		syncSeen: true,
-		syncUntilMonoMs: 181_100,
+		// The last sync plus DSD_DIGITAL_HOLD_MS (30 min).
+		syncUntilMonoMs: 61_100 + 1_800_000,
 	})
-	expect(latest.demotions?.some(d => d.key === incumbent.key)).toBe(false)
+	expect(
+		latest.tiers?.find(
+			t => t.key === dsdTierKey(incumbent.decoderId, "rtl", incumbent.hz),
+		)?.tier,
+	).toBe("digital")
+})
+
+describe("dsd-fme no-sync failures follow the source link (m1/m2)", () => {
+	const policy = resolveActivityPolicy(
+		{ slots: { "dsd-fme": 1 } },
+		EFFICIENCY_BUDGET_X64,
+		"x64",
+		8,
+	)
+	const tierOf = (
+		f: ReturnType<typeof setup>,
+		inc: { decoderId: string; hz: number },
+	) =>
+		f.inputs
+			.at(-1)!
+			.activity!.tiers?.find(
+				t => t.key === dsdTierKey(inc.decoderId, "rtl", inc.hz),
+			)
+	const start = async () => {
+		const f = setup(true, "dsd-fme")
+		await f.m.startAll()
+		await f.advance(1000)
+		const incumbent = f.inputs
+			.at(-1)!
+			.activity!.incumbents.find(i => !i.primary)!
+		return { f, incumbent }
+	}
+
+	it("notes no failure while the source is disconnected, nor within a dwell of its reconnect", async () => {
+		const { f, incumbent } = await start()
+		let connected = false
+		f.sources.getStatus = (id: string) =>
+			id === "rtl" ? { id, connected } : undefined
+		// 30 s past the run's start, past its 20 s dwell: disconnected, no failure.
+		await f.advance(30_000)
+		f.notify()
+		await f.advance(100)
+		expect(f.runningHz()).toContain(incumbent.hz)
+		expect(tierOf(f, incumbent)).toBeUndefined()
+		// Reconnected: the run's dwell restarts at the reconnect (mono 31,100).
+		connected = true
+		f.sources.emit("connected", "rtl")
+		await f.advance(100)
+		f.notify()
+		await f.advance(100)
+		expect(tierOf(f, incumbent)).toBeUndefined()
+		// 1 ms short of a dwell since the reconnect: still no failure.
+		const reconnectAt = 31_100
+		const now = f.inputs.at(-1)!.activity!.nowMonoMs
+		await f.advance(reconnectAt + policy.dwellMs - 1 - now)
+		f.notify()
+		await f.advance(0)
+		expect(f.inputs.at(-1)!.activity!.nowMonoMs).toBe(
+			reconnectAt + policy.dwellMs - 1,
+		)
+		expect(tierOf(f, incumbent)).toBeUndefined()
+		// At a full dwell since the reconnect the failure is noted.
+		await f.advance(1)
+		f.notify()
+		await f.advance(100)
+		expect(tierOf(f, incumbent)).toMatchObject({ tier: "nosync", failures: 1 })
+	})
+
+	it("a failed run that keeps running renews its cooldown from now, failures unchanged", async () => {
+		const { f, incumbent } = await start()
+		await f.advance(25_000)
+		f.notify()
+		await f.advance(100)
+		const first = tierOf(f, incumbent)!
+		expect(first).toMatchObject({ tier: "nosync", failures: 1 })
+		const cooldown = dsdNoSyncCooldownAfter(1, policy)
+		// Noted at the dwell-end pass, renewed by each later pass of the run.
+		expect(first.untilMonoMs).toBe(
+			f.inputs.at(-1)!.activity!.nowMonoMs + cooldown,
+		)
+		expect(first.notedMonoMs).toBeLessThanOrEqual(
+			f.inputs.at(-1)!.activity!.nowMonoMs,
+		)
+		await f.advance(60_000)
+		f.notify()
+		await f.advance(100)
+		expect(f.runningHz()).toContain(incumbent.hz)
+		const renewed = tierOf(f, incumbent)!
+		const now = f.inputs.at(-1)!.activity!.nowMonoMs
+		expect(renewed).toMatchObject({ tier: "nosync", failures: 1 })
+		expect(renewed.untilMonoMs).toBe(now + cooldown)
+		expect(renewed.untilMonoMs).toBeGreaterThan(first.untilMonoMs)
+	})
+
+	it("a source removed for good drops its tiers (dropSource)", async () => {
+		const { f, incumbent } = await start()
+		const drop = vi.spyOn(DsdChannelTiers.prototype, "dropSource")
+		f.m.getDecoder(incumbent.key)!.emit("link", {
+			protocol: "dmr",
+			at: 7,
+			verified: true,
+			crcErr: false,
+			fecErrs: 0,
+		})
+		await f.advance(100)
+		const tiers = (f.m as unknown as { dsdChannelTiers: DsdChannelTiers })
+			.dsdChannelTiers
+		expect(tiers.snapshot(1_100, policy).tiers).toHaveLength(1)
+		f.sources.emit("source-removed", "rtl", new Date())
+		expect(drop).toHaveBeenCalledWith("rtl")
+		expect(tiers.snapshot(1_100, policy).tiers).toEqual([])
+		drop.mockRestore()
+	})
+
+	it("m-1: a crash of a remembered slot counts its listened time once, not the backoff, and a disconnect in the restarted run adds nothing until reconnect + 2 s", async () => {
+		const { f, incumbent } = await start()
+		const tiers = (f.m as unknown as { dsdChannelTiers: DsdChannelTiers })
+			.dsdChannelTiers
+		const key = dsdTierKey(incumbent.decoderId, "rtl", incumbent.hz)!
+		const decoder = f.m.getDecoder(incumbent.key) as unknown as RateDecoder
+		decoder.emit("link", {
+			protocol: "dmr",
+			at: 7,
+			verified: true,
+			crcErr: false,
+			fecErrs: 0,
+		})
+		// Live during [t0, tc]: the crash tick is never energized.
+		f.heat.set(incumbent.hz, { state: "hot", score: 101, live: true })
+		const quiet = () => tiers.quiet(key, f.mono())!
+		// A pass, then its coalesced follow-ups (100 ms steps).
+		const pass = async (drain = true) => {
+			f.notify()
+			await f.advance(0)
+			if (drain) for (let i = 0; i < 5; i++) await f.advance(100)
+		}
+		const lastPass = () => f.inputs.at(-1)!.activity!.nowMonoMs
+		// t0: a pass sets the cursor (past the run's 2 s warm-up).
+		await f.advance(5_000)
+		await pass()
+		const t0 = lastPass()
+		const at0 = quiet()
+		const starts: number[] = []
+		decoder.on("started", () => starts.push(f.mono()))
+		// tc = t0 + a: the child crashes; "stopped" and "exit" both fire.
+		const a = 5_000
+		const passesAt0 = f.inputs.length
+		await f.advance(a - (f.mono() - t0))
+		const tc = f.mono()
+		// No pass in (t0, tc]: only the crash tick accounts [t0, tc].
+		expect(f.inputs.length).toBe(passesAt0)
+		decoder.running = false
+		decoder.emit("stopped")
+		decoder.emit("exit", 1, null)
+		expect(quiet().quietMs - at0.quietMs).toBe(a)
+		expect(quiet().quietLiveMs).toBe(at0.quietLiveMs)
+		f.heat.delete(incumbent.hz)
+		// The lifecycle restarts it after its backoff (tr).
+		for (let i = 0; i < 100 && starts.length === 0; i++) await f.advance(100)
+		expect(starts).toHaveLength(1)
+		const tr = starts[0]!
+		expect(tr).toBeGreaterThan(tc)
+		expect(quiet().quietMs - at0.quietMs).toBe(a)
+		// t1: the next pass, past the restarted run's warm-up.
+		await f.advance(5_000)
+		await pass()
+		const t1 = lastPass()
+		const grown = quiet().quietMs - at0.quietMs
+		expect(grown).toBe(a + (t1 - (tr + 2_000)))
+		expect(grown).not.toBe(t1 - t0)
+		expect(quiet().quietLiveMs).toBe(at0.quietLiveMs)
+		// A disconnect inside the restarted run: nothing until reconnect + 2 s.
+		let connected = true
+		f.sources.getStatus = (id: string) =>
+			id === "rtl" ? { id, connected } : undefined
+		await f.advance(1_000)
+		await pass()
+		const beforeDrop = quiet().quietMs
+		connected = false
+		await f.advance(10_000)
+		await pass()
+		expect(quiet().quietMs).toBe(beforeDrop)
+		connected = true
+		f.sources.emit("connected", "rtl")
+		const tk = f.mono()
+		await f.advance(1_999)
+		await pass(false)
+		expect(lastPass()).toBe(tk + 1_999)
+		expect(quiet().quietMs).toBe(beforeDrop)
+		await f.advance(3_001)
+		await pass()
+		expect(quiet().quietMs).toBe(beforeDrop + (lastPass() - (tk + 2_000)))
+		expect(f.runningHz()).toContain(incumbent.hz)
+	})
+
+	it("m-3: a trial evicted by a live reclaim before its dwell is not noted as a failed try", async () => {
+		const { f, incumbent } = await start()
+		const tiers = (f.m as unknown as { dsdChannelTiers: DsdChannelTiers })
+			.dsdChannelTiers
+		const noteFailure = vi.spyOn(DsdChannelTiers.prototype, "noteFailure")
+		const other = f.inputs.at(-1)!.activity!.incumbents.find(i => i.primary)!
+		// The other band-plan channel: a remembered site (synced 31 min ago), live now.
+		const siteHz = [CENTRE + 25_000, FAR].find(hz => hz !== incumbent.hz)!
+		expect(other.hz).toBe(CENTRE)
+		tiers.noteSync(
+			dsdTierKey(incumbent.decoderId, "rtl", siteHz)!,
+			f.mono() - 1_860_000,
+		)
+		f.heat.set(siteHz, { state: "hot", score: 101, live: true })
+		// 5 s into the trial's 20 s dwell the site reclaims its slot.
+		await f.advance(5_000)
+		f.notify()
+		for (let i = 0; i < 20; i++) await f.advance(100)
+		expect(f.runningHz()).toContain(siteHz)
+		expect(f.runningHz()).not.toContain(incumbent.hz)
+		// Past the trial's would-be dwell: no failure, no try noted for it.
+		await f.advance(30_000)
+		f.notify()
+		await f.advance(100)
+		expect(noteFailure).not.toHaveBeenCalledWith(
+			dsdTierKey(incumbent.decoderId, "rtl", incumbent.hz),
+			expect.anything(),
+			expect.anything(),
+		)
+		expect(tierOf(f, incumbent)).toBeUndefined()
+		noteFailure.mockRestore()
+	})
+
+	it("a placement without a channel frequency is never keyed (no sync, no failure)", async () => {
+		const { f, incumbent } = await start()
+		const noteSync = vi.spyOn(DsdChannelTiers.prototype, "noteSync")
+		const noteFailure = vi.spyOn(DsdChannelTiers.prototype, "noteFailure")
+		const state = (
+			f.m as unknown as {
+				decoders: Map<string, { placement: { channelHz: number | null } }>
+			}
+		).decoders.get(incumbent.key)!
+		state.placement = { ...state.placement, channelHz: null }
+		f.m.getDecoder(incumbent.key)!.emit("link", {
+			protocol: "dmr",
+			at: 7,
+			verified: true,
+			crcErr: false,
+			fecErrs: 0,
+		})
+		await f.advance(30_000)
+		f.notify()
+		await f.advance(100)
+		expect(noteSync).not.toHaveBeenCalled()
+		expect(noteFailure).not.toHaveBeenCalled()
+		noteSync.mockRestore()
+		noteFailure.mockRestore()
+	})
 })
