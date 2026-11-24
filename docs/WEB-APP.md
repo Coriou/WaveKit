@@ -645,11 +645,15 @@ on its raster and the length in seconds; the waveform and play disc (or one sent
 no audio, such as `The recording was deleted`); **What we know**, a few short rows in words:
 
 - **Tone**, always for analog FM and never for AM: `CTCSS 88.5 Hz`, `DCS 023` (`DCS 023 inverted`
-  for an inverted reading),
+  for an inverted reading; under the standard code set the core reports every code normal, since
+  each inverted standard code is another standard code sent normal, so this does not appear today),
   `A tone was heard (not stored)` (the scanner kept the file for its tone without storing which;
   such a file never reads `No tone heard`),
   `No tone heard` (only when the scanner recorder stored that it listened and heard neither a
-  CTCSS tone nor a DCS code; it does not check tones under 67 Hz), or `Not measured` with why (recordings made before WaveKit stored the tone,
+  CTCSS tone nor a DCS code, with enough quiet moments on the open carrier that a tone sent at
+  250 Hz of deviation or more would have been heard; continuous speech gives none, so a voiced
+  recording usually reads `Not determined for this recording`; it does not check tones under
+  67 Hz), or `Not measured` with why (recordings made before WaveKit stored the tone,
   `Not determined for this recording` when the stored facts hold no tone, a scanner recording whose
   file is not listed, a live transmission whose stored event could not be read, a live transmission
   whose stored reading holds no tone, or a stored tone this web app cannot read). A live

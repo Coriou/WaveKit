@@ -30,6 +30,7 @@ import {
 	type NoiseQuarantineFacts,
 } from "../../../../src/core/scanner/store/noise-quarantine.js"
 import {
+	RECORDER_TONE_QUIET,
 	RECORDING_FACTS_FILE,
 	RECORDING_FACTS_MAX_BYTES,
 	RecordingFactsSchema,
@@ -39,7 +40,10 @@ import {
 	DCS_LONE_HITS_MIN,
 	DCS_PARTIAL_WORDS,
 	TONE_MEASURED_MIN_BLOCKS,
+	TONE_QUIET_MIN_BLOCKS,
+	TONE_MIN_POWER,
 	factsFitFolder,
+	toneAudioPower,
 	recordingFactsBytes,
 	recordingFactsOf,
 	toneFactOf,
@@ -53,10 +57,13 @@ import {
 import { createLogger } from "../../../../src/utils/logger.js"
 import { gaussian, mulberry32 } from "../audio-tones/synth.js"
 import {
+	NfmSource,
 	brokenDcsDeviation,
 	dcsDeviation,
+	goertzel,
 	voicePitchDeviation,
 } from "./wideband-nfm-fixtures.js"
+import { WidebandNfmChain } from "../../../../src/core/scanner/channel/wideband-nfm.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
 import type { AnalogHandle } from "../../../../src/core/scanner/store/analog-operations.js"
 import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
@@ -488,6 +495,7 @@ describe("recordingFactsBytes bounds", () => {
 			ctcssBlocks: TONE_MEASURED_MIN_BLOCKS,
 			votedBlocks: 0,
 			partialBlocks: 0,
+			quietBlocks: TONE_QUIET_MIN_BLOCKS,
 			dcsSamples: DCS_MEASURED_MIN_SAMPLES,
 			dcsChain: 0,
 			dcsLoneHits: 0,
@@ -508,6 +516,36 @@ describe("recordingFactsBytes bounds", () => {
 			expect(DCS_MEASURED_MIN_SAMPLES).toBe(6_000)
 			expect(DCS_PARTIAL_WORDS).toBe(2)
 		})
+
+		// The derived scale (recording-facts.ts toneAudioPower) against the recorder's own JS chain:
+		// a carrier with only the tone, its 8 kHz tone audio (toneAudio(), s16 / 32 768 as the
+		// recorder pushes it) measured by Goertzel after the filters settled.
+		it.each([67, 151.4, 254.1])(
+			"the tone audio's scale: a %s Hz tone at 250 Hz deviation reaches the bank at toneAudioPower",
+			hz => {
+				const chain = new WidebandNfmChain({
+					inputRateHz: LOW_FS,
+					offsetHz: LOW_OFFSET,
+				})
+				const src = new NfmSource({
+					fs: LOW_FS,
+					offsetHz: LOW_OFFSET,
+					voice: false,
+					noiseSigma: 0,
+					ctcssHz: hz,
+					ctcssDeviationHz: 250,
+				})
+				const tone: number[] = []
+				for (let i = 0; i < 30; i++) {
+					chain.process(src.next(LOW_FS / 10, true))
+					for (const t of chain.toneAudio()) tone.push(t / 32_768)
+				}
+				const measured = 2 * goertzel(tone, 8000, hz, 8000, 24_000)
+				expect(measured / toneAudioPower(hz, 250)).toBeGreaterThan(0.95)
+				expect(measured / toneAudioPower(hz, 250)).toBeLessThan(1.05)
+				if (hz === 254.1) expect(measured / TONE_MIN_POWER).toBeLessThan(1.05)
+			},
+		)
 
 		it("a confirmed DCS code wins over a settled CTCSS tone; the settled tone wins otherwise", () => {
 			expect(toneFactOf(88.5, { ...quiet, dcs: code })).toEqual({
@@ -568,7 +606,22 @@ describe("recordingFactsBytes bounds", () => {
 		})
 
 		it("null exactly at both minimums; absent one past either", () => {
+			expect(TONE_QUIET_MIN_BLOCKS).toBe(10)
 			expect(toneFactOf(null, quiet)).toEqual({ tone: null })
+			expect(
+				toneFactOf(null, { ...quiet, ctcssBlocks: 40, quietBlocks: 40 }),
+			).toEqual({ tone: null })
+			// One quiet block short of the minimum, or none: no proof a tone would have been seen.
+			expect(
+				toneFactOf(null, {
+					...quiet,
+					ctcssBlocks: 40,
+					quietBlocks: TONE_QUIET_MIN_BLOCKS - 1,
+				}),
+			).toEqual({})
+			expect(
+				toneFactOf(null, { ...quiet, ctcssBlocks: 40, quietBlocks: 0 }),
+			).toEqual({})
 			expect(toneFactOf(null, { ...quiet, ctcssBlocks: 40 })).toEqual({
 				tone: null,
 			})
@@ -655,6 +708,7 @@ describe("recordingFactsBytes bounds", () => {
 				expect(toneFactOf(null, { ...quiet, dcsSamples: n })).toEqual({})
 				expect(toneFactOf(null, { ...quiet, votedBlocks: n })).toEqual({})
 				expect(toneFactOf(null, { ...quiet, partialBlocks: n })).toEqual({})
+				expect(toneFactOf(null, { ...quiet, quietBlocks: n })).toEqual({})
 				expect(toneFactOf(null, { ...quiet, dcsChain: n })).toEqual({})
 				expect(toneFactOf(null, { ...quiet, dcsLoneHits: n })).toEqual({})
 				expect(toneFactOf(null, { ...quiet, dcsAnyChain: n })).toEqual({})
@@ -667,6 +721,7 @@ describe("recordingFactsBytes bounds", () => {
 		ctcssBlocks: bank.blockCount(),
 		votedBlocks: bank.votedBlockCount(),
 		partialBlocks: bank.partialBlockCount(),
+		quietBlocks: bank.quietBlockCount(),
 		dcsSamples: dcs.sampleCount(),
 		dcsChain: dcs.longestChain(),
 		dcsLoneHits: dcs.loneHitCount(),
@@ -685,7 +740,7 @@ describe("recordingFactsBytes bounds", () => {
 	// tone wins its blocks but under 60% of all of them, so the bank settles on none. Blocks
 	// voted, so the fact is not determined (no member), never a "no tone".
 	it("a bank whose tone was diluted under its 60% share gives no member, never null", () => {
-		const bank = new CtcssBank()
+		const bank = new CtcssBank(RECORDER_TONE_QUIET)
 		const rand = mulberry32(7)
 		const tone = (n: number) => {
 			for (let i = 0; i < n; i++)
@@ -701,19 +756,22 @@ describe("recordingFactsBytes bounds", () => {
 			{},
 		)
 		// The same bank's noise alone, as long (modelled white noise): it fills the sub-audible band
-		// but no tone wins or leans on a block and no DCS word chains: a measured "no tone".
-		const noisy = new CtcssBank()
-		const noisyDcs = new DcsDecoder()
-		for (let i = 0; i < 39_200; i++) {
-			const x = 0.3 * gaussian(rand)
-			noisy.pushSample(x)
-			noisyDcs.pushSample(x)
+		// and no tone wins or leans on a block, but every block is too loud to prove a tone would
+		// have been seen: not determined. The same noise 40 dB down is quiet: a measured "no tone".
+		const noiseOf = (sigma: number) => {
+			const noisy = new CtcssBank(RECORDER_TONE_QUIET)
+			const noisyDcs = new DcsDecoder()
+			for (let i = 0; i < 39_200; i++) {
+				const x = sigma * gaussian(rand)
+				noisy.pushSample(x)
+				noisyDcs.pushSample(x)
+			}
+			expect(noisy.votedBlockCount()).toBe(0)
+			expect(noisy.subAudibleBlockCount()).toBeGreaterThan(0)
+			return toneFactOf(noisy.result(), coverageOf(noisy, noisyDcs))
 		}
-		expect(noisy.votedBlockCount()).toBe(0)
-		expect(noisy.subAudibleBlockCount()).toBeGreaterThan(0)
-		expect(toneFactOf(noisy.result(), coverageOf(noisy, noisyDcs))).toEqual({
-			tone: null,
-		})
+		expect(noiseOf(0.3)).toEqual({})
+		expect(noiseOf(0.003)).toEqual({ tone: null })
 	})
 
 	it("ids or codes past their bounds refuse the sidecar", () => {
@@ -746,12 +804,28 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		ctcssAt?: (t: number) => number | null
 		/** Extra deviation in Hz at absolute source time t s (NfmSource.setSubAudible). */
 		subAudible?: (t: number) => number
+		/** The CTCSS peak deviation in Hz (default the source's 350). */
+		ctcssDeviationHz?: number
+		/**
+		 * Whether the talker speaks at t s into the over (each 25 ms chunk; default always): the
+		 * voice and `subAudible` are keyed off while not, the carrier and its CTCSS stay on.
+		 */
+		voiceAt?: (t: number) => boolean
+	}
+
+	/** The modelled source: syllabic voice by default, and its noise seed. */
+	interface SceneSource {
+		syllables?: boolean
+		seed?: number
 	}
 
 	// Kept files of a scene through the real recorder and store. Each over is its own observation
 	// (closed 600 ms into the gap after it, so a gap under the 2 s hang joins the next over into
 	// the same file); the source's tone follows each over.
-	async function recorderScene(overs: readonly Over[]) {
+	async function recorderScene(
+		overs: readonly Over[],
+		source: SceneSource = {},
+	) {
 		const h = await harness()
 		const given: unknown[] = []
 		const real: ReturnType<EvidenceStore["beginAnalog"]>[] = []
@@ -763,7 +837,11 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		const r = recorderHarness({
 			fs: LOW_FS,
 			offset: LOW_OFFSET,
-			source: { ctcssHz: overs[0]?.ctcssHz ?? null, syllables: true },
+			source: {
+				ctcssHz: overs[0]?.ctcssHz ?? null,
+				syllables: source.syllables ?? true,
+				...(source.seed === undefined ? {} : { seed: source.seed }),
+			},
 			decodedLabel: () => null,
 			voicePrior: () => analogFm,
 			beginWrap: begin => recorderInput => {
@@ -790,11 +868,18 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		for (const [n, over] of overs.entries()) {
 			const id = `o${n}`
 			r.src.setCtcss(over.ctcssHz)
+			r.src.setCtcssDeviation(over.ctcssDeviationHz ?? 350)
 			r.src.setSubAudible(over.subAudible ?? null)
+			r.src.setVoice(true)
 			const onset = r.engine.liveEdge()
 			const end = onset + over.seconds * r.fs
 			for (let i = 0; i < Math.round(over.seconds * 40); i++) {
 				if (over.ctcssAt !== undefined) r.src.setCtcss(over.ctcssAt(i / 40))
+				if (over.voiceAt !== undefined) {
+					const speaking = over.voiceAt(i / 40)
+					r.src.setVoice(speaking)
+					r.src.setSubAudible(speaking ? (over.subAudible ?? null) : null)
+				}
 				r.engine.write(r.src.next(chunk, true))
 				const edge = r.engine.liveEdge()
 				if (edge - onset >= 0.1 * r.fs)
@@ -862,17 +947,19 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		120_000,
 	)
 
-	// The modelled voice's bursts (400 Hz up) leave little in the 300 Hz tone audio; with the
-	// discriminator's noise under it nothing tone-like is heard over 6 s: "No tone heard".
+	// The modelled voice's bursts (400 Hz up) leave little in the 300 Hz tone audio: its blocks are
+	// under the quiet ceiling (a tone at 250 Hz of deviation would have voted in them) and nothing
+	// tone-like is heard over 6 s: "No tone heard". Real voice fills the band with its pitch.
 	it("untoned voice: both detectors analysed it and heard no tone: null", async () => {
 		const { facts, stored } = await recorderKeep(null)
 		expect(facts.tone).toBeNull()
 		expect(stored.tone).toBeNull()
 	}, 120_000)
 
-	// Modelled voice pitch in the sub-audible band (110-170 Hz glide plus its harmonic): it fills
-	// the band, but no CTCSS tone wins or leans on a block and no DCS word chains: null.
-	it("untoned voice with its pitch in the 85-300 Hz band: null", async () => {
+	// Modelled voice pitch in the sub-audible band (110-170 Hz glide plus its harmonic): no CTCSS
+	// tone wins or leans on a block and no DCS word chains, but the pitch fills every block above
+	// the quiet ceiling, so a tone under it could have hidden: not determined, never null.
+	it("untoned voice with its pitch in the 85-300 Hz band and no pause: absent", async () => {
 		const scene = await recorderScene([
 			{
 				seconds: 6,
@@ -882,9 +969,113 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 			},
 		])
 		expect(scene.outcomes).toEqual(["finalized"])
-		expect(scene.facts[0]!.tone).toBeNull()
-		expect(scene.stored[0]!.tone).toBeNull()
+		expect("tone" in scene.facts[0]!).toBe(false)
+		expect("tone" in scene.stored[0]!).toBe(false)
 	}, 120_000)
+
+	// The same pitch spoken in phrases with pauses (2 s, a 3 s pause, 1.5 s, a 1.5 s pause, 1 s):
+	// the carrier alone in the pauses gives the bank its quiet blocks, so an untoned talker reads
+	// "No tone heard"; the same talker over a 254.1 Hz tone at 250 Hz of deviation, the weakest
+	// tone ruled out, is heard in those pauses and never reads null.
+	const phrases = (t: number) =>
+		t < 2 || (t >= 5 && t < 6.5) || (t >= 8 && t < 9)
+	it("a talker with pauses: untoned reads null, over the weakest credible tone never", async () => {
+		const untoned = await recorderScene([
+			{
+				seconds: 9,
+				ctcssHz: null,
+				gapAfter: 4.1,
+				subAudible: voicePitchDeviation(600),
+				voiceAt: phrases,
+			},
+		])
+		expect(untoned.outcomes).toEqual(["finalized"])
+		expect(untoned.facts[0]!.tone).toBeNull()
+		expect(untoned.stored[0]!.tone).toBeNull()
+		const toned = await recorderScene([
+			{
+				seconds: 9,
+				ctcssHz: 254.1,
+				ctcssDeviationHz: 250,
+				gapAfter: 4.1,
+				subAudible: voicePitchDeviation(600),
+				voiceAt: phrases,
+			},
+		])
+		expect(toned.outcomes).toEqual(["finalized"])
+		expect(toned.facts[0]!.tone).not.toBeNull()
+		expect(toned.stored[0]!.tone).not.toBeNull()
+	}, 240_000)
+
+	/** The file's tone is never null; when present it is the over's own tone. */
+	const neverNull = (
+		scene: Awaited<ReturnType<typeof recorderScene>>,
+		hz: number,
+	) => {
+		expect(scene.outcomes).toEqual(["finalized"])
+		for (const fact of [scene.facts[0]!, scene.stored[0]!]) {
+			expect(fact.tone).not.toBeNull()
+			if ("tone" in fact) expect(fact.tone).toEqual({ kind: "ctcss", hz })
+		}
+	}
+
+	// A tone at 250 Hz of deviation under an in-band voice pitch at 2 and 4 times its deviation
+	// (the pitch never pauses for a whole block), two talkers' timings and receiver noise seeds:
+	// the pitch keeps every block from voting or leaning, and from being quiet: never null.
+	it.each(
+		[67, 100, 173.8, 250.3, 254.1].flatMap(hz =>
+			[2, 4].map(times => [hz, times] as const),
+		),
+	)(
+		"a %s Hz tone at 250 Hz deviation under a voice pitch %s times its level: never null",
+		async (hz, times) => {
+			for (const [offsetS, seed] of [
+				[0, 7],
+				[0.37, 19],
+			] as const) {
+				const scene = await recorderScene(
+					[
+						{
+							seconds: 6,
+							ctcssHz: hz,
+							ctcssDeviationHz: 250,
+							gapAfter: 4.1,
+							subAudible: voicePitchDeviation(250 * times, offsetS),
+						},
+					],
+					{ seed },
+				)
+				neverNull(scene, hz)
+			}
+		},
+		240_000,
+	)
+
+	// Continuous speech (the voice bursts never pause) with its pitch at 2.5 times the tone's
+	// deviation, three seeds and timings: never null.
+	it.each([
+		[88.5, 3, 0],
+		[192.8, 11, 0.21],
+		[254.1, 29, 0.83],
+	])(
+		"continuous speech over a %s Hz tone at 250 Hz deviation (seed %s): never null",
+		async (hz, seed, offsetS) => {
+			const scene = await recorderScene(
+				[
+					{
+						seconds: 5,
+						ctcssHz: hz,
+						ctcssDeviationHz: 250,
+						gapAfter: 4.1,
+						subAudible: voicePitchDeviation(625, offsetS),
+					},
+				],
+				{ syllables: false, seed },
+			)
+			neverNull(scene, hz)
+		},
+		120_000,
+	)
 
 	// Modelled DCS codes at 600 Hz deviation under the voice. An inverted 023 is the same bit
 	// stream as 047 normal; the standard set reports it the way the live path does: 047 normal.
@@ -980,9 +1171,10 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 			scale * next() + toneHz * Math.sin(2 * Math.PI * 88.5 * t)
 	}
 
-	// An 88.5 Hz tone 12 dB under sub-audible noise: too weak for a block to vote, but blocks lean
-	// on it two in a row: absent, never null. The same noise alone: nothing leans, null.
-	it("a weak 88.5 Hz tone under sub-audible noise: absent; the noise alone: null", async () => {
+	// An 88.5 Hz tone 12 dB under sub-audible noise: too weak for a block to vote: absent, never
+	// null. The same noise alone: nothing leans, but the noise keeps every block above the quiet
+	// ceiling (a tone could hide under it): absent too.
+	it("a weak 88.5 Hz tone under sub-audible noise: absent; the noise alone: absent", async () => {
 		const toned = await recorderScene([
 			{
 				seconds: 6,
@@ -1003,9 +1195,30 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 			},
 		])
 		expect(noise.outcomes).toEqual(["finalized"])
-		expect(noise.facts[0]!.tone).toBeNull()
-		expect(noise.stored[0]!.tone).toBeNull()
+		expect("tone" in noise.facts[0]!).toBe(false)
+		expect("tone" in noise.stored[0]!).toBe(false)
 	}, 240_000)
+
+	it.each([5, 41, 77])(
+		"an 88.5 Hz tone 12 dB under sub-audible noise (seed %s): never null",
+		async seed => {
+			const scene = await recorderScene(
+				[
+					{
+						seconds: 4,
+						ctcssHz: null,
+						gapAfter: 4.1,
+						subAudible: subAudibleNoise(seed, 150, -12),
+					},
+				],
+				{ seed },
+			)
+			expect(scene.outcomes).toEqual(["finalized"])
+			expect(scene.facts[0]!.tone).not.toBeNull()
+			expect(scene.stored[0]!.tone).not.toBeNull()
+		},
+		120_000,
+	)
 
 	// A 600 ms over alone: its detectors analysed under 2.75 s (the CTCSS minimum): absent.
 	it("a short over (600 ms): the tone is absent, never null", async () => {
@@ -1017,9 +1230,9 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		expect("tone" in scene.stored[0]!).toBe(false)
 	}, 120_000)
 
-	// Two untoned overs joined across 1.9 s of carrier-off receiver noise (inside the session's
-	// activity, so the detectors hear it): FM noise fills the band without any one tone or a
-	// chained DCS word, so the file still reads no tone.
+	// Two untoned overs joined across 1.9 s of carrier-off receiver noise: no tone or chained DCS
+	// word, and the modelled voice (its bursts from 400 Hz up) leaves its blocks under the quiet
+	// ceiling, so the file reads no tone.
 	it("two untoned overs joined across receiver noise: null", async () => {
 		const scene = await recorderScene([
 			{ seconds: 1.5, ctcssHz: null, gapAfter: 1.9 },

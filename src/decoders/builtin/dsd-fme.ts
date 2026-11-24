@@ -852,12 +852,17 @@ export const DSD_FME_WAV_END_WAIT_MS = 500
  * cancel the read itself; its late result is discarded. Single flight: while an abandoned read is
  * still pending, a later attempt starts no listing of its own (it waits for that read, again at
  * most this long, and counts as timed out if it is still stuck), so at most one directory read
- * per adapter occupies the libuv pool however long the file system hangs. A retry whose previous
- * attempt timed out ends its call's lookup unread when that same read is still pending when the
- * retry runs (its remaining retries are skipped): on a hung mount each call costs the chain one
- * attempt, at most 2 000 ms, never a chain of 1 + DSD_FME_WAV_RETRIES attempts
- * (6 × (2 000 + 200) ms = 13.2 s) per call end. A read that settles before the retry runs (at
- * least DSD_FME_WAV_RETRY_MS after the timeout) was only slow: the retry reads again.
+ * per adapter occupies the libuv pool however long the file system hangs. When a retry is due
+ * (DSD_FME_WAV_RETRY_MS after an attempt that timed out) and that same read is still pending, the
+ * lookup waits for it once, at most this long again, outside the one-at-a-time chain: settled
+ * (a slow listing, e.g. one that took 2.3 s), the retry is queued and reads; still stuck, the
+ * lookup ends (its remaining retries are skipped). On a hung mount each call end then costs the
+ * chain one attempt, at most 2 000 ms, and its lookup lasts at most 2 000 + 200 + 2 000 =
+ * 4 200 ms after its turn came, holding only a timer meanwhile (no directory read, no chain
+ * slot), never a chain of 1 + DSD_FME_WAV_RETRIES attempts (6 × (2 000 + 200) ms = 13.2 s).
+ * Worst case for one lookup (every read slow, each settling just inside its retry's wait): 6
+ * attempts of at most 2 000 ms on the chain (12 s, as before) and 5 waits of at most 2 000 ms off
+ * it: 6 × 2 000 + 5 × (200 + 2 000) = 23 s.
  */
 export const DSD_FME_WAV_ATTEMPT_TIMEOUT_MS = 2_000
 
@@ -1377,7 +1382,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * no retry in the new run. Only a crash restart (start() without stop()) raises it: after
 	 * stop() (`stopping`), as in restart() (stop() then start()), every lookup pending at the stop,
 	 * the calls stop() itself ended among them, keeps its retries, since dsd-fme finalises those
-	 * files only when its child exits; each chain is bounded (13.2 s, see stop()).
+	 * files only when its child exits; each chain is bounded (23 s, see stop()).
 	 */
 	private wavRun = 0
 	/**
@@ -1852,8 +1857,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// The WAV lookups are deliberately NOT cancelled, here or by the start() of a restart
 		// (wavRun): dsd-fme finalises the file of a call this stop() ended when its child exits, inside super.stop(), so only a retry after it
 		// finds that file and links it in a `wavFileUpdate` (the recording links follow it). That
-		// post-stop update is bounded: each chain is 1 + DSD_FME_WAV_RETRIES attempts, at most
-		// 6 × (DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS) = 13.2 s after its end, and
+		// post-stop update is bounded: each chain is 1 + DSD_FME_WAV_RETRIES attempts, each retry
+		// waiting once at most for a stuck read, at most 6 × 2 000 + 5 × (200 + 2 000) ms = 23 s
+		// after its end (DSD_FME_WAV_ATTEMPT_TIMEOUT_MS), and
 		// a call_end update is all it publishes (a probe pool has stopped listening by then).
 		await super.stop()
 		this.linkDmrCc.clear()
@@ -5625,20 +5631,16 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		let blocked: StuckWavListing | null = null
 		const tryFind = async (): Promise<void> => {
 			// A retry ends the lookup unread when the listing its previous attempt timed out on is
-			// still the one stuck (it would only wait on it again: on a hung mount each call costs
-			// the chain one attempt, no backlog per call end), or when a new run started since the
-			// lookup began. A listing that settled before the retry ran (merely slow) is no reason:
-			// the retry reads. The run check also ends, after its first attempt, a lookup whose
-			// first attempt was only queued when start() began the new run: an old run's call
-			// retries nothing in the new one.
+			// still the one stuck (`retry` already waited for it once; queued again behind the
+			// chain, it would only wait on it again), or when a new run started since the lookup
+			// began. A listing that settled before the retry ran (merely slow) is no reason: the
+			// retry reads. The run check also ends, after its first attempt, a lookup whose first
+			// attempt was only queued when start() began the new run: an old run's call retries
+			// nothing in the new one.
 			if (attempt > 0) {
 				const stillStuck = blocked !== null && this.stuckWavListing === blocked
 				if (stillStuck || run !== this.wavRun) {
-					if (call.protocol === "dmr") this.dmrClearance.ended(call.callId)
-					this.logger.debug(
-						{ attempts: attempt, stuck: stillStuck },
-						"WAV file lookup ended early, retries skipped",
-					)
+					endEarly(stillStuck)
 					return
 				}
 			}
@@ -5730,13 +5732,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			// if this attempt's stuck listing is still stuck then), unless a new run started
 			// meanwhile (an old run's attempt schedules no retry in it).
 			if (run !== this.wavRun) {
-				if (call.protocol === "dmr") this.dmrClearance.ended(call.callId)
-				this.logger.debug(
-					{ attempts: attempt, stuck: false },
-					"WAV file lookup ended early, retries skipped",
-				)
+				endEarly(false)
 			} else if (attempt <= DSD_FME_WAV_RETRIES) {
-				setTimeout(queue, DSD_FME_WAV_RETRY_MS)
+				setTimeout(retry, DSD_FME_WAV_RETRY_MS)
 			} else {
 				if (call.protocol === "dmr") this.dmrClearance.ended(call.callId)
 				this.logger.debug(
@@ -5750,6 +5748,30 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					"WAV file not found after max retries",
 				)
 			}
+		}
+		/** The lookup ends here, its remaining retries skipped (`stuck`: on a stuck listing). */
+		const endEarly = (stuck: boolean): void => {
+			if (call.protocol === "dmr") this.dmrClearance.ended(call.callId)
+			this.logger.debug(
+				{ attempts: attempt, stuck },
+				"WAV file lookup ended early, retries skipped",
+			)
+		}
+		// A retry that is due: when the listing the last attempt timed out on is still stuck, wait
+		// for it once (at most DSD_FME_WAV_ATTEMPT_TIMEOUT_MS, outside the chain) and queue the
+		// retry only if it settled; otherwise queue it now.
+		const retry = (): void => {
+			const waitFor = blocked
+			if (waitFor === null || this.stuckWavListing !== waitFor) {
+				queue()
+				return
+			}
+			void waitStuckListing(waitFor, DSD_FME_WAV_ATTEMPT_TIMEOUT_MS).then(
+				settled => {
+					if (settled) queue()
+					else endEarly(true)
+				},
+			)
 		}
 		// One attempt in flight per adapter; a failed one never stops the next.
 		const queue = (): void => {

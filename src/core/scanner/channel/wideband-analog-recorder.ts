@@ -54,7 +54,11 @@ import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import { CtcssBank } from "../../audio-tones/ctcss.js"
 import { DcsDecoder } from "../../audio-tones/dcs.js"
-import { toneFactOf, type ToneCoverage } from "../store/recording-facts.js"
+import {
+	RECORDER_TONE_QUIET,
+	toneFactOf,
+	type ToneCoverage,
+} from "../store/recording-facts.js"
 import { ulid } from "../ids.js"
 import { CPU_COST } from "../plan/cost.js"
 import type {
@@ -3429,7 +3433,7 @@ export class WidebandAnalogRecorder {
 			gapRun: 0,
 			gapFrom: 0,
 			gate: new VoiceActivityGate(),
-			ctcss: new CtcssBank(),
+			ctcss: new CtcssBank(RECORDER_TONE_QUIET),
 			dcs: new DcsDecoder(),
 			toneHz: null,
 			toneCoverage: null,
@@ -4636,6 +4640,7 @@ export class WidebandAnalogRecorder {
 						ctcssBlocks: file.ctcss.blockCount(),
 						votedBlocks: file.ctcss.votedBlockCount(),
 						partialBlocks: file.ctcss.partialBlockCount(),
+						quietBlocks: file.ctcss.quietBlockCount(),
 						dcsSamples: file.dcs.sampleCount(),
 						dcsChain: file.dcs.longestChain(),
 						dcsLoneHits: file.dcs.loneHitCount(),

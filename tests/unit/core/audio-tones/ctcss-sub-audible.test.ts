@@ -7,10 +7,14 @@
  */
 import { describe, expect, it } from "vitest"
 import { DCS_STANDARD_CODES } from "@wavekit/api-types"
-import { CtcssBank } from "../../../../src/core/audio-tones/ctcss.js"
+import { CTCSS_HZ, CtcssBank } from "../../../../src/core/audio-tones/ctcss.js"
 import { DcsDecoder } from "../../../../src/core/audio-tones/dcs.js"
 import {
+	RECORDER_TONE_QUIET,
 	TONE_MEASURED_MIN_BLOCKS,
+	TONE_MIN_CREDIBLE_DEVIATION_HZ,
+	TONE_MIN_POWER,
+	toneAudioPower,
 	toneFactOf,
 } from "../../../../src/core/scanner/store/recording-facts.js"
 import { dcsBitStream, lowpassInPlace, nrz, whiteNoise } from "./dcs-synth.js"
@@ -25,7 +29,7 @@ interface Fed {
 
 /** The recorder's per-file tone composition: one bank and one DCS decoder, the same samples. */
 function fed(samples: Iterable<number>): Fed {
-	const bank = new CtcssBank()
+	const bank = new CtcssBank(RECORDER_TONE_QUIET)
 	const dcs = new DcsDecoder()
 	for (const x of samples) {
 		bank.pushSample(x)
@@ -39,6 +43,7 @@ function fact({ bank, dcs }: Fed, ownTone = false) {
 		ctcssBlocks: bank.blockCount(),
 		votedBlocks: bank.votedBlockCount(),
 		partialBlocks: bank.partialBlockCount(),
+		quietBlocks: bank.quietBlockCount(),
 		dcsSamples: dcs.sampleCount(),
 		dcsChain: dcs.longestChain(),
 		dcsLoneHits: dcs.loneHitCount(),
@@ -103,7 +108,8 @@ function* voiceLike(n: number, toneHz: number | null): Generator<number> {
 }
 
 describe("CtcssBank sub-audible energy without a winning tone", () => {
-	it("a DCS-like random NRZ: no block votes or leans, no DCS word chains: no tone (null)", () => {
+	// Nothing tone-like, but every block is too loud to prove a tone would have been seen: absent.
+	it("a DCS-like random NRZ: no block votes or leans, no DCS word chains, no quiet block: absent", () => {
 		const f = fed(dcsLike(24_000, 3))
 		const { bank } = f
 		expect(bank.sampleCount()).toBe(24_000)
@@ -115,7 +121,8 @@ describe("CtcssBank sub-audible energy without a winning tone", () => {
 		expect(bank.partialBlockCount()).toBe(0)
 		expect(f.dcs.longestChain()).toBeLessThan(2)
 		expect(f.dcs.anyValidChain()).toBeLessThan(2)
-		expect(fact(f)).toEqual({ tone: null })
+		expect(f.bank.quietBlockCount()).toBe(0)
+		expect(fact(f)).toEqual({})
 	})
 
 	it("a real DCS 023 word stream: the code, though no CTCSS block votes", () => {
@@ -143,25 +150,28 @@ describe("CtcssBank sub-audible energy without a winning tone", () => {
 	})
 
 	// Speech's own fundamental (85-255 Hz) and its low harmonics lie in the bank's band, so an
-	// untoned voice fills it, but its gliding pitch never holds one tone's bin: no tone (null).
-	it("untoned voice: its pitch fills the sub-audible band, no tone leans on a block: null", () => {
+	// untoned voice fills it, and its gliding pitch never holds one tone's bin; filled, the band
+	// could hide a tone under the pitch, so the file is not determined (absent), never null.
+	it("untoned voice: its pitch fills the sub-audible band, no tone leans on a block, no quiet block: absent", () => {
 		const f = fed(voiceLike(24_000, null))
 		expect(f.bank.result()).toBeNull()
 		expect(f.bank.votedBlockCount()).toBe(0)
 		expect(f.bank.subAudibleBlockCount()).toBeGreaterThan(0)
 		expect(f.bank.partialBlockCount()).toBe(0)
-		expect(fact(f)).toEqual({ tone: null })
+		expect(f.bank.quietBlockCount()).toBe(0)
+		expect(fact(f)).toEqual({})
 		// Kept for its own tone: never null.
 		expect(fact(f, true)).toEqual({})
 	})
 
-	it("white noise alone: it fills the band, no tone wins or leans, no DCS word chains: null", () => {
+	it("white noise alone: it fills the band, no tone wins or leans, no DCS word chains, no quiet block: absent", () => {
 		const rand = mulberry32(11)
 		const f = fed(Array.from({ length: 24_000 }, () => 0.3 * gaussian(rand)))
 		expect(f.bank.votedBlockCount()).toBe(0)
 		expect(f.bank.subAudibleBlockCount()).toBe(f.bank.blockCount())
 		expect(f.bank.partialBlockCount()).toBe(0)
-		expect(fact(f)).toEqual({ tone: null })
+		expect(f.bank.quietBlockCount()).toBe(0)
+		expect(fact(f)).toEqual({})
 	})
 
 	it("silence at the minimums (10 blocks, 22 000 samples): null; one sample fewer is absent", () => {
@@ -279,7 +289,7 @@ function power(x: ArrayLike<number>): number {
 	return p / x.length
 }
 
-describe("weak or broken tones under noise read absent, noise and voice stay null", () => {
+describe("weak or broken tones under noise read absent, and so do loud noise and voice", () => {
 	/** 6 s of 300 Hz low-passed white noise with an 88.5 Hz tone `snrDb` under its power. */
 	const weakTone = (snrDb: number, seed: number) => {
 		const noise = lowpassed300(whiteNoise({ seconds: 6, seed, std: 0.3 }))
@@ -322,17 +332,18 @@ describe("weak or broken tones under noise read absent, noise and voice stay nul
 	)
 
 	it.each([1, 2, 3])(
-		"60 s of 300 Hz low-passed white noise (seed %s): no lean twice on one tone, chance DCS hits only: null",
+		"60 s of 300 Hz low-passed white noise (seed %s): no lean twice on one tone, chance DCS hits only, no quiet block: absent",
 		seed => {
 			const f = fed(lowpassed300(whiteNoise({ seconds: 60, seed, std: 0.3 })))
 			expect(f.bank.partialBlockCount()).toBe(0)
 			expect(f.dcs.loneHitCount()).toBeLessThan(20)
-			expect(fact(f)).toEqual({ tone: null })
+			expect(f.bank.quietBlockCount()).toBe(0)
+			expect(fact(f)).toEqual({})
 		},
 		30_000,
 	)
 
-	it("60 s of a gliding voice pitch (110-170 Hz, its harmonic, 4 Hz syllables): null", () => {
+	it("60 s of a gliding voice pitch (110-170 Hz, its harmonic, 4 Hz syllables), no quiet block: absent", () => {
 		const glide = 30 / (2 * Math.PI * 1.3)
 		const x = Array.from({ length: 60 * RATE }, (_, i) => {
 			const t = i / RATE
@@ -343,7 +354,8 @@ describe("weak or broken tones under noise read absent, noise and voice stay nul
 		})
 		const f = fed(x)
 		expect(f.bank.partialBlockCount()).toBe(0)
-		expect(fact(f)).toEqual({ tone: null })
+		expect(f.bank.quietBlockCount()).toBe(0)
+		expect(fact(f)).toEqual({})
 	}, 30_000)
 
 	// DCS 023 with one bit flipped at a random place in every 20 (5% bit errors): never 46 clean
@@ -447,5 +459,127 @@ describe("DcsDecoder anyValidChain: no clean DCS code reads null", () => {
 		expect(dcs.anyValidChain()).toBe(chain)
 		dcs.reset()
 		expect(dcs.anyValidChain()).toBe(0)
+	})
+})
+
+describe("CtcssBank quietBlockCount: ceilings at and past their bound", () => {
+	const sine = (hz: number, amplitude: number, n = 24_000) =>
+		Array.from(
+			{ length: n },
+			(_, i) => amplitude * Math.sin((2 * Math.PI * hz * i) / RATE),
+		)
+	const quietOf = (
+		samples: readonly number[],
+		ceilings?: { bandMax: number; rawMax: number },
+	) => {
+		const bank = new CtcssBank(ceilings)
+		for (const x of samples) bank.pushSample(x)
+		return { quiet: bank.quietBlockCount(), blocks: bank.blockCount(), bank }
+	}
+
+	it("no ceilings, or ceilings that are not finite non-negative numbers: no block is quiet", () => {
+		const silence = new Array<number>(24_000).fill(0)
+		expect(quietOf(silence).quiet).toBe(0)
+		for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -1e-9]) {
+			expect(quietOf(silence, { bandMax: bad, rawMax: 1 }).quiet).toBe(0)
+			expect(quietOf(silence, { bandMax: 1, rawMax: bad }).quiet).toBe(0)
+		}
+	})
+
+	it("exactly at both ceilings is quiet: silence under ceilings of 0", () => {
+		const r = quietOf(new Array<number>(24_000).fill(0), {
+			bandMax: 0,
+			rawMax: 0,
+		})
+		expect(r.blocks).toBe(11)
+		expect(r.quiet).toBe(11)
+		// Any power at all is past a ceiling of 0.
+		expect(quietOf(sine(2000, 1e-6), { bandMax: 1, rawMax: 0 }).quiet).toBe(0)
+	})
+
+	it("the raw ceiling: a 2 kHz sine of 0.1 (raw power 0.005) is quiet at 0.005, not under it", () => {
+		// Four samples per period at 8 kHz: every 500 ms block's mean square is 0.1² / 2.
+		const x = sine(2000, 0.1)
+		expect(quietOf(x, { bandMax: 1, rawMax: 0.005 * (1 + 1e-9) }).quiet).toBe(
+			11,
+		)
+		expect(quietOf(x, { bandMax: 1, rawMax: 0.005 * (1 - 1e-6) }).quiet).toBe(0)
+	})
+
+	it("the band ceiling: a 150 Hz sine is quiet above its band share (0.976), not below it", () => {
+		const x = sine(150, 0.1)
+		const p = 0.1 ** 2 / 2
+		expect(quietOf(x, { bandMax: 0.995 * p, rawMax: 1 }).quiet).toBe(11)
+		expect(quietOf(x, { bandMax: 0.955 * p, rawMax: 1 }).quiet).toBe(0)
+		// The count never changes the bank's answer.
+		expect(quietOf(x, { bandMax: 1, rawMax: 1 }).bank.result()).toBe(
+			quietOf(x).bank.result(),
+		)
+	})
+
+	it("reset clears the count", () => {
+		const { bank } = quietOf(new Array<number>(24_000).fill(0), {
+			bandMax: 0,
+			rawMax: 0,
+		})
+		bank.reset()
+		expect(bank.quietBlockCount()).toBe(0)
+	})
+})
+
+describe("RECORDER_TONE_QUIET: a quiet block proves a credible tone would have voted", () => {
+	const tone = (hz: number, power: number, i: number) =>
+		Math.sqrt(2 * power) * Math.sin((2 * Math.PI * hz * i) / RATE)
+
+	it("the ceilings' arithmetic: 250 Hz of deviation at 254.1 Hz is the weakest tone, 6.51e-3", () => {
+		expect(TONE_MIN_CREDIBLE_DEVIATION_HZ).toBe(250)
+		expect(TONE_MIN_POWER).toBeCloseTo(6.51e-3, 4)
+		expect(TONE_MIN_POWER).toBe(toneAudioPower(254.1, 250))
+		expect(toneAudioPower(67, 250)).toBeCloseTo(1.82e-2, 3)
+		expect(RECORDER_TONE_QUIET.bandMax).toBeCloseTo(1.3e-3, 4)
+		expect(RECORDER_TONE_QUIET.rawMax).toBeCloseTo(0.163, 3)
+	})
+
+	// Every standard tone at the power 250 Hz of deviation gives it: no block is quiet, every
+	// block votes for it (its own tone alone keeps it above the band ceiling).
+	it("every standard tone at 250 Hz of deviation: no block quiet, every block votes", () => {
+		for (const hz of CTCSS_HZ) {
+			const p = toneAudioPower(hz, TONE_MIN_CREDIBLE_DEVIATION_HZ)
+			const f = fed(Array.from({ length: 24_000 }, (_, i) => tone(hz, p, i)))
+			expect(f.bank.quietBlockCount()).toBe(0)
+			expect(f.bank.votedBlockCount()).toBe(f.bank.blockCount())
+			expect(f.bank.result()).toBe(hz)
+		}
+	})
+
+	// Other audio just quiet enough (98% of the band ceiling in the band) as a line on the next
+	// tone's bin, the worst case for the 3x rule, and as noise across the band: alone every block
+	// is quiet; with the weakest credible tone added, every block votes for that tone.
+	it("other audio at the band ceiling: quiet alone, and the weakest tone added votes in every block", () => {
+		// The bank's band measure keeps 0.869 of a 250.3 Hz line; the noise is scaled on its raw
+		// power, of which the band keeps less.
+		const line = (0.98 * RECORDER_TONE_QUIET.bandMax) / 0.869
+		const noise = lowpassed300(whiteNoise({ seconds: 3, seed: 17, std: 1 }))
+		const noiseScale = Math.sqrt(
+			(0.98 * RECORDER_TONE_QUIET.bandMax) / power(noise),
+		)
+		const others: [string, (i: number) => number][] = [
+			["a 250.3 Hz line", i => tone(250.3, line, i)],
+			["300 Hz low-passed noise", i => noiseScale * (noise[i] ?? 0)],
+		]
+		for (const [, other] of others) {
+			// Alone it is quiet (the line, a tone far under 250 Hz of deviation, still votes for itself).
+			const alone = fed(Array.from({ length: 24_000 }, (_, i) => other(i)))
+			expect(alone.bank.quietBlockCount()).toBe(alone.bank.blockCount())
+			for (const hz of [67, 151.4, 254.1]) {
+				const p = toneAudioPower(hz, TONE_MIN_CREDIBLE_DEVIATION_HZ)
+				const f = fed(
+					Array.from({ length: 24_000 }, (_, i) => other(i) + tone(hz, p, i)),
+				)
+				expect(f.bank.quietBlockCount()).toBe(0)
+				expect(f.bank.votedBlockCount()).toBe(f.bank.blockCount())
+				expect(f.bank.result()).toBe(hz)
+			}
+		}
 	})
 })

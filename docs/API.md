@@ -7088,17 +7088,27 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   CTCSS tone, no two consecutive DCS words matched (of any valid code, standard
   or not: a clean non-standard code reads absent, never null), and DCS word hits
   stayed at chance (fewer than 2, or fewer than one per 3 s analysed; noise hits
-  about once per 13 s). Absent when it measured less, when a tone or DCS word was
-  heard but did not settle (a weak or broken-up tone, a standard DCS code too
-  broken to confirm, a toned over joined to an untoned one), or when the file was kept for
-  its own tone; and absent on older files. Null does not rule out a non-standard
-  tone under 67 Hz (33-64 Hz: those tones are not checked) or a CTCSS tone more
-  than about 12 dB under the sub-audible noise, nor a non-standard DCS code too
-  broken to repeat two words; the lean bounds are calibrated on
-  modelled audio only, until labelled recordings exist. A non-standard code whose
+  about once per 13 s), and at least ten of the CTCSS blocks were quiet: too
+  quiet to hide a CTCSS tone sent at 250 Hz of deviation or more (the sub-audible
+  band under a fifth of the weakest such tone's power, the 254.1 Hz one after the
+  de-emphasis and the 300 Hz low-pass), so a tone would have been heard in them.
+  Voice and receiver noise fill that band, so a voiced file reads null only when
+  its pauses on the open carrier add up to ten such blocks; a file with a tone at
+  250 Hz of deviation or more never reads null. Absent when it measured less,
+  when a tone or DCS word was heard but did not settle (a weak or broken-up tone,
+  a standard DCS code too broken to confirm, a toned over joined to an untoned
+  one), when no ten blocks were quiet (continuous speech or noise: a tone could
+  have hidden under it), or when the file was kept for its own tone; and absent
+  on older files. Null does not rule out a non-standard tone under 67 Hz
+  (33-64 Hz: those tones are not checked), a tone set under 250 Hz of
+  deviation, or a non-standard DCS code too broken to repeat two words, and a
+  file that joins two stations' overs is judged as one. A non-standard code whose
   word is a rotation of a standard code's word (or of its complement) reads as
-  that standard code, as on the live path (645 reads 526, 736 reads 263). A
-  reader accepts a DCS tone without `polarity`; a core from before 2026-11-24
+  that standard code, as on the live path (645 reads 526, 736 reads 263). Under
+  the standard code set `polarity` is always `"normal"` today: every inverted
+  standard code is the same bit stream as another standard code sent normal, and
+  that normal reading is the one reported; `"inverted"` stays in the schema for
+  a wider code set. A reader accepts a DCS tone without `polarity`; a core from before 2026-11-24
   rejects the `polarity` member (its schema is strict) and reads such a sidecar
   as no facts (fail closed; the file is still served). Null for older files, any
   other kind, and a sidecar that is missing, larger than 2 KiB, malformed or of

@@ -1,24 +1,20 @@
 /**
- * toneFactOf (recording-facts.ts) over arbitrary detector coverage: "No tone heard" (null) only
- * when both detectors analysed their minimums and heard nothing tone-like on a file not kept for
- * its own tone; a gated DCS code always wins; a settled CTCSS tone wins otherwise.
- * Modelled counters only.
+ * toneFactOf (recording-facts.ts) over arbitrary detector coverage, checked by invariants rather
+ * than by recomputing its rule: tone-like evidence never reads "No tone heard" (null); more
+ * evidence never turns "not determined" into null and more quiet blocks never turn null into
+ * "not determined"; a gated DCS code always wins, a settled CTCSS tone otherwise; and a table of
+ * rows written out by hand (the oracle) agrees with it. Modelled counters only.
  */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import {
-	DCS_LONE_HIT_SECONDS,
-	DCS_LONE_HITS_MIN,
-	DCS_MEASURED_MIN_SAMPLES,
-	DCS_PARTIAL_WORDS,
-	TONE_MEASURED_MIN_BLOCKS,
-	toneFactOf,
-} from "../../../../src/core/scanner/store/recording-facts.js"
+import { toneFactOf } from "../../../../src/core/scanner/store/recording-facts.js"
+import type { ToneCoverage } from "../../../../src/core/scanner/store/recording-facts.js"
 
 const count = fc.oneof(
 	fc.integer({ min: 0, max: 100_000 }),
 	fc.constantFrom(Number.NaN, Number.POSITIVE_INFINITY, -1),
 )
+const small = fc.integer({ min: 0, max: 40 })
 const dcs = fc.oneof(
 	fc.constant(null),
 	fc.record({
@@ -30,6 +26,7 @@ const coverage = fc.record({
 	ctcssBlocks: count,
 	votedBlocks: count,
 	partialBlocks: count,
+	quietBlocks: count,
 	dcsSamples: count,
 	dcsChain: count,
 	dcsLoneHits: count,
@@ -37,38 +34,82 @@ const coverage = fc.record({
 	dcs,
 	ownTone: fc.boolean(),
 })
+/** Coverage that often lands near the minimums, so null and absent both occur. */
+const nearMinimums = fc.record({
+	ctcssBlocks: fc.integer({ min: 0, max: 30 }),
+	votedBlocks: fc.integer({ min: 0, max: 2 }),
+	partialBlocks: fc.integer({ min: 0, max: 2 }),
+	quietBlocks: fc.integer({ min: 0, max: 30 }),
+	dcsSamples: fc.integer({ min: 0, max: 30 * 8000 }),
+	dcsChain: fc.integer({ min: 0, max: 3 }),
+	dcsLoneHits: fc.integer({ min: 0, max: 4 }),
+	dcsAnyChain: fc.integer({ min: 0, max: 3 }),
+	dcs: fc.constant(null),
+	ownTone: fc.boolean(),
+})
+
+const isNull = (c: ToneCoverage) => toneFactOf(null, c).tone === null
 
 describe("toneFactOf properties", () => {
-	// Feature: recording facts tone, Property 1: null only from enough analysed, empty evidence
+	// Feature: recording facts tone, Property 1: tone-like evidence never reads null
 	// Validates: Requirements R2
-	it("null implies both minimums, no tone-like evidence and no own-tone keep", () => {
+	it("a voted or leaned block, an own-tone keep or a two-word DCS chain never reads null", () => {
 		fc.assert(
-			fc.property(coverage, c => {
-				const fact = toneFactOf(null, c)
-				if (fact.tone !== null) return
-				expect(c.ctcssBlocks).toBeGreaterThanOrEqual(TONE_MEASURED_MIN_BLOCKS)
-				expect(c.dcsSamples).toBeGreaterThanOrEqual(DCS_MEASURED_MIN_SAMPLES)
-				expect(Number.isFinite(c.ctcssBlocks)).toBe(true)
-				expect(Number.isFinite(c.dcsSamples)).toBe(true)
-				expect(c.votedBlocks).toBe(0)
-				expect(c.partialBlocks).toBe(0)
-				expect(c.dcsChain).toBeLessThan(DCS_PARTIAL_WORDS)
-				// No chain of any valid word either (a non-standard code the gate never reports).
-				expect(Number.isFinite(c.dcsAnyChain)).toBe(true)
-				expect(c.dcsAnyChain).toBeLessThan(DCS_PARTIAL_WORDS)
-				// Lone DCS hits at chance only: under the minimum or under one per 3 s analysed.
-				expect(Number.isFinite(c.dcsLoneHits)).toBe(true)
-				expect(
-					c.dcsLoneHits < DCS_LONE_HITS_MIN ||
-						c.dcsLoneHits * DCS_LONE_HIT_SECONDS * 8000 < c.dcsSamples,
-				).toBe(true)
-				expect(c.ownTone).toBe(false)
-			}),
+			fc.property(
+				coverage,
+				fc.constantFrom(
+					"votedBlocks",
+					"partialBlocks",
+					"dcsChain",
+					"dcsAnyChain",
+					"ownTone",
+				),
+				fc.integer({ min: 1, max: 1000 }),
+				(c, field, n) => {
+					const evidence =
+						field === "ownTone"
+							? { ...c, ownTone: true }
+							: field === "dcsChain" || field === "dcsAnyChain"
+								? { ...c, [field]: 1 + n }
+								: { ...c, [field]: n }
+					expect(isNull(evidence)).toBe(false)
+				},
+			),
 			{ numRuns: 300 },
 		)
 	})
 
-	// Feature: recording facts tone, Property 2: precedence of the measured tones
+	// Feature: recording facts tone, Property 2: monotonicity of evidence and of quiet coverage
+	// Validates: Requirements R2
+	it("more evidence never makes null; more quiet blocks never undo null", () => {
+		fc.assert(
+			fc.property(
+				nearMinimums,
+				small,
+				fc.constantFrom(
+					"votedBlocks",
+					"partialBlocks",
+					"dcsChain",
+					"dcsAnyChain",
+					"dcsLoneHits",
+				),
+				(c, more, field) => {
+					const raised = { ...c, [field]: c[field] + more }
+					if (isNull(raised)) expect(isNull(c)).toBe(true)
+					// Quiet blocks are counted among the bank's blocks: raise both together.
+					const quieter = {
+						...c,
+						quietBlocks: c.quietBlocks + more,
+						ctcssBlocks: c.ctcssBlocks + more,
+					}
+					if (isNull(c)) expect(isNull(quieter)).toBe(true)
+				},
+			),
+			{ numRuns: 300 },
+		)
+	})
+
+	// Feature: recording facts tone, Property 3: precedence of the measured tones
 	// Validates: Requirements R1
 	it("a gated DCS code always wins, a settled CTCSS otherwise; a DCS answer is a standard code with a known polarity", () => {
 		fc.assert(
@@ -77,16 +118,53 @@ describe("toneFactOf properties", () => {
 				const noTone = toneFactOf(null, c)
 				if (noTone.tone?.kind === "dcs") expect(withTone).toEqual(noTone)
 				else expect(withTone).toEqual({ tone: { kind: "ctcss", hz } })
-				const fact = noTone
-				if (fact.tone?.kind !== "dcs") return
-				expect(c.dcsSamples).toBeGreaterThanOrEqual(DCS_MEASURED_MIN_SAMPLES)
-				expect(["023", "047", "754"]).toContain(fact.tone.code)
+				if (noTone.tone?.kind !== "dcs") return
+				expect(["023", "047", "754"]).toContain(noTone.tone.code)
 				expect(c.dcs).toEqual({
-					code: fact.tone.code,
-					polarity: (fact.tone as { polarity?: string }).polarity,
+					code: noTone.tone.code,
+					polarity: noTone.tone.polarity,
 				})
 			}),
 			{ numRuns: 300 },
 		)
+	})
+
+	// Feature: recording facts tone, Property 4: rows written out by hand agree
+	// Validates: Requirements R2
+	it("hand-written rows: null only with 10 quiet blocks, 6 000 DCS samples and nothing tone-like", () => {
+		/** A 6 s untoned file whose pauses gave 12 quiet blocks: "No tone heard". */
+		const base: ToneCoverage = {
+			ctcssBlocks: 23,
+			votedBlocks: 0,
+			partialBlocks: 0,
+			quietBlocks: 12,
+			dcsSamples: 48_000,
+			dcsChain: 1,
+			dcsLoneHits: 1,
+			dcsAnyChain: 1,
+			dcs: null,
+			ownTone: false,
+		}
+		const rows: [string, Partial<ToneCoverage>, "null" | "absent"][] = [
+			["the base row", {}, "null"],
+			["10 quiet blocks of 10", { ctcssBlocks: 10, quietBlocks: 10 }, "null"],
+			["9 quiet blocks", { quietBlocks: 9 }, "absent"],
+			["no quiet block (speech throughout)", { quietBlocks: 0 }, "absent"],
+			["9 blocks in all", { ctcssBlocks: 9, quietBlocks: 9 }, "absent"],
+			["5 999 DCS samples", { dcsSamples: 5_999 }, "absent"],
+			["6 000 DCS samples", { dcsSamples: 6_000 }, "null"],
+			["one voted block", { votedBlocks: 1 }, "absent"],
+			["one leaned block", { partialBlocks: 1 }, "absent"],
+			["a two-word DCS chain", { dcsChain: 2 }, "absent"],
+			["a two-word non-standard chain", { dcsAnyChain: 2 }, "absent"],
+			["2 lone hits in 6 s", { dcsLoneHits: 2 }, "absent"],
+			["kept for its own tone", { ownTone: true }, "absent"],
+			["quiet blocks not a number", { quietBlocks: Number.NaN }, "absent"],
+		]
+		for (const [, change, want] of rows) {
+			const fact = toneFactOf(null, { ...base, ...change })
+			if (want === "null") expect(fact).toEqual({ tone: null })
+			else expect(fact).toEqual({})
+		}
 	})
 })

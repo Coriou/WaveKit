@@ -39,7 +39,9 @@
  * at least DCS_MIN_AUDIO_SECONDS, of the standard set when DCS_CODE_SET is "standard" (the live
  * transmission path's gate), the polarity as that path reports it: "normal" is the stream as
  * demodulated, "inverted" its complement. null ("No tone heard") only when both detectors analysed
- * enough audio and neither heard anything tone-like; absent ("not determined") otherwise. The
+ * enough audio, neither heard anything tone-like, and at least TONE_QUIET_MIN_BLOCKS of the CTCSS
+ * blocks were too quiet to hide a tone at 250 Hz of deviation; absent ("not determined")
+ * otherwise. The
  * decision table is at toneFactOf. A tone that does not validate is dropped (the member absent),
  * never the whole sidecar, like the admission block. The store's operation folder budget
  * (MAX_OPERATION_METADATA_BYTES, 16 KiB) covers intent + receipt + sidecar: the sidecar is
@@ -54,6 +56,8 @@ import {
 } from "@wavekit/api-types"
 import type { RecordingFacts, RecordingTone } from "@wavekit/api-types"
 import { CTCSS_HZ } from "../../audio-tones/ctcss.js"
+import type { CtcssQuietCeilings } from "../../audio-tones/ctcss.js"
+import { ANALOG_AUDIO_RATE_HZ } from "../channel/fm-audio.js"
 import { NoiseQuarantineFactsSchema } from "./noise-quarantine.js"
 import { MAX_OPERATION_METADATA_BYTES } from "./recording-operation.js"
 
@@ -68,29 +72,105 @@ const CODE = /^[a-z][a-z-]{0,31}$/
 const iso = z.string().datetime()
 const finite = z.number().finite()
 
-/** The tone audio's rate (8 kHz), the rate both the CTCSS bank and the DCS decoder run at. */
-const TONE_RATE_HZ = 8000
-
 /**
  * CTCSS analysis blocks the file's bank must have run before its "no tone" counts: 10, i.e.
  * 2.75 s of analysed audio (the first 500 ms block at 4 000 samples, then one per 250 ms hop of
  * 2 000: 4 000 + 9 × 2 000 = 22 000 samples). The bank answers a tone from its second block
- * (ctcss.ts MIN_SAMPLES, 750 ms); "no tone" needs more, because a weak tone leans on a block only
- * now and then (CtcssBank.partialBlockCount). Modelled (300 Hz low-passed white noise, 100 seeds
- * at each of 67, 88.5, 151.4 and 250.3 Hz, a tone 9 dB under the band's noise): no block had
- * leaned or voted by the 3rd block in 18-32% of the runs, by the 6th in 3-7%, by the 8th in 0-3%,
- * by the 10th in none of the 400 (under 0.75% at 95%). 6 dB under: 2% by the 3rd, none by the
- * 4th. 12 dB under, a tone this short is not caught (51-68% still unseen by the 10th block): such
- * a file can read null. These bounds are calibrated on modelled audio only, until labelled
- * recordings exist.
+ * (ctcss.ts MIN_SAMPLES, 750 ms); "no tone" needs at least TONE_QUIET_MIN_BLOCKS quiet blocks,
+ * which can only come from this many blocks or more.
  */
 export const TONE_MEASURED_MIN_BLOCKS = 10
+
+/**
+ * The weakest CTCSS tone "No tone heard" rules out: 250 Hz of deviation, the low end of what an
+ * encoder sends (radios set 250-750 Hz, most 500-700). A tone set lower than this is not ruled out.
+ */
+export const TONE_MIN_CREDIBLE_DEVIATION_HZ = 250
+
+/**
+ * The tone audio's scale, from the recorder's chain (wideband-nfm.ts, fm-audio.ts FmAudioDemod
+ * defaults): the discriminator maps 5 000 Hz of deviation to full scale 1, the 750 µs
+ * de-emphasis (a one-pole IIR at 48 kHz) is followed by the ×4 makeup, a 3 kHz FIR (0.9999 at
+ * 254 Hz, taken as 1), s16, then the 300 Hz 4th-order Butterworth low-pass of toneAudio(); the
+ * recorder pushes s16 / 32 768 to the bank. A tone of `deviationHz` at `hz` reaches the bank with
+ * amplitude deviationHz / 5 000 × 4 × |de-emphasis(hz)| × |low-pass(hz)| and Goertzel power (mean
+ * square) half its square. Both filters fall with frequency, so 254.1 Hz is the weakest tone:
+ * de-emphasis 0.6410, low-pass 0.8901 (the 300 Hz low-pass attenuates it by 1.0 dB), amplitude
+ * 250 / 5 000 × 4 × 0.6410 × 0.8901 = 0.1141, power 6.51e-3. At 67 Hz: 0.9536 and 1.0000, power
+ * 1.82e-2.
+ */
+const DISCRIMINATOR_FULL_SCALE_HZ = 5000
+const DEEMPHASIS_MAKEUP = 4
+const DEEMPHASIS_US = 750
+const DEMOD_RATE_HZ = 48_000
+const TONE_LOW_PASS_HZ = 300
+
+/** Goertzel power the bank sees from a `deviationHz` tone at `hz` (see the scale above). */
+export function toneAudioPower(hz: number, deviationHz: number): number {
+	const alpha = 1 - Math.exp(-1 / (DEMOD_RATE_HZ * DEEMPHASIS_US * 1e-6))
+	const w = (2 * Math.PI * hz) / DEMOD_RATE_HZ
+	const deemphasis =
+		alpha / Math.hypot(1 - (1 - alpha) * Math.cos(w), (1 - alpha) * Math.sin(w))
+	// RBJ biquads with Butterworth Qs are the bilinear-transformed (prewarped) Butterworth.
+	const ratio =
+		Math.tan((Math.PI * hz) / ANALOG_AUDIO_RATE_HZ) /
+		Math.tan((Math.PI * TONE_LOW_PASS_HZ) / ANALOG_AUDIO_RATE_HZ)
+	const lowPass = 1 / Math.sqrt(1 + ratio ** 8)
+	const amplitude =
+		(deviationHz / DISCRIMINATOR_FULL_SCALE_HZ) *
+		DEEMPHASIS_MAKEUP *
+		deemphasis *
+		lowPass
+	return (amplitude * amplitude) / 2
+}
+
+/** Power of the weakest tone ruled out (254.1 Hz at TONE_MIN_CREDIBLE_DEVIATION_HZ): 6.51e-3. */
+export const TONE_MIN_POWER = Math.min(
+	...CTCSS_HZ.map(hz => toneAudioPower(hz, TONE_MIN_CREDIBLE_DEVIATION_HZ)),
+)
+
+/** A quiet block's band power is at most this share of TONE_MIN_POWER (bandMax 1.30e-3). */
+export const TONE_QUIET_BAND_SHARE = 0.2
+/** A quiet block's raw power is at most this many TONE_MIN_POWER (rawMax 0.163). */
+export const TONE_QUIET_RAW_MULTIPLE = 25
+
+/**
+ * The recorder's per-file CTCSS bank ceilings (CtcssBank.quietBlockCount). A quiet block proves
+ * no tone of TONE_MIN_POWER or more was on in it, two ways:
+ * - The tone alone fills the band: the bank's band measure (raw minus its 40 Hz low-pass and its
+ *   400 Hz high-pass) keeps 0.862 of a 254.1 Hz tone's power, 0.887 at 67 Hz, more between, so
+ *   such a tone puts at least 0.862 × TONE_MIN_POWER in the band, 4.3 times bandMax (6.3 dB):
+ *   a toned block is never quiet. Only a signal at the tone's own frequency in anti-phase could
+ *   cancel it, and that is a line on the same bin.
+ * - A tone added to the quiet block's audio would have voted: its Goertzel power P is at least
+ *   TONE_MIN_POWER; the band holds at most 0.976 P (the measure's highest share) + 0.2 P, so the
+ *   tone holds at least 0.85 of it (a vote needs 0.65); the next tone's bin holds at most the
+ *   block's other band power, 0.2 P, plus the tone's own leakage (CTCSS tones are at least
+ *   2.3 Hz apart, 1.15 bins of a 500 ms block: under 0.02 P), so the tone is at least 4.6 times
+ *   the next (a vote needs 3); the raw power is at most P + 25 P, so the tone holds at least 3.8%
+ *   (a vote needs 1%).
+ * Louder blocks (voice, receiver noise, a large DC offset) prove nothing either way.
+ */
+export const RECORDER_TONE_QUIET: CtcssQuietCeilings = {
+	bandMax: TONE_QUIET_BAND_SHARE * TONE_MIN_POWER,
+	rawMax: TONE_QUIET_RAW_MULTIPLE * TONE_MIN_POWER,
+}
+
+/**
+ * Quiet blocks (RECORDER_TONE_QUIET) a file needs before "No tone heard": 10, the same count as
+ * TONE_MEASURED_MIN_BLOCKS. One quiet block already rules a continuous tone out; ten (at least
+ * 2.75 s of quiet audio when they run together, ten separate 500 ms stretches otherwise) keep a
+ * tone keyed off for a moment (a squelch-tail turn-off, 150-250 ms before the carrier drops) or
+ * a short fade from deciding it.
+ */
+export const TONE_QUIET_MIN_BLOCKS = 10
 
 /**
  * Samples the file's DCS decoder must have analysed before its code, or its "no code", counts:
  * DCS_MIN_AUDIO_SECONDS (0.75 s) at 8 kHz = 6 000, the live transmission path's DCS gate.
  */
-export const DCS_MEASURED_MIN_SAMPLES = DCS_MIN_AUDIO_SECONDS * TONE_RATE_HZ
+export const DCS_MEASURED_MIN_SAMPLES =
+	DCS_MIN_AUDIO_SECONDS * ANALOG_AUDIO_RATE_HZ
 
 /**
  * A DCS word chain this long that never confirmed (DCS_MIN_WORDS, 3) is a partial code: 2 words,
@@ -128,6 +208,8 @@ export interface ToneCoverage {
 	readonly votedBlocks: number
 	/** Blocks no tone won whose best tone still dominated (CtcssBank.partialBlockCount). */
 	readonly partialBlocks: number
+	/** Blocks too quiet to hide a credible tone (CtcssBank.quietBlockCount, RECORDER_TONE_QUIET). */
+	readonly quietBlocks: number
 	/** Samples the DCS decoder analysed (DcsDecoder.sampleCount, 8 kHz). */
 	readonly dcsSamples: number
 	/** Longest DCS word chain, confirmed or not (DcsDecoder.longestChain). */
@@ -162,7 +244,8 @@ export const RecordingToneSchema = z.discriminatedUnion("kind", [
 	/**
 	 * A DCS code as three octal digits ("023") and its polarity as the live transmission path
 	 * reports it ("normal": the stream as demodulated). The recorder always writes the polarity;
-	 * a reader accepts a sidecar without one.
+	 * a reader accepts a sidecar without one. Under the standard code set it is always "normal":
+	 * every inverted standard code is another standard code's normal stream, the reading reported.
 	 */
 	z
 		.object({
@@ -204,7 +287,7 @@ function dcsHitsAboveChance(hits: number, samples: number): boolean {
 	if (!Number.isFinite(hits) || !Number.isFinite(samples)) return true
 	return (
 		hits >= DCS_LONE_HITS_MIN &&
-		hits * DCS_LONE_HIT_SECONDS * TONE_RATE_HZ >= samples
+		hits * DCS_LONE_HIT_SECONDS * ANALOG_AUDIO_RATE_HZ >= samples
 	)
 }
 
@@ -226,7 +309,8 @@ function dcsHitsAboveChance(hits: number, samples: number): boolean {
  * | none          | partial (2 words)       | ≥ 10         | ≥ 6 000     | no            | absent   |
  * | none          | any valid word, 2 words | ≥ 10         | ≥ 6 000     | no            | absent   |
  * | none          | lone hits above chance  | ≥ 10         | ≥ 6 000     | no            | absent   |
- * | none          | none (chance hits only) | ≥ 10         | ≥ 6 000     | no            | null     |
+ * | none, < 10 quiet blocks | none (chance hits only) | ≥ 10 | ≥ 6 000   | no            | absent   |
+ * | none, ≥ 10 quiet blocks | none (chance hits only) | ≥ 10 | ≥ 6 000   | no            | null     |
  *
  * Both settled: DCS wins. A confirmed standard code is three identical 23-bit words exactly
  * 23 bits apart, one of 4 784 registers (104 codes × 23 rotations × 2 polarities) and then twice
@@ -237,9 +321,13 @@ function dcsHitsAboveChance(hits: number, samples: number): boolean {
  * voice). "leaned block" (CtcssBank.partialBlockCount): a block no tone won still leaned on one
  * (a tone keyed on and off, or too weak under noise to vote). "any valid word": a code outside the
  * standard set (DcsDecoder.anyValidChain), which the gate does not report, chained two words.
- * "lone hits above chance": a DCS code too broken to chain two words. Voice and receiver noise put energy in the sub-audible band
- * without any of these: an untoned voice reads null. A count that is not a finite number is not
- * analysed.
+ * "lone hits above chance": a DCS code too broken to chain two words. "quiet blocks": blocks
+ * too quiet to hide a tone of TONE_MIN_CREDIBLE_DEVIATION_HZ (RECORDER_TONE_QUIET): no vote and no
+ * lean is no proof by itself, because voice in the sub-audible band, a gliding pitch or noise can
+ * keep a tone under them from voting or leaning in every block; only a quiet block shows a tone
+ * would have been seen. A voiced file reads null only when its pauses add up to ten quiet
+ * blocks; a toned file never does (its tone alone keeps every block above the band ceiling). A
+ * count that is not a finite number is not analysed.
  */
 export function toneFactOf(
 	toneHz: number | null,
@@ -254,6 +342,7 @@ export function toneFactOf(
 	if (!atLeast(coverage.ctcssBlocks, TONE_MEASURED_MIN_BLOCKS)) return {}
 	if (!atLeast(coverage.dcsSamples, DCS_MEASURED_MIN_SAMPLES)) return {}
 	if (coverage.votedBlocks !== 0 || coverage.partialBlocks !== 0) return {}
+	if (!atLeast(coverage.quietBlocks, TONE_QUIET_MIN_BLOCKS)) return {}
 	if (!Number.isFinite(coverage.dcsChain)) return {}
 	if (coverage.dcsChain >= DCS_PARTIAL_WORDS) return {}
 	if (!Number.isFinite(coverage.dcsAnyChain)) return {}

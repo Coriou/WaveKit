@@ -70,6 +70,11 @@ export class NfmSource {
 		this.o.ctcssHz = hz
 	}
 
+	/** The CTCSS sub-tone's peak deviation in Hz from the next sample. */
+	setCtcssDeviation(hz: number): void {
+		this.o.ctcssDeviationHz = hz
+	}
+
 	/** Extra deviation (Hz at time t in s) from the next sample, beside the voice and CTCSS. */
 	setSubAudible(deviation: ((t: number) => number) | null): void {
 		this.subAudible = deviation
@@ -282,11 +287,16 @@ export function brokenDcsDeviation(
  * Modelled untoned voice pitch as NfmSource.setSubAudible deviation (Hz at t s): a fundamental
  * gliding 110-170 Hz (140 Hz ± 30 Hz at 1.3 Hz, a speaker's intonation) with its second harmonic
  * at half its level and a 4 Hz syllabic raised-cosine envelope: the energy a voice puts in the
- * 85-300 Hz band, where no one CTCSS tone holds it for a 500 ms block.
+ * 85-300 Hz band, where no one CTCSS tone holds it for a 500 ms block. `offsetS` starts the
+ * intonation and syllables that many seconds in (a different speaker's timing).
  */
-export function voicePitchDeviation(deviationHz = 400): (t: number) => number {
+export function voicePitchDeviation(
+	deviationHz = 400,
+	offsetS = 0,
+): (t: number) => number {
 	const glide = 30 / (TWO_PI * 1.3)
-	return t => {
+	return at => {
+		const t = at + offsetS
 		const phase = TWO_PI * (140 * t - glide * Math.cos(TWO_PI * 1.3 * t))
 		const envelope = 0.5 - 0.5 * Math.cos(TWO_PI * 4 * t)
 		return (

@@ -42,6 +42,18 @@ const PARTIAL_BAND_FRACTION = 0.325
  * 0.15 and leans twice in a row in 5 of 23 block pairs over 6 s; at 9 dB under, 15 of 23.
  */
 const LEAN_BAND_FRACTION = 0.1
+/**
+ * Ceilings of a quiet analysis block (CtcssBank.quietBlockCount), in the bank's own units: the
+ * mean square of the samples pushed, full scale 1. A block is quiet when its band power (the
+ * band the vote divides by) is at most `bandMax` and its raw power at most `rawMax`. A caller
+ * that knows its audio's scale derives them from the weakest tone it must not miss
+ * (recording-facts.ts RECORDER_TONE_QUIET).
+ */
+export interface CtcssQuietCeilings {
+	readonly bandMax: number
+	readonly rawMax: number
+}
+
 /** Tones evaluated together in one Goertzel pass (see `CtcssBank.goertzel`). */
 const GOERTZEL_LANES = 10
 
@@ -165,8 +177,20 @@ export class CtcssBank {
 	private partialBlocks = 0
 	/** The tone the previous block leaned on at LEAN_BAND_FRACTION or more, or -1. */
 	private lastLean = -1
+	/** Analysis blocks under both quiet ceilings (quietBlockCount). */
+	private quietBlocks = 0
+	private readonly quiet: CtcssQuietCeilings | null
 
-	constructor() {
+	/** `quiet`: the quiet-block ceilings (quietBlockCount); none: no block counts as quiet. */
+	constructor(quiet?: CtcssQuietCeilings) {
+		this.quiet =
+			quiet !== undefined &&
+			Number.isFinite(quiet.bandMax) &&
+			Number.isFinite(quiet.rawMax) &&
+			quiet.bandMax >= 0 &&
+			quiet.rawMax >= 0
+				? quiet
+				: null
 		for (let i = 0; i < CTCSS_HZ.length; i++) {
 			this.coeffs[i] =
 				2 * Math.cos((2 * Math.PI * (CTCSS_HZ[i] ?? 0)) / RATE_HZ)
@@ -252,6 +276,16 @@ export class CtcssBank {
 		return this.partialBlocks
 	}
 
+	/**
+	 * Analysis blocks whose band power was at most the quiet ceilings' `bandMax` and whose raw
+	 * power at most `rawMax` (exactly at a ceiling is quiet), voted or not: a block too quiet to
+	 * hide a tone at the level the ceilings were derived for. 0 when the bank has no ceilings.
+	 * Does not affect `result()`.
+	 */
+	quietBlockCount(): number {
+		return this.quietBlocks
+	}
+
 	result(): number | null {
 		if (this.seen < MIN_SAMPLES) return null
 		const tone = selectCtcssTone(this.votes, this.qualified, this.firstBlock)
@@ -285,6 +319,7 @@ export class CtcssBank {
 		this.subAudibleBlocks = 0
 		this.partialBlocks = 0
 		this.lastLean = -1
+		this.quietBlocks = 0
 	}
 
 	private analyse(): void {
@@ -304,6 +339,13 @@ export class CtcssBank {
 			aboveEnergy += above * above
 		}
 		const bandEnergy = Math.max(0, rawEnergy - belowEnergy - aboveEnergy)
+		const quiet = this.quiet
+		if (
+			quiet !== null &&
+			bandEnergy / BLOCK_SAMPLES <= quiet.bandMax &&
+			rawEnergy / BLOCK_SAMPLES <= quiet.rawMax
+		)
+			this.quietBlocks += 1
 		this.goertzel()
 		const powers = this.powers
 		let best = 0
