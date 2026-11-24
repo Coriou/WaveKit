@@ -134,7 +134,8 @@ function provoiceCall(t0: number): Item[] {
 }
 
 // --- D-STAR, YSF ---
-const DSTAR = "03:04:05 Sync: +DSTAR VOICE "
+const DSTAR =
+	"03:04:05 Sync: +DSTAR VOICE   RPT 2: DIRECT   RPT 1: DIRECT   DST: CQCQCQ   SRC: N0CALL  TEST"
 const YSF = (frame: string) =>
 	`03:04:05 Sync: +YSF  V/D2 Group/CQ -Simplex ${frame}`
 
@@ -179,7 +180,12 @@ interface Trace {
 const pad = (n: number, w = 2) => String(n).padStart(w, "0")
 
 /** dsd-fme's per-call name for one call key, stamped `atMs` after T0 (local time). */
-function wavName(system: string, tg: number, src: number, atMs = 0): string {
+function wavName(
+	system: string,
+	tg: number | string,
+	src: number | string,
+	atMs = 0,
+): string {
 	const d = new Date(T0 + atMs)
 	const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
 	return `${stamp}_12345_${system}_GROUP_TGT_${tg}_SRC_${src}.wav`
@@ -190,7 +196,9 @@ let root = ""
 async function replay(
 	mode: string,
 	items: Item[],
-	files: Array<[system: string, tg: number, src: number, atMs?: number]>,
+	files: Array<
+		[system: string, tg: number | string, src: number | string, atMs?: number]
+	>,
 ): Promise<Trace> {
 	for (const [system, tg, src, atMs] of files)
 		fs.writeFileSync(path.join(root, wavName(system, tg, src, atMs)), "")
@@ -304,17 +312,17 @@ function expectLinked(trace: Trace, keys: string[]): void {
 }
 
 const P1_FILE = (tg = 56, src = 1234): [string, number, number] => [
-	"P25P_CC_2A5",
+	"P25_2A5",
 	tg,
 	src,
 ]
-const P2_FILE: [string, number, number] = ["P25P_CC_0", 7070, 40820]
+const P2_FILE: [string, number, number] = ["P25_BEE001232A5_1_1", 7070, 40820]
 const NX_FILE = (
 	tg = 5678,
 	src = 1234,
 	atMs = 0,
-): [string, number, number, number] => ["NXDN_CC_5", tg, src, atMs]
-const DP_FILE: [string, number, number] = ["DPMR_CC_5", 0, 0]
+): [string, number, number, number] => ["NXDN_RAN_5", tg, src, atMs]
+const DP_FILE: [string, string, string] = ["DPMR_CC_5", "0001234", "0005678"]
 const PV_FILE: [string, number, number] = ["PROVOICE_CC_0", 0, 0]
 
 describe("dsd-fme non-DMR recording clearance repro corpus", () => {
@@ -613,15 +621,18 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 	describe("D-STAR and YSF (no privacy field)", () => {
 		it("(e) a D-STAR call is linked", async () => {
 			expectLinked(
-				await replay("dstar", dstarCall(0), [["DSTAR_CC_0", 0, 0]]),
+				await replay("dstar", dstarCall(0), [
+					["DSTAR", "CQCQCQ__", "N0CALL__TEST"],
+				]),
 				["0/0"],
 			)
 		})
 
 		it("(e) a YSF call is linked", async () => {
-			expectLinked(await replay("ysf", ysfCall(0), [["YSF_CC_0", 0, 0]]), [
-				"0/0",
-			])
+			expectLinked(
+				await replay("ysf", ysfCall(0), [["YSF", "ALL_______", "N0CALL____"]]),
+				["0/0"],
+			)
 		})
 	})
 

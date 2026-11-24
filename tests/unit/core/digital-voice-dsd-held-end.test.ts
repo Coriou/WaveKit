@@ -224,6 +224,7 @@ async function run(
 		quality: { crcErrs: 0, fecErrs: 0 },
 		flags: {},
 		announced: true,
+		dstar: { my: "T41", ur: "CQCQCQ" },
 	}
 	adapter.emitOutput({
 		timestamp: START,

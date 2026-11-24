@@ -26,7 +26,7 @@ const START = new Date(2026, 0, 9, 10, 53, 27)
 const pad = (n: number) => String(n).padStart(2, "0")
 const STAMP = `${START.getFullYear()}${pad(START.getMonth() + 1)}${pad(START.getDate())}_${pad(START.getHours())}${pad(START.getMinutes())}${pad(START.getSeconds())}`
 const fileOf = (tg: number) =>
-	`${STAMP}_12345_DSTAR_CC_0_GROUP_TGT_${tg}_SRC_7.wav`
+	`${STAMP}_12345_DSTAR__TGT_CQCQCQ___SRC_${`T${tg}`.padEnd(8, "_")}____.wav`
 
 type Lookup = {
 	findWavFileAsync(call: unknown, end: Date): void
@@ -39,6 +39,7 @@ function callOf(tg: number) {
 		protocol: "dstar",
 		talkgroup: tg,
 		source: 7,
+		dstar: { my: `T${tg}`, ur: "CQCQCQ" },
 		startTime: START,
 		startWallMs: START.getTime(),
 		lastUpdate: START,
@@ -624,7 +625,7 @@ describe("dsd-fme stop with held ends", () => {
 		expect(ends[0]?.wavFile).toBeUndefined()
 		// The file the child finalises at exit is never linked afterwards.
 		fs.writeFileSync(
-			path.join(root, `${STAMP}_12345_P25_CC_0_GROUP_TGT_64_SRC_7.wav`),
+			path.join(root, `${STAMP}_12345_P25_000_GROUP_TGT_64_SRC_7.wav`),
 			"",
 		)
 		release()

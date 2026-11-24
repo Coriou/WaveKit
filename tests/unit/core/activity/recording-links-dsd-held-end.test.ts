@@ -37,7 +37,12 @@ const YSF = (frame: string) =>
 	`03:04:05 Sync: +YSF  V/D2 Group/CQ -Simplex ${frame}`
 /** One call per protocol (D-STAR's syncs 420 ms apart, the others' lines 100 ms apart, as dsd-fme prints them). */
 const LINES: Record<string, string[]> = {
-	dstar: [DSTAR, DSTAR, DSTAR, DSTAR],
+	dstar: [
+		"03:04:05 Sync: +DSTAR VOICE   RPT 2: DIRECT   RPT 1: DIRECT   DST: CQCQCQ   SRC: N0CALL  TEST",
+		DSTAR,
+		DSTAR,
+		DSTAR,
+	],
 	ysf: [
 		YSF("HC FN: 1/7 DST: ALL        SRC: N0CALL     "),
 		YSF("CC FN: 2/7 U/L:           "),
@@ -53,8 +58,8 @@ const LINES: Record<string, string[]> = {
 }
 /** The file-name system part dsd-fme writes for each. */
 const SYSTEM: Record<string, string> = {
-	dstar: "DSTAR_CC_0_GROUP_TGT_0_SRC_0",
-	ysf: "YSF_CC_0_GROUP_TGT_0_SRC_0",
+	dstar: "DSTAR__TGT_CQCQCQ___SRC_N0CALL__TEST",
+	ysf: "YSF__TGT_ALL________SRC_N0CALL____",
 	dmr: "DMR_CC_1_GROUP_TGT_9_SRC_2001",
 }
 

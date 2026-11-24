@@ -38,7 +38,7 @@ describe("dsd-fme P25 recording link", () => {
 			fs.writeFileSync(
 				path.join(
 					root,
-					"20260109_105327_123_P25P_CC_1B_GROUP_TGT_56_SRC_1234.wav",
+					"20260109_105327_12345_P25_01B_GROUP_TGT_56_SRC_1234.wav",
 				),
 				"",
 			)

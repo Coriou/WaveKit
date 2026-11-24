@@ -51,6 +51,7 @@ import {
 	pruneCallRecordings,
 } from "./call-recordings.js"
 import { receiveFilterEffect } from "./dsd-fme-filter.js"
+import { dsdFmeCallWavPattern } from "./dsd-fme-wav-names.js"
 import {
 	classifyDmrLine,
 	DMR_SOURCE_MAX,
@@ -5726,18 +5727,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		callEndTime: Date,
 		dir: string,
 	): Promise<string | undefined> {
-		const proto = call.protocol?.toUpperCase().replace(/\d+$/, "") ?? "UNK"
-		const tg = call.talkgroup ?? 0
-		const src = call.source ?? 0
-		const cc = call.dmr?.cc ?? call.p25?.nac
-
-		// Build regex pattern for dsd-fme filename format
-		// Format: YYYYMMDD_HHMMSS_XXXXX_PROTO_CC_N_CALLTYPE_TGT_N_SRC_N.wav
-		const ccPattern = cc !== undefined ? `_CC_${cc}` : "_CC_\\d+"
-		const pattern = new RegExp(
-			`^(\\d{8}_\\d{6})_\\d+_${proto}${ccPattern}_(?:GROUP|UNIT)_TGT_${tg}_SRC_${src}\\.wav$`,
-			"i",
-		)
+		// The name built from the call's own fields, per protocol (dsd-fme-wav-names.ts); a call
+		// whose fields cannot tell its file from another call's links none.
+		const pattern = dsdFmeCallWavPattern(call)
+		if (pattern === null) return undefined
 
 		// Time window for matching (call start - 5s to call end + 5s), in wall
 		// time: the filenames carry wall time.
