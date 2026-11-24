@@ -101,6 +101,7 @@ const areaSchema = {
 						"time-limit",
 						"permission",
 						"io-error",
+						"stale",
 					],
 				},
 			],
@@ -195,6 +196,17 @@ const responseSchema = {
 				state: { type: "string", enum: ["ok", "low", "unknown"] },
 			},
 			required: ["policy", "minFreeBytes", "state"],
+		},
+		// StorageCountState: how old the area sizes are (optional for older providers).
+		count: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				countedAt: nullableString,
+				ageMs: nullableNumber,
+				refreshing: { type: "boolean" },
+			},
+			required: ["countedAt", "ageMs", "refreshing"],
 		},
 	},
 	required: [

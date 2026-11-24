@@ -324,6 +324,13 @@ describe("mock settings routes", () => {
 			"fair-share",
 		)
 		expect(report.lowSpace.state).toBe("ok")
+		// The sizes' count state, as the core's background count reports it.
+		expect(report.count).toEqual({
+			countedAt: new Date(Date.parse(report.generatedAt) - 4_000).toISOString(),
+			ageMs: 4_000,
+			refreshing: false,
+		})
+		expect(report.areas.every(a => !a.partial)).toBe(true)
 		// The capture store reports the route's quota as its cap, like the core.
 		expect(report.areas.find(a => a.id === "iq-captures")).toMatchObject({
 			class: "automatic",

@@ -6776,13 +6776,13 @@ no response field carries a filesystem path. DTOs in
 `packages/api-types/src/storage.ts`. `HEAD` is supported; `Cache-Control:
 no-store`. Access is the same as the other read routes. A report is cached for
 30 s (`cachedUntil` = `generatedAt` + 30 s) and concurrent requests share one
-scan. A failure answers 500 `{ error, code: "STORAGE_REPORT_FAILED" }` and is not
+report. A failure answers 500 `{ error, code: "STORAGE_REPORT_FAILED" }` and is not
 cached.
 
 **Response** (200) `StorageReport`: `generatedAt`, `cachedUntil`, `filesystem`
 (`totalBytes`, `freeBytes`, `availableBytes` of the filesystem holding
 `stateDir`; `availableBytes` is what WaveKit's user may use; null when `statfs`
-failed or did not answer in time), `areas`, `kept` and `lowSpace`.
+failed or did not answer in time), `areas`, `kept`, `lowSpace` and `count`.
 
 Areas, in this order (`access` and `logs` are omitted when not configured; an
 area with no path, such as `digital-voice-wav` without a recording dsd-fme, reports
@@ -6848,14 +6848,42 @@ directory reached only through a symlink is not inside: the walk counts the
 link, not its target. The scanner-evidence `cap` is null when the scanner is not
 running.
 
-The scan is bounded per report: 50,000 entries, depth 16, 2,000 ms wall time
-(`statfs` included) and 8 filesystem calls in flight. When a bound is reached the
-current area is `partial` with `partialReason` `entry-limit`, `depth-limit` or
-`time-limit`, and every later area is not scanned: it reports `exists: false`, 0
-bytes, 0 files and the same reason. The first reason wins. A permission error is
+Sizes come from a background count of the areas, not from a walk inside the
+request. A report starts a count when the last one is older than 30 s (or the
+areas changed) and serves the last finished count at once; it waits for the
+count, at most 2,000 ms (`statfs` included), only when an area has no finished
+count yet or the last count is older than 120 s. A failed count keeps the
+previous one served; a failed first count answers 500. The first report after
+startup may be partial until the first background count finishes. When the
+areas change while a count runs, the new count starts when that one finishes,
+and meanwhile the areas the previous count holds (same id and paths) are served
+from it.
+
+`count` (since 2026-11-24; absent from older cores) says how old the sizes are:
+`countedAt` (when the served count finished, null while no area is served from
+a finished count), `ageMs` (`generatedAt` minus `countedAt`, null with it) and
+`refreshing` (a count is running). A report built while a count runs is shared
+only until it finishes, so requesting again after it finishes returns the new
+sizes. Before the first count of an area finishes, the report serves the
+count's progress: finished areas as counted, the rest `partial` with
+`time-limit` (0 bytes and `exists: false` for areas not reached yet); asking
+again once `refreshing` is false clears it. A served count older than 120 s
+(30 s before a refresh starts, at most 60 s of count, 30 s of report cache)
+whose refresh did not finish within the 2,000 ms marks the areas it serves
+`partial` with `partialReason` `stale` (since 2026-11-24): their sizes were
+exact when counted and may be higher or lower now, and `overBound` is null. A
+50,000-file state tree is counted completely.
+
+One count is bounded: 200,000 entries, depth 16, 60 s wall time and 2
+filesystem calls in flight (1 after a `statfs` that did not answer in time), so
+it never holds more than half of the core's filesystem thread pool; a report's
+`statfs` is one more call. When a bound is reached the current area is
+`partial` with `partialReason` `entry-limit`, `depth-limit` or `time-limit`,
+and every later area is not counted: it reports `exists: false`, 0 bytes, 0
+files and the same reason. The first reason wins. A permission error is
 `permission`, any other error except a missing path is `io-error`; a missing
-path is `exists: false` and not partial. A partial area's `bytes` and `files` are
-lower bounds.
+path is `exists: false` and not partial. A partial area's `bytes` and `files`
+are lower bounds, except with `stale`.
 
 `kept` reports the recording keep store in protected mode:
 `{ "state": "ready", "recordings", "bytes", "maxRecordings": 2000, "maxBytes": 536870912 }`

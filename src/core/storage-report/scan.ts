@@ -123,6 +123,12 @@ export async function scanStorageAreas(
 		fs?: StorageScanFs
 		limits?: Partial<StorageScanLimits>
 		now?: () => number
+		/**
+		 * Receives, once at the start, a reader of the scan's progress: the areas finished so far
+		 * as final, the area being walked with its lower bounds as `time-limit`, the rest as not
+		 * scanned (0, `time-limit`). The background count serves it before its first result.
+		 */
+		progress?: (peek: () => StorageAreaScan[]) => void
 	} = {},
 ): Promise<StorageAreaScan[]> {
 	const fs = options.fs ?? nodeStorageScanFs
@@ -177,6 +183,8 @@ export async function scanStorageAreas(
 			if (i < done) return copyScan(r)
 			return { ...copyScan(r), partialReason: r.partialReason ?? reason }
 		})
+
+	options.progress?.(() => frozen?.map(copyScan) ?? snapshot("time-limit"))
 
 	const run = async (): Promise<StorageAreaScan[]> => {
 		// Overlapping roots are resolved per report: directories may appear after startup.

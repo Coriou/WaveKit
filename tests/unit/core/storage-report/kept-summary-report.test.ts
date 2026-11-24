@@ -47,6 +47,11 @@ describe("storage report kept (WG10 req 1.8)", () => {
 				minFreeBytes: null,
 				state: "unknown",
 			},
+			count: {
+				countedAt: "1970-01-01T00:00:01.000Z",
+				ageMs: 0,
+				refreshing: false,
+			},
 		})
 	})
 

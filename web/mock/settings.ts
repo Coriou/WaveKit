@@ -550,6 +550,12 @@ function storageReport(now: number, startedAt: number): StorageReport {
 			minFreeBytes: GIB,
 			state: "ok",
 		},
+		// The core's background count finished 4 s before this report (StorageCountState).
+		count: {
+			countedAt: new Date(now - 4_000).toISOString(),
+			ageMs: 4_000,
+			refreshing: false,
+		},
 	}
 }
 

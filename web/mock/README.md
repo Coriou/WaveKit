@@ -84,7 +84,7 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `pendingRestart` until a start or restart; `mode` auto / always / off applied at once, with
   `DecoderInfo.mode` / `modeSource` on every status); `POST /api/decoders/:id/{start,stop,restart}` with
   `DECODER_ALREADY_RUNNING` / `DECODER_NOT_RUNNING`; `GET /api/decoders/:id/log?lines=` (synthetic
-  lines); `GET /api/storage` (every area, the scanner storage `parts`, activity retention, filesystem); `GET /api/config/export`
+  lines); `GET /api/storage` (every area, the scanner storage `parts`, activity retention, filesystem, the sizes' `count` state); `GET /api/config/export`
   (redacted YAML); `GET /api/status` (`version`, `uptime`). Preferences:
   `PATCH /api/operator-data/preferences` (`patch-preferences` `set` / `reset`) in
   `operator-data.ts`.
