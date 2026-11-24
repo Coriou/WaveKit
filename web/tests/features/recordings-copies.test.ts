@@ -184,6 +184,62 @@ describe("Recordings: copies shown by default with their chip, Hide copies, the 
 		store.dispose()
 	})
 
+	it("a core that refuses copies=false (400 RECORDINGS_QUERY_INVALID) is asked once again without it, never in a loop", async () => {
+		const { api, calls } = scripted(call =>
+			call.url.includes("copies=false")
+				? json(400, { code: "RECORDINGS_QUERY_INVALID" })
+				: json(200, listing([item(), ghost], 1)),
+		)
+		const store = new RecordingsStore(api)
+		await store.show({ copies: false })
+		await vi.waitFor(() =>
+			expect(calls.some(c => c.url.includes("copies=false"))).toBe(true),
+		)
+		await vi.waitFor(() =>
+			expect(store.get()).toMatchObject({ status: "ready", error: null }),
+		)
+		// Let any re-read timer fire: none may follow the refusal.
+		await new Promise(resolve => setTimeout(resolve, 20))
+		const refused = calls.findIndex(c => c.url.includes("copies=false"))
+		expect(calls.filter(c => c.url.includes("copies=false"))).toHaveLength(1)
+		expect(calls[refused + 1]?.url).not.toContain("copies")
+		expect(calls).toHaveLength(refused + 2)
+		expect(store.get().items.map(i => i.id)).toEqual([ROOT, GHOST])
+		// Forgotten for the store's life: a later Hide copies never sends the key again.
+		await store.show({})
+		await store.show({ copies: false })
+		expect(calls.filter(c => c.url.includes("copies=false"))).toHaveLength(1)
+		expect(store.get()).toMatchObject({ status: "ready", error: null })
+		store.dispose()
+	})
+
+	it("the re-read after the core showed copiesTotal uses the query shown when it fires: none once copies are shown again", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout"] })
+		try {
+			const { api, calls } = scripted(() =>
+				json(200, listing([item(), ghost], 1)),
+			)
+			const store = new RecordingsStore(api)
+			await store.show({ copies: false })
+			// The filter changes before the re-read timer fires.
+			await store.show({})
+			const before = calls.length
+			vi.runAllTimers()
+			vi.useRealTimers()
+			await new Promise(resolve => setTimeout(resolve, 20))
+			expect(calls.slice(before)).toEqual([])
+			expect(calls.some(c => c.url.includes("copies=false"))).toBe(false)
+			// Hidden again: now the core that showed the key is asked with it.
+			await store.show({ copies: false })
+			await vi.waitFor(() =>
+				expect(calls.some(c => c.url.includes("copies=false"))).toBe(true),
+			)
+			store.dispose()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
 	it("the header count with copies hidden is `matched` (the rows shown), with them shown `counts`", () => {
 		const meta = {
 			counts: { total: 12, kept: 4, copiesTotal: 3 },

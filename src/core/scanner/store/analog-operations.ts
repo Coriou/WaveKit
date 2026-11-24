@@ -3438,6 +3438,8 @@ export class AnalogOperations {
 	 * operation (an orphan: its removal was cut short), a malformed or oversized mark and every
 	 * temp are removed. A listing past COPY_MARKS_LIST_MAX, an unsafe directory or a failed listing
 	 * loads nothing and removes nothing (every file shown as no copy until the next recovery).
+	 * An unknown inventory (a re-scan during recovery failed: the listing may be empty or partial)
+	 * removes nothing either: only the valid marks of the operations it still lists are loaded.
 	 * Foreign names are left alone.
 	 */
 	private async loadCopies(): Promise<void> {
@@ -3469,6 +3471,9 @@ export class AnalogOperations {
 				this.copyIndex.set(mark.operationId, facts)
 				continue
 			}
+			// Never swept on a doubtful listing of the operations (checked per mark: a read above
+			// may itself have made the inventory unknown).
+			if (this.inventory.unknown) continue
 			try {
 				await this.safeTarget(path)
 				await this.io.unlink(path)

@@ -19,6 +19,7 @@ import {
 	realpath,
 	rename,
 	rm,
+	symlink,
 	unlink,
 	utimes,
 	writeFile,
@@ -541,6 +542,62 @@ describe("copy mark: outside the operation folder, removed with the operation, s
 		)
 	})
 
+	it("a re-scan that fails during recovery (unknown inventory) removes no mark; the next recovery loads them", async () => {
+		// Armed for one recovery: right after the cleanup's rmdir, `.analog-operations` becomes a
+		// symlink, so recovery's refresh falls back to a full scan whose listing fails.
+		let armed = false
+		const h0 = { root: "" }
+		const h = await harness({
+			unlink: path => unlink(path),
+			checkpoint: async name => {
+				if (!armed || name !== "cleanup-rmdir") return
+				armed = false
+				const base = join(h0.root, ".analog-operations")
+				await rename(base, `${base}.real`)
+				await symlink(`${base}.real`, base)
+			},
+		})
+		h0.root = h.root
+		const root = await keptOp(h)
+		const copy = await keptOp(h, "o2")
+		const victim = await keptOp(h, "o3")
+		await h.evidence.writeCopy(
+			copy.op.operationId,
+			record(root.key, root.op.operationId),
+		)
+		const orphan = randomUUID()
+		await writeFile(
+			copyPath(h, orphan),
+			copyFactsBytes(orphan, record(root.key, root.op.operationId), NOW)!,
+		)
+		await writeFile(copyTemp(h, copy.op.operationId), "{")
+		// A cleanup cut short after its transfer: the victim's media and folder files gone, its intent
+		// moved to the cleanup marker, so recovery finishes the removal (a changed id).
+		await rm(join(h.root, victim.receipt.artifact ?? ""))
+		const base = join(h.root, ".analog-operations")
+		const folder = join(base, victim.op.operationId)
+		await rename(
+			join(folder, "intent.json"),
+			join(base, `${victim.op.operationId}.cleanup`),
+		)
+		for (const name of await readdir(folder)) await rm(join(folder, name))
+		const marks = (await readdir(copiesDir(h))).sort()
+		armed = true
+		let next = await h.restart()
+		expect(armed).toBe(false)
+		// Nothing deleted, nothing wrongly marked (the listing is unknown: no operation listed).
+		expect((await readdir(copiesDir(h))).sort()).toEqual(marks)
+		expect(next.copyOf(copy.op.operationId)).toBeNull()
+		expect(next.copyOf(orphan)).toBeNull()
+		// The storage made whole again: the next recovery loads the mark and sweeps the rest.
+		await rm(base)
+		await rename(`${base}.real`, base)
+		next = await h.restart()
+		expect(next.copyOf(copy.op.operationId)?.of.key).toBe(root.key)
+		expect(next.copyOf(orphan)).toBeNull()
+		expect(await readdir(copiesDir(h))).toEqual([`${copy.op.operationId}.json`])
+	})
+
 	it("an oversized mark reads as no copy and is removed; a symlinked copies dir loads nothing and removes nothing", async () => {
 		const h = await harness()
 		const root = await keptOp(h)
@@ -565,7 +622,6 @@ describe("copy mark: outside the operation folder, removed with the operation, s
 				NOW,
 			)!,
 		)
-		const { symlink } = await import("node:fs/promises")
 		await symlink(elsewhere, copiesDir(h))
 		next = await h.restart()
 		expect(next.copyOf(copy.op.operationId)).toBeNull()
