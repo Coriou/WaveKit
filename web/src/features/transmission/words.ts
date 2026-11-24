@@ -155,8 +155,9 @@ export function toneRow(t: TransmissionTone): {
 	}
 	if (t.state === "none" && t.from !== "recorder")
 		return { value: "Not measured", hint: NOT_MEASURED_WORDS["live-none"] }
-	// The recorder's stored null rules DCS out too: it checks DCS codes, and an older core stored null only for an
-	// empty sub-audible band, which a DCS code fills.
+	// The recorder's stored null rules DCS out too: it checks every valid DCS code (a non-standard one reads absent),
+	// and an older core stored null only for an empty sub-audible band, which a DCS code fills. It rules out the
+	// standard CTCSS tones (67.0-254.1 Hz), not a non-standard tone under 67 Hz (docs/API.md).
 	if (t.state === "none") return { value: "No tone heard", hint: null }
 	if (t.state !== "not-measured") return malformed
 	const why: unknown = t.why

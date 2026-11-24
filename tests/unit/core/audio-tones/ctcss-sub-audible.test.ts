@@ -6,6 +6,7 @@
  * audio: the bank and the DCS decoder. All audio here is modelled.
  */
 import { describe, expect, it } from "vitest"
+import { DCS_STANDARD_CODES } from "@wavekit/api-types"
 import { CtcssBank } from "../../../../src/core/audio-tones/ctcss.js"
 import { DcsDecoder } from "../../../../src/core/audio-tones/dcs.js"
 import {
@@ -41,6 +42,7 @@ function fact({ bank, dcs }: Fed, ownTone = false) {
 		dcsSamples: dcs.sampleCount(),
 		dcsChain: dcs.longestChain(),
 		dcsLoneHits: dcs.loneHitCount(),
+		dcsAnyChain: dcs.anyValidChain(),
 		dcs: dcs.result(),
 		ownTone,
 	})
@@ -102,16 +104,17 @@ function* voiceLike(n: number, toneHz: number | null): Generator<number> {
 
 describe("CtcssBank sub-audible energy without a winning tone", () => {
 	it("a DCS-like random NRZ: no block votes or leans, no DCS word chains: no tone (null)", () => {
-		const f = fed(dcsLike(16_000, 3))
+		const f = fed(dcsLike(24_000, 3))
 		const { bank } = f
-		expect(bank.sampleCount()).toBe(16_000)
+		expect(bank.sampleCount()).toBe(24_000)
 		expect(bank.votedBlockCount()).toBe(0)
 		expect(bank.result()).toBeNull()
-		// 16 000 samples: blocks at 4 000, 6 000, … 16 000: 7 blocks, every one held the code.
-		expect(bank.blockCount()).toBe(7)
-		expect(bank.subAudibleBlockCount()).toBe(7)
+		// 24 000 samples: blocks at 4 000, 6 000, … 24 000: 11 blocks, every one held the code.
+		expect(bank.blockCount()).toBe(11)
+		expect(bank.subAudibleBlockCount()).toBe(11)
 		expect(bank.partialBlockCount()).toBe(0)
 		expect(f.dcs.longestChain()).toBeLessThan(2)
+		expect(f.dcs.anyValidChain()).toBeLessThan(2)
 		expect(fact(f)).toEqual({ tone: null })
 	})
 
@@ -142,7 +145,7 @@ describe("CtcssBank sub-audible energy without a winning tone", () => {
 	// Speech's own fundamental (85-255 Hz) and its low harmonics lie in the bank's band, so an
 	// untoned voice fills it, but its gliding pitch never holds one tone's bin: no tone (null).
 	it("untoned voice: its pitch fills the sub-audible band, no tone leans on a block: null", () => {
-		const f = fed(voiceLike(16_000, null))
+		const f = fed(voiceLike(24_000, null))
 		expect(f.bank.result()).toBeNull()
 		expect(f.bank.votedBlockCount()).toBe(0)
 		expect(f.bank.subAudibleBlockCount()).toBeGreaterThan(0)
@@ -154,18 +157,18 @@ describe("CtcssBank sub-audible energy without a winning tone", () => {
 
 	it("white noise alone: it fills the band, no tone wins or leans, no DCS word chains: null", () => {
 		const rand = mulberry32(11)
-		const f = fed(Array.from({ length: 16_000 }, () => 0.3 * gaussian(rand)))
+		const f = fed(Array.from({ length: 24_000 }, () => 0.3 * gaussian(rand)))
 		expect(f.bank.votedBlockCount()).toBe(0)
 		expect(f.bank.subAudibleBlockCount()).toBe(f.bank.blockCount())
 		expect(f.bank.partialBlockCount()).toBe(0)
 		expect(fact(f)).toEqual({ tone: null })
 	})
 
-	it("silence at the minimums (3 blocks, 8 000 samples): null; one sample fewer is absent", () => {
-		const silent = fed(new Array<number>(8_000).fill(0))
+	it("silence at the minimums (10 blocks, 22 000 samples): null; one sample fewer is absent", () => {
+		const silent = fed(new Array<number>(22_000).fill(0))
 		expect(silent.bank.blockCount()).toBe(TONE_MEASURED_MIN_BLOCKS)
 		expect(fact(silent)).toEqual({ tone: null })
-		const short = fed(new Array<number>(7_999).fill(0))
+		const short = fed(new Array<number>(21_999).fill(0))
 		expect(short.bank.blockCount()).toBe(TONE_MEASURED_MIN_BLOCKS - 1)
 		expect(fact(short)).toEqual({})
 	})
@@ -175,7 +178,7 @@ describe("CtcssBank sub-audible energy without a winning tone", () => {
 		// |H|² = f⁴/(f⁴ + 400⁴)), leaving 400⁴/2000⁴ ≈ 0.16% of the tone's power: under the 1% floor.
 		const f = fed(
 			Array.from(
-				{ length: 16_000 },
+				{ length: 24_000 },
 				(_, i) => 0.3 * Math.sin((2 * Math.PI * 2000 * i) / RATE),
 			),
 		)
@@ -297,6 +300,27 @@ describe("weak or broken tones under noise read absent, noise and voice stay nul
 		},
 	)
 
+	// TONE_MEASURED_MIN_BLOCKS (10 blocks, 2.75 s): a tone 9 dB under the noise leans on a block
+	// only now and then; a file analysed for fewer blocks reads absent, a longer one has leaned.
+	it.each([1.5, 3])(
+		"an 88.5 Hz tone 9 dB under the noise, %s s, 30 seeds: never null",
+		seconds => {
+			const nulls: number[] = []
+			for (let seed = 1; seed <= 30; seed++) {
+				const noise = lowpassed300(whiteNoise({ seconds, seed, std: 0.3 }))
+				const amplitude = Math.sqrt(2 * power(noise) * 10 ** (-9 / 10))
+				const f = fed(
+					noise.map(
+						(v, i) => v + amplitude * Math.sin((2 * Math.PI * 88.5 * i) / RATE),
+					),
+				)
+				if (fact(f).tone === null) nulls.push(seed)
+			}
+			expect(nulls).toEqual([])
+		},
+		30_000,
+	)
+
 	it.each([1, 2, 3])(
 		"60 s of 300 Hz low-passed white noise (seed %s): no lean twice on one tone, chance DCS hits only: null",
 		seed => {
@@ -355,5 +379,73 @@ describe("DcsDecoder loneHitCount", () => {
 		// Silence never hits.
 		for (let i = 0; i < 8_000; i++) dcs.pushSample(0)
 		expect(dcs.loneHitCount()).toBe(0)
+	})
+})
+
+/**
+ * A clean code outside the standard set (DCS_CODE_SET "standard"): the gate reports no code and,
+ * when its word is no rotation of a standard word, no standard lone hit chains either, yet the
+ * any-valid side chain (DcsDecoder.anyValidChain) holds it: absent, never "No tone heard". Every
+ * one of the 512 codes, 6 s each, clean NRZ low-passed at 250 Hz (modelled).
+ */
+describe("DcsDecoder anyValidChain: no clean DCS code reads null", () => {
+	const standard = new Set(DCS_STANDARD_CODES.map(c => Number.parseInt(c, 8)))
+	const sixSeconds = (code: number) =>
+		lowpassInPlace(
+			nrz(dcsBitStream({ code, bits: Math.ceil(6 * 134.4) }), {
+				amplitude: 0.15,
+			}),
+			250,
+			RATE,
+		).subarray(0, 6 * RATE)
+
+	it("every non-standard code: a chain of at least 2 any-valid words (000: a leaned CTCSS block), never null", () => {
+		const nulls: string[] = []
+		const short: string[] = []
+		let checked = 0
+		for (let code = 0; code < 512; code++) {
+			if (standard.has(code)) continue
+			checked++
+			const f = fed(sixSeconds(code))
+			const name = code.toString(8).padStart(3, "0")
+			// 2 words make the file tone-like (DCS_PARTIAL_WORDS).
+			if (f.dcs.anyValidChain() < 2) {
+				short.push(name)
+				// Its word repeats every 23 bits: lines 5.84 Hz apart, one leans on a CTCSS bin.
+				expect(f.bank.partialBlockCount()).toBeGreaterThan(0)
+			}
+			if ("tone" in fact(f) && fact(f).tone === null) nulls.push(name)
+		}
+		expect(checked).toBe(512 - standard.size)
+		// 000's word opens with 11 zeros: shaped at 250 Hz, its slicer never reads a whole word.
+		expect(short).toEqual(["000"])
+		expect(nulls).toEqual([])
+	}, 120_000)
+
+	it("every standard code still reads as its own code", () => {
+		for (const text of DCS_STANDARD_CODES) {
+			const f = fed(sixSeconds(Number.parseInt(text, 8)))
+			expect(fact(f)).toEqual({
+				tone: { kind: "dcs", code: text, polarity: "normal" },
+			})
+		}
+	}, 120_000)
+
+	it("counts like longestChain, kept after the chain breaks; reset clears it", () => {
+		const dcs = new DcsDecoder()
+		// 017 is no standard code and no rotation of one: result() and longestChain stay empty.
+		for (const x of nrz(dcsBitStream({ code: 0o17, bits: 23 * 4 })))
+			dcs.pushSample(x)
+		// The last bits leave the low-pass after the stream ends.
+		for (let i = 0; i < 2_000; i++) dcs.pushSample(0)
+		expect(dcs.result()).toBeNull()
+		expect(dcs.longestChain()).toBe(0)
+		const chain = dcs.anyValidChain()
+		expect(chain).toBeGreaterThanOrEqual(2)
+		const rand = mulberry32(4)
+		for (let i = 0; i < 8_000; i++) dcs.pushSample(0.2 * gaussian(rand))
+		expect(dcs.anyValidChain()).toBe(chain)
+		dcs.reset()
+		expect(dcs.anyValidChain()).toBe(0)
 	})
 })

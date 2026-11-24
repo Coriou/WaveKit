@@ -491,17 +491,18 @@ describe("recordingFactsBytes bounds", () => {
 			dcsSamples: DCS_MEASURED_MIN_SAMPLES,
 			dcsChain: 0,
 			dcsLoneHits: 0,
+			dcsAnyChain: 0,
 			dcs: null,
 			ownTone: false,
 		}
 		const code = { code: "023", polarity: "normal" }
 
-		it("the minimums' arithmetic: 3 blocks (1 s of CTCSS), 6 000 samples (0.75 s of DCS), 2 words", () => {
-			expect(TONE_MEASURED_MIN_BLOCKS).toBe(3)
-			// 4 000 + 2 × 2 000 samples at 8 kHz: the bank's third block.
+		it("the minimums' arithmetic: 10 blocks (2.75 s of CTCSS), 6 000 samples (0.75 s of DCS), 2 words", () => {
+			expect(TONE_MEASURED_MIN_BLOCKS).toBe(10)
+			// 4 000 + 9 × 2 000 samples at 8 kHz: the bank's tenth block.
 			const bank = new CtcssBank()
-			for (let i = 0; i < 7_999; i++) bank.pushSample(0)
-			expect(bank.blockCount()).toBe(2)
+			for (let i = 0; i < 21_999; i++) bank.pushSample(0)
+			expect(bank.blockCount()).toBe(9)
 			bank.pushSample(0)
 			expect(bank.blockCount()).toBe(TONE_MEASURED_MIN_BLOCKS)
 			expect(DCS_MEASURED_MIN_SAMPLES).toBe(6_000)
@@ -595,6 +596,13 @@ describe("recordingFactsBytes bounds", () => {
 			expect(
 				toneFactOf(null, { ...quiet, dcsChain: DCS_PARTIAL_WORDS - 1 }),
 			).toEqual({ tone: null })
+			// Two words of any valid code, standard or not (a non-standard code): absent; one is not.
+			expect(
+				toneFactOf(null, { ...quiet, dcsAnyChain: DCS_PARTIAL_WORDS }),
+			).toEqual({})
+			expect(
+				toneFactOf(null, { ...quiet, dcsAnyChain: DCS_PARTIAL_WORDS - 1 }),
+			).toEqual({ tone: null })
 		})
 
 		it("lone DCS word hits: absent from 2 and one per 3 s analysed, null below either bound", () => {
@@ -649,6 +657,7 @@ describe("recordingFactsBytes bounds", () => {
 				expect(toneFactOf(null, { ...quiet, partialBlocks: n })).toEqual({})
 				expect(toneFactOf(null, { ...quiet, dcsChain: n })).toEqual({})
 				expect(toneFactOf(null, { ...quiet, dcsLoneHits: n })).toEqual({})
+				expect(toneFactOf(null, { ...quiet, dcsAnyChain: n })).toEqual({})
 			}
 		})
 	})
@@ -661,6 +670,7 @@ describe("recordingFactsBytes bounds", () => {
 		dcsSamples: dcs.sampleCount(),
 		dcsChain: dcs.longestChain(),
 		dcsLoneHits: dcs.loneHitCount(),
+		dcsAnyChain: dcs.anyValidChain(),
 		dcs: dcs.result(),
 		ownTone,
 	})
@@ -900,6 +910,27 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		120_000,
 	)
 
+	// Modelled clean codes outside the standard set, none a rotation of a standard word: the gate
+	// reports no code and no standard word hits, but the any-valid chain holds two words or more:
+	// tone-like, so absent, never "No tone heard".
+	it.each(["017", "050", "141", "214", "537", "755"])(
+		"a non-standard DCS %s over: no code, absent, never null",
+		async code => {
+			const scene = await recorderScene([
+				{
+					seconds: 6,
+					ctcssHz: null,
+					gapAfter: 4.1,
+					subAudible: dcsDeviation(code),
+				},
+			])
+			expect(scene.outcomes).toEqual(["finalized"])
+			expect("tone" in scene.facts[0]!).toBe(false)
+			expect("tone" in scene.stored[0]!).toBe(false)
+		},
+		120_000,
+	)
+
 	// A DCS 023 too broken to chain two words (modelled: one bit in 20 flipped, 5% bit errors):
 	// the decoder confirms nothing and never matches two consecutive words, but its clean 23-bit
 	// windows hit far above chance: tone-like, so absent, never "No tone heard".
@@ -976,7 +1007,7 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		expect(noise.stored[0]!.tone).toBeNull()
 	}, 240_000)
 
-	// A 600 ms over alone: its detectors analysed under 1 s (the CTCSS minimum): absent.
+	// A 600 ms over alone: its detectors analysed under 2.75 s (the CTCSS minimum): absent.
 	it("a short over (600 ms): the tone is absent, never null", async () => {
 		const scene = await recorderScene([
 			{ seconds: 0.6, ctcssHz: null, gapAfter: 4.1 },
@@ -1021,7 +1052,7 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 
 	// A 121.4 s over: the roll-over part holds about 1.7 s of activity, but about 1 s of it is the
 	// tail produced past the cut before the first part finished, carried into the new part
-	// without its tone twin: the part's detectors analysed about 0.73 s, under the 1 s CTCSS
+	// without its tone twin: the part's detectors analysed about 0.73 s, under the 2.75 s CTCSS
 	// minimum. The carried tail never counts toward the minimums: absent, never null.
 	it("a short roll-over part: its carried-in tail does not count, the tone is absent", async () => {
 		const scene = await recorderScene([

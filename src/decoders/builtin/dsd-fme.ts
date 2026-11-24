@@ -1374,7 +1374,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/**
 	 * The run a WAV lookup belongs to, raised by every start that ends the previous run: an old
 	 * run's attempt (one woken from the stuck listing, or a retry it scheduled) schedules and runs
-	 * no retry in the new run.
+	 * no retry in the new run. Only a crash restart (start() without stop()) raises it: after
+	 * stop() (`stopping`), as in restart() (stop() then start()), every lookup pending at the stop,
+	 * the calls stop() itself ended among them, keeps its retries, since dsd-fme finalises those
+	 * files only when its child exits; each chain is bounded (13.2 s, see stop()).
 	 */
 	private wavRun = 0
 	/**
@@ -1727,8 +1730,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			clearInterval(this.callTimeoutTimer)
 			this.callTimeoutTimer = null
 		}
-		// Before the restart's own ends: their lookups belong to the new run.
-		this.wavRun++
+		// A crash restart (no stop() before it): before its own ends, so their lookups belong to the
+		// new run. After stop() the lookups it left pending keep their retries (wavRun).
+		if (!this.stopping) this.wavRun++
 		this.endOpenCallsForRestart(this.monoDate())
 		// An old run's waiting attempt reads nothing; the stuck listing itself stays recorded until
 		// it settles, so this run starts no second read beside it (single flight across runs).
@@ -1845,8 +1849,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		await this.outboxDrained()
 		// No end stays held past stop(): one queued after the drain began goes now, without waiting.
 		this.releaseHeldEnds()
-		// The WAV lookups are deliberately NOT cancelled: dsd-fme finalises the file of a call
-		// this stop() ended when its child exits, inside super.stop(), so only a retry after it
+		// The WAV lookups are deliberately NOT cancelled, here or by the start() of a restart
+		// (wavRun): dsd-fme finalises the file of a call this stop() ended when its child exits, inside super.stop(), so only a retry after it
 		// finds that file and links it in a `wavFileUpdate` (the recording links follow it). That
 		// post-stop update is bounded: each chain is 1 + DSD_FME_WAV_RETRIES attempts, at most
 		// 6 × (DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS) = 13.2 s after its end, and

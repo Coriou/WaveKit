@@ -7083,16 +7083,25 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   reads it: an inverted 023 is 047 normal; DCS wins when both answer), else
   `{ "kind": "ctcss", "hz": 88.5 }` (a standard tone, 67.0-254.1 Hz) when its
   CTCSS detector settled on one, or null when its detectors analysed at least
-  1 s (CTCSS) and 0.75 s (DCS) of the file's own audio and nothing tone-like was
-  heard: no half-second block voted for or leaned on a CTCSS tone, no two
-  consecutive DCS words matched, and DCS word hits stayed at chance (fewer than
-  2, or fewer than one per 3 s analysed; noise hits about once per 13 s). Absent
-  when it measured less, when a tone or DCS word was heard but did not settle (a
-  weak or broken-up tone, a DCS code too broken to confirm, a toned over joined
-  to an untoned one), or when the file was kept for its own tone; and absent on
-  older files. A reader accepts a DCS tone without `polarity`. Null for older files, any other kind, and a sidecar that
-  is missing, larger than 2 KiB, malformed or of another operation; the file is
-  served the same either way.
+  2.75 s (CTCSS: ten analysis blocks) and 0.75 s (DCS) of the file's own audio
+  and nothing tone-like was heard: no half-second block voted for or leaned on a
+  CTCSS tone, no two consecutive DCS words matched (of any valid code, standard
+  or not: a clean non-standard code reads absent, never null), and DCS word hits
+  stayed at chance (fewer than 2, or fewer than one per 3 s analysed; noise hits
+  about once per 13 s). Absent when it measured less, when a tone or DCS word was
+  heard but did not settle (a weak or broken-up tone, a DCS code too broken to
+  confirm, a toned over joined to an untoned one), or when the file was kept for
+  its own tone; and absent on older files. Null does not rule out a non-standard
+  tone under 67 Hz (33-64 Hz: those tones are not checked) or a CTCSS tone more
+  than about 12 dB under the sub-audible noise; the lean bounds are calibrated on
+  modelled audio only, until labelled recordings exist. A non-standard code whose
+  word is a rotation of a standard code's word (or of its complement) reads as
+  that standard code, as on the live path (645 reads 526, 736 reads 263). A
+  reader accepts a DCS tone without `polarity`; a core from before 2026-11-24
+  rejects the `polarity` member (its schema is strict) and reads such a sidecar
+  as no facts (fail closed; the file is still served). Null for older files, any
+  other kind, and a sidecar that is missing, larger than 2 KiB, malformed or of
+  another operation; the file is served the same either way.
 - `frequencyHz` of a scanner recording is its channel frequency: the frequency
   of the discovery that owns it now, in whole Hz (rounded as the Activity row's
   `channel.frequencyHz` is). The two agree until a merge: the catalogue item

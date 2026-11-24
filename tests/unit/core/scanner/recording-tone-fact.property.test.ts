@@ -33,6 +33,7 @@ const coverage = fc.record({
 	dcsSamples: count,
 	dcsChain: count,
 	dcsLoneHits: count,
+	dcsAnyChain: count,
 	dcs,
 	ownTone: fc.boolean(),
 })
@@ -52,6 +53,9 @@ describe("toneFactOf properties", () => {
 				expect(c.votedBlocks).toBe(0)
 				expect(c.partialBlocks).toBe(0)
 				expect(c.dcsChain).toBeLessThan(DCS_PARTIAL_WORDS)
+				// No chain of any valid word either (a non-standard code the gate never reports).
+				expect(Number.isFinite(c.dcsAnyChain)).toBe(true)
+				expect(c.dcsAnyChain).toBeLessThan(DCS_PARTIAL_WORDS)
 				// Lone DCS hits at chance only: under the minimum or under one per 3 s analysed.
 				expect(Number.isFinite(c.dcsLoneHits)).toBe(true)
 				expect(

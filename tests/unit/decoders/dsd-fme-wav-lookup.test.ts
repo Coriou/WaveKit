@@ -995,6 +995,48 @@ describe("dsd-fme stop with held ends", () => {
 		expect(found).toEqual([fileOf(66)])
 	})
 
+	/** restart() as the base runs it (stop() then start()), the child's spawn stubbed out. */
+	const restartedAfterStop = async (d: DsdFmeDecoder): Promise<void> => {
+		vi.spyOn(
+			Object.getPrototypeOf(DsdFmeDecoder.prototype) as {
+				start(): Promise<void>
+			},
+			"start",
+		).mockResolvedValue(undefined)
+		await d.start()
+		const internals = d as unknown as {
+			callTimeoutTimer: ReturnType<typeof setInterval> | null
+		}
+		if (internals.callTimeoutTimer) clearInterval(internals.callTimeoutTimer)
+		internals.callTimeoutTimer = null
+	}
+
+	it("a restart (stop() then start()) still links, once, a file the child finalised at exit", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const { d, found } = decoderWithUpdates()
+		endThrough(d, 66)
+		await settleWavLookups(d)
+		await d.stop()
+		fs.writeFileSync(path.join(root, fileOf(66)), "")
+		await restartedAfterStop(d)
+		await runOutLookups(d)
+		expect(found).toEqual([fileOf(66)])
+	})
+
+	it("a restart still links, once, the file of a call stop() itself ended", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const { d, found } = decoderWithUpdates()
+		const internals = d as unknown as StopInternals
+		internals.callState = { ...callOf(69), announced: true }
+		const stopped = d.stop()
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_END_WAIT_MS)
+		await stopped
+		fs.writeFileSync(path.join(root, fileOf(69)), "")
+		await restartedAfterStop(d)
+		await runOutLookups(d)
+		expect(found).toEqual([fileOf(69)])
+	})
+
 	it("logs a held end as published: a file set after its deadline but before release counts", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
 		stuckOpendir()

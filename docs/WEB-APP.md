@@ -649,7 +649,7 @@ no audio, such as `The recording was deleted`); **What we know**, a few short ro
   `A tone was heard (not stored)` (the scanner kept the file for its tone without storing which;
   such a file never reads `No tone heard`),
   `No tone heard` (only when the scanner recorder stored that it listened and heard neither a
-  CTCSS tone nor a DCS code), or `Not measured` with why (recordings made before WaveKit stored the tone,
+  CTCSS tone nor a DCS code; it does not check tones under 67 Hz), or `Not measured` with why (recordings made before WaveKit stored the tone,
   `Not determined for this recording` when the stored facts hold no tone, a scanner recording whose
   file is not listed, a live transmission whose stored event could not be read, a live transmission
   whose stored reading holds no tone, or a stored tone this web app cannot read). A live

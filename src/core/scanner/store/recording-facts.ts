@@ -72,12 +72,19 @@ const finite = z.number().finite()
 const TONE_RATE_HZ = 8000
 
 /**
- * CTCSS analysis blocks the file's bank must have run before its "no tone" counts: 3, i.e. 1 s of
- * analysed audio (the first 500 ms block at 4 000 samples, then one per 250 ms hop of 2 000:
- * 4 000 + 2 × 2 000 = 8 000 samples), one block past the two the bank needs to answer at all
- * (ctcss.ts MIN_SAMPLES, 750 ms).
+ * CTCSS analysis blocks the file's bank must have run before its "no tone" counts: 10, i.e.
+ * 2.75 s of analysed audio (the first 500 ms block at 4 000 samples, then one per 250 ms hop of
+ * 2 000: 4 000 + 9 × 2 000 = 22 000 samples). The bank answers a tone from its second block
+ * (ctcss.ts MIN_SAMPLES, 750 ms); "no tone" needs more, because a weak tone leans on a block only
+ * now and then (CtcssBank.partialBlockCount). Modelled (300 Hz low-passed white noise, 100 seeds
+ * at each of 67, 88.5, 151.4 and 250.3 Hz, a tone 9 dB under the band's noise): no block had
+ * leaned or voted by the 3rd block in 18-32% of the runs, by the 6th in 3-7%, by the 8th in 0-3%,
+ * by the 10th in none of the 400 (under 0.75% at 95%). 6 dB under: 2% by the 3rd, none by the
+ * 4th. 12 dB under, a tone this short is not caught (51-68% still unseen by the 10th block): such
+ * a file can read null. These bounds are calibrated on modelled audio only, until labelled
+ * recordings exist.
  */
-export const TONE_MEASURED_MIN_BLOCKS = 3
+export const TONE_MEASURED_MIN_BLOCKS = 10
 
 /**
  * Samples the file's DCS decoder must have analysed before its code, or its "no code", counts:
@@ -127,6 +134,11 @@ export interface ToneCoverage {
 	readonly dcsChain: number
 	/** DCS word chains started, one per lone hit (DcsDecoder.loneHitCount). */
 	readonly dcsLoneHits: number
+	/**
+	 * Longest chain of any valid Golay word, standard code or not (DcsDecoder.anyValidChain): a
+	 * clean non-standard code the gate never reports.
+	 */
+	readonly dcsAnyChain: number
 	/** The DCS decoder's confirmed code (DcsDecoder.result()), before the gate. */
 	readonly dcs: unknown
 	/**
@@ -207,13 +219,14 @@ function dcsHitsAboveChance(hits: number, samples: number): boolean {
  * | settled (hz)  | no code                 | any          | any         | any           | ctcss hz |
  * | no coverage   | -                       | -            | -           | -             | absent   |
  * | any           | any                     | any          | any         | yes           | absent   |
- * | any           | any                     | < 3          | any         | no            | absent   |
+ * | any           | any                     | < 10         | any         | no            | absent   |
  * | any           | any                     | any          | < 6 000     | no            | absent   |
- * | voted, unset  | any                     | ≥ 3          | ≥ 6 000     | no            | absent   |
- * | leaned block  | any                     | ≥ 3          | ≥ 6 000     | no            | absent   |
- * | none          | partial (2 words)       | ≥ 3          | ≥ 6 000     | no            | absent   |
- * | none          | lone hits above chance  | ≥ 3          | ≥ 6 000     | no            | absent   |
- * | none          | none (chance hits only) | ≥ 3          | ≥ 6 000     | no            | null     |
+ * | voted, unset  | any                     | ≥ 10         | ≥ 6 000     | no            | absent   |
+ * | leaned block  | any                     | ≥ 10         | ≥ 6 000     | no            | absent   |
+ * | none          | partial (2 words)       | ≥ 10         | ≥ 6 000     | no            | absent   |
+ * | none          | any valid word, 2 words | ≥ 10         | ≥ 6 000     | no            | absent   |
+ * | none          | lone hits above chance  | ≥ 10         | ≥ 6 000     | no            | absent   |
+ * | none          | none (chance hits only) | ≥ 10         | ≥ 6 000     | no            | null     |
  *
  * Both settled: DCS wins. A confirmed standard code is three identical 23-bit words exactly
  * 23 bits apart, one of 4 784 registers (104 codes × 23 rotations × 2 polarities) and then twice
@@ -222,8 +235,9 @@ function dcsHitsAboveChance(hits: number, samples: number): boolean {
  * is lines 134.4 / 23 ≈ 5.84 Hz apart, one of which can sit on a CTCSS tone's bin. "voted, unset": some block voted for a tone the bank did
  * not settle on (under 60% of the blocks: hang noise, gaps and untoned turnarounds dilute a toned
  * voice). "leaned block" (CtcssBank.partialBlockCount): a block no tone won still leaned on one
- * (a tone keyed on and off, or too weak under noise to vote). "lone hits above chance": a DCS code
- * too broken to chain two words. Voice and receiver noise put energy in the sub-audible band
+ * (a tone keyed on and off, or too weak under noise to vote). "any valid word": a code outside the
+ * standard set (DcsDecoder.anyValidChain), which the gate does not report, chained two words.
+ * "lone hits above chance": a DCS code too broken to chain two words. Voice and receiver noise put energy in the sub-audible band
  * without any of these: an untoned voice reads null. A count that is not a finite number is not
  * analysed.
  */
@@ -242,6 +256,8 @@ export function toneFactOf(
 	if (coverage.votedBlocks !== 0 || coverage.partialBlocks !== 0) return {}
 	if (!Number.isFinite(coverage.dcsChain)) return {}
 	if (coverage.dcsChain >= DCS_PARTIAL_WORDS) return {}
+	if (!Number.isFinite(coverage.dcsAnyChain)) return {}
+	if (coverage.dcsAnyChain >= DCS_PARTIAL_WORDS) return {}
 	if (dcsHitsAboveChance(coverage.dcsLoneHits, coverage.dcsSamples)) return {}
 	return { tone: null }
 }

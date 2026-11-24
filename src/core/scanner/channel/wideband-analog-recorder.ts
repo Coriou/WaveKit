@@ -4639,6 +4639,7 @@ export class WidebandAnalogRecorder {
 						dcsSamples: file.dcs.sampleCount(),
 						dcsChain: file.dcs.longestChain(),
 						dcsLoneHits: file.dcs.loneHitCount(),
+						dcsAnyChain: file.dcs.anyValidChain(),
 						dcs: file.dcs.result(),
 						ownTone: file.classTone !== null || file.toneCarried,
 					}
