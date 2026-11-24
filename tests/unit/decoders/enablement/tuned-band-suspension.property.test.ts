@@ -275,9 +275,9 @@ function unlisted(f: Fixture): string | null {
 // work on fake timers, so only host load stretches it. The 100 runs took
 // 4 132 ms under `vitest run tests/unit/decoders --maxWorkers=2` on a quiet
 // host and 18 140 ms alone at load average 91 to 143 on 8 cores (the old
-// 12 400 ms budget timed out there). Scaled to load average 400:
-// 18 140 × 400 / 143 ≈ 50 700 ms; twice that is 101 400, so 120 000 ms. It
-// bounds a hang, never speed.
+// 12 400 ms budget timed out there). Scaled to load average 400 from the
+// low end of that range: 18 140 × 400 / 91 ≈ 79 700 ms; twice that is
+// 159 400, so 160 000 ms. It bounds a hang, never speed.
 it("keeps every efficiency suspension listed by the gate and admits a clean tuned-band decoder within one sample", async () => {
 	await fc.assert(
 		fc.asyncProperty(
@@ -331,4 +331,4 @@ it("keeps every efficiency suspension listed by the gate and admits a clean tune
 		),
 		{ numRuns: 100 },
 	)
-}, 120_000)
+}, 160_000)
