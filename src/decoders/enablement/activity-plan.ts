@@ -15,7 +15,9 @@ import type {
 	ChannelActivity,
 	ObservedActivityCentre,
 } from "./activity-contract.js"
+import { REASONS } from "./activity-contract.js"
 import type { DecoderReach } from "./contract.js"
+import type { DsdTierView, DsdTrialGate, DsdTrialLane } from "./dsd-activity.js"
 import { channelizerBaseCores } from "./contract.js"
 
 export const ACTIVITY_DECODERS: readonly ActivityDecoder[] = [
@@ -77,10 +79,20 @@ export interface ActivityIncumbent {
 	primary: boolean
 	/** Its successful start, or when it was first planned while never started. */
 	dwellSinceMonoMs: number
-	/** Recent checked, CRC/FEC-clean sync from this exact running placement. */
+	/**
+	 * dsd-fme: the channel is digital-held, a checked CRC/FEC-clean sync on it
+	 * within DSD_DIGITAL_HOLD_MS (30 min, dsd-activity.ts), kept per RF channel.
+	 */
 	syncSeen?: boolean
 	/** Monotonic expiry supplied by the manager; re-evaluate even in quiet spectrum. */
 	syncUntilMonoMs?: number
+	/**
+	 * dsd-fme: the current run passed its dwell of listened time since the
+	 * later of its start, its last sync and the source's reconnect, without a
+	 * sync (a decayed victim then counts as no-sync). Absent: judged from
+	 * `dwellSinceMonoMs`.
+	 */
+	noSyncRun?: boolean
 }
 
 /** A placement whose process start is in flight (it holds capacity already). */
@@ -94,8 +106,24 @@ export interface ActivityPendingStart {
 
 export interface PlannerActivity {
 	nowMonoMs: number
-	/** Bounded no-sync cooldowns, carried by the manager on the same clock. */
-	demotions?: readonly { key: string; untilMonoMs: number }[]
+	/**
+	 * dsd-fme channel tiers (dsdTierKey keys, bounded to DSD_MAX_TIERS = 256),
+	 * carried by the manager on the same clock.
+	 */
+	tiers?: readonly DsdTierView[]
+	/** Per dsd-fme slot group (dsdGroupKey), its last analog-to-analog try move. */
+	analogRetries?: readonly { groupKey: string; atMonoMs: number }[]
+	/**
+	 * Per dsd-fme slot group, its last trial-token and burst-trial moves per
+	 * lane (fresh 300 s, retry 600 s gates).
+	 */
+	trials?: readonly {
+		groupKey: string
+		gate: DsdTrialGate
+		atMonoMs: number
+	}[]
+	/** dsd-fme challengers whose last two burst runs pair (dsdChallengeKey keys). */
+	burstPairedChallengers?: readonly string[]
 	/**
 	 * dsd-fme challengers whose energy passed the challenge hysteresis
 	 * (dsdChallengeKey keys, dsd-activity.ts). Absent: none did, so no dsd-fme
@@ -127,6 +155,12 @@ export interface ActivityMove {
 	toKey: string
 	toHz: number
 	atMonoMs: number
+	/** dsd-fme: the gate of the move (T1 reclaim, T2 tier, T3 yield, TB burst trial, T4 analog try). */
+	kind?: MoveKind
+	/** dsd-fme: the move used the group's trial token (T2 by D/S/U, T3). */
+	trial?: true
+	/** dsd-fme: the trial lane a trial-token or burst-trial move used. */
+	lane?: DsdTrialLane
 }
 
 export interface ActivityGroupView {
@@ -157,15 +191,6 @@ export interface PlacementActivity {
 }
 
 const STATES: readonly ActivityState[] = ["hot", "warm", "cold"]
-const REASONS: readonly ActivityReason[] = [
-	"live-energy",
-	"track",
-	"occupancy",
-	"decoded",
-	"trial-success",
-	"trial-backoff",
-]
-
 const sameEpoch = (a: ActivityEpoch, b: ActivityEpoch | undefined) =>
 	b !== undefined &&
 	a.sourceId === b.sourceId &&
@@ -182,7 +207,10 @@ function validChannel(c: ChannelActivity | null | undefined, hz: number) {
 		STATES.includes(c.state) &&
 		typeof c.live === "boolean" &&
 		Array.isArray(c.reasons) &&
-		(c.excluded === undefined || typeof c.excluded === "boolean")
+		(c.excluded === undefined || typeof c.excluded === "boolean") &&
+		(c.evidence === undefined ||
+			c.evidence === "digital" ||
+			c.evidence === "analog")
 	)
 }
 
@@ -236,17 +264,46 @@ const stateRank = { hot: 0, warm: 1, cold: 2 } as const
 export function activityOrder(
 	candidatesHz: readonly number[],
 	snapshot: ActivitySnapshot | null,
+	tierOf?: (hz: number) => SlotTier | undefined,
 ): number[] {
 	if (!snapshot) return [...candidatesHz]
 	const by = new Map(snapshot.channels.map(c => [c.hz, c]))
 	const index = new Map(candidatesHz.map((hz, i) => [hz, i]))
+	// dsd-fme classes (SlotClass): 0 H in any state; cold otherwise 4;
+	// 1 R; 2 D, S, U (in that order, D by most recent sync first); 3 A;
+	// 4 DN, N. Inside a class: state, live first, score, today's order.
+	const cls = (hz: number, c: ChannelActivity) => {
+		// No tiers (multimon-ng): one class. A channel the planner has no tier
+		// for is unknown, never tried.
+		if (!tierOf) return 0
+		const t = tierOf(hz)?.cls ?? "U"
+		if (t === "H") return 0
+		if (c.state === "cold") return 4
+		return t === "R" ? 1 : t === "A" ? 3 : t === "DN" || t === "N" ? 4 : 2
+	}
+	const sub = (hz: number) => {
+		const t = tierOf?.(hz)?.cls
+		return t === "D" ? 0 : t === "S" ? 1 : 2
+	}
+	const syncOf = (hz: number) =>
+		tierOf?.(hz)?.lastSyncMonoMs ?? Number.NEGATIVE_INFINITY
 	return candidatesHz
 		.filter(hz => by.get(hz)?.excluded !== true)
 		.sort((a, b) => {
 			const ca = by.get(a)!
 			const cb = by.get(b)!
 			return (
+				cls(a, ca) - cls(b, cb) ||
+				(tierOf && cls(a, ca) === 2
+					? sub(a) - sub(b) ||
+						(sub(a) === 0 && syncOf(b) !== syncOf(a)
+							? syncOf(b) > syncOf(a)
+								? 1
+								: -1
+							: 0)
+					: 0) ||
 				stateRank[ca.state] - stateRank[cb.state] ||
+				(tierOf ? Number(cb.live) - Number(ca.live) : 0) ||
 				(ca.state === "cold" ? 0 : cb.score - ca.score) ||
 				index.get(a)! - index.get(b)!
 			)
@@ -256,6 +313,7 @@ export function activityOrder(
 /** The bounded status entry for one channel. */
 export function placementActivity(
 	channel: ChannelActivity | undefined,
+	tierReasons: readonly ActivityReason[] = [],
 ): PlacementActivity {
 	if (!channel) return { ranking: "nearest" }
 	return {
@@ -263,7 +321,9 @@ export function placementActivity(
 		state: channel.state,
 		score: roundScore(channel.score),
 		live: channel.live,
-		reasons: REASONS.filter(r => channel.reasons.includes(r)),
+		reasons: REASONS.filter(
+			r => channel.reasons.includes(r) || tierReasons.includes(r),
+		),
 	}
 }
 
@@ -419,10 +479,308 @@ export interface SelectionIncumbent {
 	syncSeen?: boolean
 }
 export interface SelectionResult {
-	chosen: { hz: number; movedFrom?: { key: string; hz: number } }[]
+	chosen: {
+		hz: number
+		movedFrom?: { key: string; hz: number }
+		kind?: MoveKind
+		trial?: true
+		lane?: DsdTrialLane
+	}[]
 	moves: number
 	/** When a blocked move may become possible (dwell end or move window). */
 	blockedUntilMonoMs: number | null
+}
+
+/**
+ * dsd-fme channel classes for one pass (docs/DECODER-GUIDE.md,
+ * Troubleshooting, Decoder not starting, item 8), built by the planner:
+ * - H held: a sync within 30 min, not decayed;
+ * - R remembered: a sync within 6 h, not decayed, not held;
+ * - D decayed: a sync within 6 h, decayed, not in a no-sync cooldown;
+ * - DN: decayed and in a cooldown (demoted, but keeps its live reclaim);
+ * - S: scanner digital-voice evidence, no sync here;
+ * - U unknown; A analog (scanner analog FM or a trial backoff);
+ * - N no-sync: not remembered and in a cooldown, or a run past its dwell
+ *   without a sync.
+ * H, R, D and DN are remembered: never demoted from the snapshot (zeroed).
+ */
+export type SlotClass = "H" | "R" | "D" | "DN" | "S" | "U" | "A" | "N"
+/** How a dsd-fme slot move happened (the gates T1, T2, TB, T3, T4). */
+export type MoveKind =
+	| "reclaim"
+	| "tier"
+	| "yield"
+	| "burst-trial"
+	| "analog-try"
+
+export interface SlotTier {
+	cls: SlotClass
+	/** Live reclaims left (T1 budget: 2 per 30 min without a sync). */
+	reclaimOk: boolean
+	/** Its last two burst runs pair (the burst-trial right). */
+	burstPaired: boolean
+	/** No fill, no T2 (DN, N, analog in its try gap or backoff). */
+	demoted: boolean
+	/** Scanner analog past its try gap: the analog try (T4) may pick it. */
+	retry: boolean
+	/** Last checked sync on the channel (manager clock), null for none. */
+	lastSyncMonoMs: number | null
+	/** Its last noted failed try, null for none. */
+	triedMonoMs: number | null
+	failures: number
+	/** As an incumbent: its current run passed its dwell without a sync (D/DN victims count as N). */
+	noSyncRun: boolean
+}
+
+const REMEMBERED: ReadonlySet<SlotClass> = new Set(["H", "R", "D", "DN"])
+/** A channel the planner has no tier for: unknown, never tried. */
+const UNKNOWN_TIER: SlotTier = {
+	cls: "U",
+	reclaimOk: false,
+	burstPaired: false,
+	demoted: false,
+	retry: false,
+	lastSyncMonoMs: null,
+	triedMonoMs: null,
+	failures: 0,
+	noSyncRun: false,
+}
+
+/** A challenger as `mayTake` judges it. */
+export interface TakeChallenger {
+	cls: SlotClass
+	live: boolean
+	/** Past the hysteresis (span rule or burst pair). */
+	confirmed: boolean
+	state: ActivityState
+	reclaimOk: boolean
+	burstPaired: boolean
+	demoted: boolean
+	retry: boolean
+	failures: number
+	triedMonoMs: number | null
+	/** Its index in the activity order (lower is better). */
+	rank: number
+}
+/** A running incumbent as `mayTake` judges it. */
+export interface TakeVictim {
+	cls: SlotClass
+	live: boolean
+	lastSyncMonoMs: number | null
+	/** Its run passed the dwell. */
+	dwellPassed: boolean
+	pinned: boolean
+	/** Its current run passed its dwell without a sync (M-c: a D/DN victim counts as N for T2/TB/T4). */
+	noSyncRun: boolean
+	rank: number
+}
+export interface TakeContext {
+	nowMonoMs: number
+	count: number
+	/** Every chosen slot holds an H incumbent. */
+	allHeld: boolean
+	/** The group's trial token is free in the challenger's lane (T2 by D/S/U into an occupied slot, T3). */
+	trialOpen: boolean
+	/** The group's burst-trial gap is free in the challenger's lane (TB). */
+	burstTrialOpen: boolean
+	/** No discovery yield (T3) yet this pass. */
+	yieldOpen: boolean
+	/** The group's analog try gate is open (T4). */
+	analogTryOpen: boolean
+	/** T1: a held victim's last sync must be at least this old (DSD_QUIET_VICTIM_MS, 60 s). */
+	quietVictimMs: number
+	/** T3 and TB: a held victim's last sync must be at least this old (dsdNoSyncCooldownMs, 120 s). */
+	yieldSyncMs: number
+	/** T3, and TB after a failure: no failed try within this (DSD_TRIED_RECENT_MS, 30 min). */
+	triedRecentMs: number
+}
+
+/** The victim column of the slot table: H/R/D/U by live and quiet, A/N any live. */
+export type VictimColumn =
+	| "Hl"
+	| "Hr"
+	| "Hq"
+	| "Rl"
+	| "Rq"
+	| "Dl"
+	| "Dq"
+	| "Ul"
+	| "Uq"
+	| "AN"
+
+export function victimColumn(
+	v: TakeVictim,
+	ctx: Pick<TakeContext, "nowMonoMs" | "quietVictimMs">,
+	asNoSync = false,
+): VictimColumn {
+	switch (v.cls) {
+		case "H":
+			if (v.live) return "Hl"
+			return v.lastSyncMonoMs !== null &&
+				ctx.nowMonoMs - v.lastSyncMonoMs < ctx.quietVictimMs
+				? "Hr"
+				: "Hq"
+		case "R":
+			return v.live ? "Rl" : "Rq"
+		case "D":
+		case "DN":
+			if (asNoSync && v.noSyncRun) return "AN"
+			return v.live ? "Dl" : "Dq"
+		case "S":
+		case "U":
+			return v.live ? "Ul" : "Uq"
+		default:
+			return "AN"
+	}
+}
+
+/** T1 judges a D/DN victim's no-sync run (as A/N) only for an H or R challenger. */
+const t1NoSync = (c: Pick<TakeChallenger, "cls">) =>
+	c.cls === "H" || c.cls === "R"
+
+const oldSync = (v: TakeVictim, now: number, ms: number) =>
+	v.lastSyncMonoMs === null || now - v.lastSyncMonoMs >= ms
+
+/**
+ * The slot challenge/yield table (docs/DECODER-GUIDE.md item 8): the gate a
+ * challenger `c` takes the slot of victim `v` by, or null. Gates are tried in
+ * the order T1 (live reclaim), T2 (tiered), TB (burst trial), T3 (discovery
+ * yield), T4 (analog try); the first that allows the pair is returned. The
+ * move budget is the caller's (selectChannels).
+ *
+ * | C ↓ / V →          | Hl | Hr | Hq        | Rl | Rq        | Dl / Dq        | Ul / Uq        | A / N        |
+ * | T1 H/R/D/DN live   | no | no | yes       | no | yes       | no / yes  (1)  | yes, no dwell  | yes, no dwell|
+ * | T2 H, R (not live) | no | no | no        | no | if below  | yes            | yes            | yes          |
+ * | T2 D, S, U (token, live) | no | no | no  | no | sync≥120s | no / if below  | no / if below  | yes          |
+ * | T3 D, S, U (≥2, all H, live) | no | no | sync≥120s | n/a | n/a | n/a     | n/a            | n/a          |
+ * | TB D, S, U burst   | no | no | sync≥120s | no | yes       | no / yes       | no / yes       | yes          |
+ * | T4 A (analog try)  | no | no | no        | no | no        | no             | no             | A/N, oldest  |
+ *
+ * Hr / Hq split at quietVictimMs (60 s). For T2, TB and T4, and for T1 by
+ * an H or R challenger (1), a D/DN victim whose current run passed its
+ * dwell without a sync is an A/N victim. Every
+ * victim needs its dwell except a non-remembered one (S, U, A, N) taken by
+ * T1; a pinned victim (start in flight) never is one. A discovery challenger
+ * (D, S, U) takes a token (T2), burst (TB) or yield (T3) move only while live:
+ * a silent warm site that took the token would only fail into the retry lane.
+ */
+export function mayTake(
+	c: TakeChallenger,
+	v: TakeVictim,
+	ctx: TakeContext,
+): MoveKind | null {
+	if (v.pinned) return null
+	const now = ctx.nowMonoMs
+	const below = v.rank > c.rank
+	const remembered = REMEMBERED.has(c.cls)
+	const discovery = c.cls === "D" || c.cls === "S" || c.cls === "U"
+	const recentTry =
+		c.triedMonoMs !== null && now - c.triedMonoMs < ctx.triedRecentMs
+	// T1 live reclaim: no hysteresis; a non-remembered victim without its dwell.
+	// For an H or R challenger a D/DN victim past its dwell without a sync
+	// is an A/N victim (a decayed channel kept live by analog or a false sync).
+	if (remembered && c.live && c.reclaimOk) {
+		const col = victimColumn(v, ctx, t1NoSync(c))
+		const ok =
+			col === "Hq" ||
+			col === "Rq" ||
+			col === "Dq" ||
+			col === "Ul" ||
+			col === "Uq" ||
+			col === "AN"
+		const dwellOk = v.dwellPassed || !REMEMBERED.has(v.cls)
+		if (ok && dwellOk) return "reclaim"
+	}
+	if (!v.dwellPassed) return null
+	// T2 tiered: confirmed, hot or warm, not demoted.
+	if (c.confirmed && c.state !== "cold" && !c.demoted) {
+		const col = victimColumn(v, ctx, true)
+		if ((c.cls === "H" || c.cls === "R") && !c.live) {
+			if (
+				(col === "Rq" && below) ||
+				col === "Dl" ||
+				col === "Dq" ||
+				col === "Ul" ||
+				col === "Uq" ||
+				col === "AN"
+			)
+				return "tier"
+		} else if (discovery && c.live && ctx.trialOpen) {
+			if (
+				(col === "Rq" && oldSync(v, now, ctx.yieldSyncMs)) ||
+				(col === "Dq" && below) ||
+				(col === "Uq" && below) ||
+				col === "AN"
+			)
+				return "tier"
+		}
+	}
+	// TB burst trial: a burst pair, live, the group's burst gap free; after a
+	// failure only once its last try is 30 min old.
+	if (
+		discovery &&
+		c.burstPaired &&
+		c.live &&
+		ctx.burstTrialOpen &&
+		(c.failures < 1 || !recentTry)
+	) {
+		const col = victimColumn(v, ctx, true)
+		if (
+			(col === "Hq" && oldSync(v, now, ctx.yieldSyncMs)) ||
+			col === "Rq" ||
+			col === "Dq" ||
+			col === "Uq" ||
+			col === "AN"
+		)
+			return "burst-trial"
+	}
+	// T3 discovery yield: two or more slots, all held.
+	if (
+		discovery &&
+		ctx.count >= 2 &&
+		ctx.allHeld &&
+		ctx.trialOpen &&
+		ctx.yieldOpen &&
+		c.confirmed &&
+		c.state === "hot" &&
+		c.live &&
+		!c.demoted &&
+		!recentTry &&
+		victimColumn(v, ctx) === "Hq" &&
+		oldSync(v, now, ctx.yieldSyncMs)
+	)
+		return "yield"
+	// T4 analog try: A/N victims only.
+	if (
+		c.cls === "A" &&
+		c.retry &&
+		ctx.analogTryOpen &&
+		c.state !== "cold" &&
+		victimColumn(v, ctx, true) === "AN"
+	)
+		return "analog-try"
+	return null
+}
+
+/**
+ * Victim preference: A/N first, then U/S, D, R, H; lowest-ranked first (A/N:
+ * the oldest run). A U/S victim still inside its dwell (only T1 takes one)
+ * goes after every quiet remembered victim: a new site's trial is not cut
+ * mid-burst while a quiet held slot is free to take.
+ */
+const victimRank = (col: VictimColumn, dwellPassed: boolean): number =>
+	!dwellPassed && (col === "Ul" || col === "Uq") ? 5 : VICTIM_RANK[col]
+const VICTIM_RANK: Readonly<Record<VictimColumn, number>> = {
+	AN: 0,
+	Ul: 1,
+	Uq: 1,
+	Dl: 2,
+	Dq: 2,
+	Rl: 3,
+	Rq: 3,
+	Hl: 4,
+	Hr: 4,
+	Hq: 4,
 }
 
 /**
@@ -434,12 +792,23 @@ export interface SelectionResult {
  *    rank; the lowest-ranked unpinned are dropped only when the slot count
  *    shrank (budget or eligibility, not a move).
  * 2. Free slots take the best-ranked channels not chosen (a new slot, not a
- *    move).
- * 3. Ranked only: a hot or warm channel outranking an incumbent (and passing
- *    `canChallenge`, when given) replaces the lowest-ranked incumbent that is
- *    not live and whose dwell has passed, while the source has moves left. Each replacement is one move and
- *    carries the victim it replaces. The nearest-order fallback never
- *    displaces an incumbent, so a ranking outage reshuffles nothing.
+ *    move). With tiers, analog channels fill only after every other
+ *    candidate, and demoted channels never (a demoted DN only while live
+ *    with its reclaim budget).
+ * 3. Ranked only: without tiers (multimon-ng), a hot or warm channel
+ *    outranking an incumbent (and passing `canChallenge`, when given)
+ *    replaces the lowest-ranked incumbent that is not live and whose dwell
+ *    has passed, while the source has moves left. With tiers (dsd-fme) the
+ *    moves follow `mayTake`, phase by phase: T1 for every challenger, then
+ *    T2, TB, T3 and T4 (T1 candidates by rank, T4 least recently tried
+ *    first, T2, TB and T3 fewest failures first, then least recently
+ *    tried). T1 may use every move left; the others together
+ *    stop `reclaimReserve` moves short of it, so those stay for T1. The
+ *    trial token and the burst gap each allow one move per pass and lane
+ *    (fresh: never tried; retry: failed before), the analog gate one per
+ *    pass, and T3 one per pass. Each replacement carries the victim it
+ *    replaces and its kind. The nearest-order fallback never displaces an
+ *    incumbent, so a ranking outage reshuffles nothing.
  */
 export function selectChannels(args: {
 	order: readonly number[]
@@ -456,6 +825,18 @@ export function selectChannels(args: {
 	movesLeft: number
 	/** When the oldest counted move leaves the window (for blocked moves). */
 	moveWindowFreesMonoMs: number | null
+	/** dsd-fme channel classes; absent: today's rules (multimon-ng). */
+	tierOf?: (hz: number) => SlotTier | undefined
+	/** dsd-fme group gates (absent: open; a boolean sets both lanes). */
+	trialOpen?: boolean | Readonly<Record<DsdTrialLane, boolean>>
+	burstTrialOpen?: boolean | Readonly<Record<DsdTrialLane, boolean>>
+	analogRetryOpen?: boolean
+	/** Moves kept for T1 (DSD_RECLAIM_RESERVE). */
+	reclaimReserve?: number
+	/** mayTake bounds (absent: 60 s, 120 s, 30 min). */
+	quietVictimMs?: number
+	syncCooldownMs?: number
+	triedRecentMs?: number
 }): SelectionResult {
 	const rank = new Map(args.order.map((hz, i) => [hz, i]))
 	const count = Math.max(0, Math.min(args.count, args.order.length))
@@ -472,22 +853,58 @@ export function selectChannels(args: {
 		hz: number
 		incumbent?: SelectionIncumbent
 		movedFrom?: { key: string; hz: number }
+		kind?: MoveKind
+		trial?: true
+		lane?: DsdTrialLane
 	}
 	const chosen: Entry[] = incumbents.map(i => ({ hz: i.hz, incumbent: i }))
 	const has = (hz: number) => chosen.some(e => e.hz === hz)
-	for (const hz of args.order) {
-		if (chosen.length >= count) break
-		if (!has(hz) && !args.demotedHz?.has(hz)) chosen.push({ hz })
+	const tierOf = args.tierOf
+	const tier = (hz: number) => tierOf?.(hz) ?? UNKNOWN_TIER
+	const liveOf = (hz: number) => args.activity?.get(hz)?.live === true
+	const fill = (accept: (hz: number) => boolean) => {
+		for (const hz of args.order) {
+			if (chosen.length >= count) break
+			if (!has(hz) && !args.demotedHz?.has(hz) && accept(hz))
+				chosen.push({ hz })
+		}
 	}
+	if (tierOf) {
+		const fills = (t: SlotTier, hz: number) =>
+			!t.demoted || (t.cls === "DN" && liveOf(hz) && t.reclaimOk)
+		fill(hz => tier(hz).cls !== "A" && fills(tier(hz), hz))
+		fill(hz => fills(tier(hz), hz))
+	} else fill(() => true)
 	let moves = 0
 	let blocked: number | null = null
 	const block = (at: number) => {
 		blocked = blocked === null ? at : Math.min(blocked, at)
 	}
-	if (args.ranked && args.activity) {
+	const now = args.nowMonoMs
+	const finish = (): SelectionResult => {
+		chosen.sort((a, b) => rank.get(a.hz)! - rank.get(b.hz)!)
+		return {
+			chosen: chosen.map(e =>
+				e.movedFrom
+					? {
+							hz: e.hz,
+							movedFrom: e.movedFrom,
+							...(e.kind ? { kind: e.kind } : {}),
+							...(e.trial ? { trial: true as const } : {}),
+							...(e.lane ? { lane: e.lane } : {}),
+						}
+					: { hz: e.hz },
+			),
+			moves,
+			blockedUntilMonoMs: blocked,
+		}
+	}
+	if (!args.ranked || !args.activity) return finish()
+	const activity = args.activity
+	if (!tierOf) {
 		for (const hz of args.order) {
 			if (has(hz) || args.demotedHz?.has(hz)) continue
-			const a = args.activity.get(hz)
+			const a = activity.get(hz)
 			if (!a || a.state === "cold") continue
 			if (args.canChallenge && args.canChallenge(hz) !== true) continue
 			const victims = chosen
@@ -497,12 +914,12 @@ export function selectChannels(args: {
 						e.incumbent.pinned !== true &&
 						e.incumbent.syncSeen !== true &&
 						rank.get(e.hz)! > rank.get(hz)! &&
-						args.activity!.get(e.hz)?.live !== true,
+						activity.get(e.hz)?.live !== true,
 				)
 				.sort((x, y) => rank.get(y.hz)! - rank.get(x.hz)!)
 			if (!victims.length) continue
 			const victim = victims.find(
-				e => args.nowMonoMs - e.incumbent!.dwellSinceMonoMs >= args.dwellMs,
+				e => now - e.incumbent!.dwellSinceMonoMs >= args.dwellMs,
 			)
 			if (!victim) {
 				for (const e of victims)
@@ -514,22 +931,183 @@ export function selectChannels(args: {
 					block(args.moveWindowFreesMonoMs)
 				break
 			}
-			const at = chosen.indexOf(victim)
-			chosen[at] = {
+			chosen[chosen.indexOf(victim)] = {
 				hz,
 				movedFrom: { key: victim.incumbent!.key, hz: victim.hz },
 			}
 			moves++
 		}
+		return finish()
 	}
-	chosen.sort((a, b) => rank.get(a.hz)! - rank.get(b.hz)!)
-	return {
-		chosen: chosen.map(e =>
-			e.movedFrom ? { hz: e.hz, movedFrom: e.movedFrom } : { hz: e.hz },
-		),
-		moves,
-		blockedUntilMonoMs: blocked,
+	const ctx: TakeContext = {
+		nowMonoMs: now,
+		count,
+		allHeld: false,
+		trialOpen: true,
+		burstTrialOpen: true,
+		yieldOpen: true,
+		analogTryOpen: args.analogRetryOpen === true,
+		quietVictimMs: args.quietVictimMs ?? ACTIVITY_MOVE_WINDOW_MS,
+		yieldSyncMs: args.syncCooldownMs ?? 2 * ACTIVITY_MOVE_WINDOW_MS,
+		triedRecentMs: args.triedRecentMs ?? 30 * ACTIVITY_MOVE_WINDOW_MS,
 	}
+	const lanes = (
+		open: boolean | Readonly<Record<DsdTrialLane, boolean>> | undefined,
+	): Record<DsdTrialLane, boolean> =>
+		typeof open === "object"
+			? { fresh: open.fresh, retry: open.retry }
+			: { fresh: open ?? true, retry: open ?? true }
+	const trialLanes = lanes(args.trialOpen)
+	const burstLanes = lanes(args.burstTrialOpen)
+	const laneOf = (c: TakeChallenger): DsdTrialLane =>
+		c.failures === 0 && c.triedMonoMs === null ? "fresh" : "retry"
+	const otherLeft = Math.max(
+		0,
+		args.movesLeft - Math.max(0, args.reclaimReserve ?? 0),
+	)
+	const challenger = (hz: number): TakeChallenger => {
+		const t = tier(hz)
+		const a = activity.get(hz)
+		return {
+			cls: t.cls,
+			live: a?.live === true,
+			confirmed: !args.canChallenge || args.canChallenge(hz) === true,
+			state: a?.state ?? "cold",
+			reclaimOk: t.reclaimOk,
+			burstPaired: t.burstPaired,
+			demoted: t.demoted || args.demotedHz?.has(hz) === true,
+			retry: t.retry,
+			failures: t.failures,
+			triedMonoMs: t.triedMonoMs,
+			rank: rank.get(hz)!,
+		}
+	}
+	const victimOf = (e: Entry): TakeVictim => {
+		const t = tier(e.hz)
+		return {
+			cls: t.cls,
+			live: liveOf(e.hz),
+			lastSyncMonoMs: t.lastSyncMonoMs,
+			dwellPassed: now - e.incumbent!.dwellSinceMonoMs >= args.dwellMs,
+			// A sync flag the planner could not class held (no valid expiry)
+			// still protects the run from every move.
+			pinned:
+				e.incumbent!.pinned === true ||
+				(e.incumbent!.syncSeen === true && t.cls !== "H"),
+			noSyncRun: t.noSyncRun,
+			rank: rank.get(e.hz)!,
+		}
+	}
+	const tried = (hz: number) => tier(hz).triedMonoMs ?? Number.NEGATIVE_INFINITY
+	const byRank = (x: number, y: number) => rank.get(x)! - rank.get(y)!
+	const phases: readonly MoveKind[] = [
+		"reclaim",
+		"tier",
+		"burst-trial",
+		"yield",
+		"analog-try",
+	]
+	const failures = (hz: number) => tier(hz).failures
+	for (const kind of phases) {
+		// Live reclaims go by rank; the analog try least recently tried first
+		// (never tried first). Token classes (D, S, U) in the trial, burst-trial
+		// and yield gates go by fewest failures, then least recently tried, so
+		// channels that keep failing (escalated) never take a lane opening from
+		// one that failed less. H and R challengers of the tier gate keep rank
+		// order and go before every token class.
+		const tokenCls = (hz: number) => {
+			const cls = tier(hz).cls
+			return cls === "D" || cls === "S" || cls === "U"
+		}
+		const order =
+			kind === "reclaim"
+				? args.order
+				: kind === "analog-try"
+					? [...args.order].sort((x, y) => tried(x) - tried(y) || byRank(x, y))
+					: [...args.order].sort((x, y) => {
+							const tx = tokenCls(x)
+							const ty = tokenCls(y)
+							if (!tx || !ty) return Number(tx) - Number(ty) || byRank(x, y)
+							return (
+								failures(x) - failures(y) || tried(x) - tried(y) || byRank(x, y)
+							)
+						})
+		for (const hz of order) {
+			if (has(hz)) continue
+			const a = activity.get(hz)
+			if (!a) continue
+			const c = challenger(hz)
+			const lane = laneOf(c)
+			ctx.trialOpen = trialLanes[lane]
+			ctx.burstTrialOpen = burstLanes[lane]
+			ctx.allHeld =
+				chosen.length === count &&
+				chosen.every(e => e.incumbent !== undefined && tier(e.hz).cls === "H")
+			const sitting = chosen.filter(e => e.incumbent !== undefined)
+			const victims = sitting
+				.filter(e => mayTake(c, victimOf(e), ctx) === kind)
+				.sort((x, y) => {
+					const vx = victimOf(x)
+					const vy = victimOf(y)
+					const asNoSync = kind !== "reclaim" || t1NoSync(c)
+					const cx = victimColumn(vx, ctx, asNoSync)
+					const cy = victimColumn(vy, ctx, asNoSync)
+					return (
+						victimRank(cx, vx.dwellPassed) - victimRank(cy, vy.dwellPassed) ||
+						(cx === "AN" && cy === "AN"
+							? x.incumbent!.dwellSinceMonoMs - y.incumbent!.dwellSinceMonoMs
+							: 0) ||
+						vy.rank - vx.rank
+					)
+				})
+			if (!victims.length) {
+				// Analog challengers never schedule a blocked deadline.
+				if (c.cls === "A") continue
+				for (const e of sitting) {
+					const v = victimOf(e)
+					if (
+						!v.dwellPassed &&
+						mayTake(c, { ...v, dwellPassed: true }, ctx) === kind
+					)
+						block(e.incumbent!.dwellSinceMonoMs + args.dwellMs)
+					// A live reclaim waiting for a held victim's quiet 60 s.
+					if (
+						kind === "reclaim" &&
+						v.cls === "H" &&
+						!v.live &&
+						v.lastSyncMonoMs !== null &&
+						now - v.lastSyncMonoMs < ctx.quietVictimMs &&
+						mayTake(c, { ...v, lastSyncMonoMs: null }, ctx) === kind
+					)
+						block(v.lastSyncMonoMs + ctx.quietVictimMs)
+				}
+				continue
+			}
+			const cap = kind === "reclaim" ? args.movesLeft : otherLeft
+			if (moves >= cap) {
+				if (args.moveWindowFreesMonoMs !== null)
+					block(args.moveWindowFreesMonoMs)
+				break
+			}
+			const victim = victims[0]!
+			const trial =
+				kind === "yield" ||
+				(kind === "tier" && (c.cls === "D" || c.cls === "S" || c.cls === "U"))
+			chosen[chosen.indexOf(victim)] = {
+				hz,
+				movedFrom: { key: victim.incumbent!.key, hz: victim.hz },
+				kind,
+				...(trial ? { trial: true as const } : {}),
+				...(trial || kind === "burst-trial" ? { lane } : {}),
+			}
+			moves++
+			if (trial) trialLanes[lane] = false
+			if (kind === "yield") ctx.yieldOpen = false
+			if (kind === "burst-trial") burstLanes[lane] = false
+			if (kind === "analog-try") ctx.analogTryOpen = false
+		}
+	}
+	return finish()
 }
 
 /** Configured activity policy (`decoderPolicy.efficiency.activity`), defaults per host. */
