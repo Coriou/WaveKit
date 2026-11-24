@@ -194,8 +194,13 @@ function artefactOf(item: RecordingInventoryItem): TransmissionArtefact {
 	}
 }
 
-function memberOf(m: TxView): TransmissionMember {
-	const audioId = m.aliases.rec[0]?.slice("rec:".length) ?? null
+function memberOf(
+	m: TxView,
+	shown: (key: string, digital: boolean) => boolean,
+): TransmissionMember {
+	const key = m.aliases.rec[0]?.slice("rec:".length) ?? null
+	const audioId =
+		key !== null && shown(key, m.kind === "voice-digital") ? key : null
 	return {
 		ref: m.id,
 		startedAt: new Date(m.startedAtMs).toISOString(),
@@ -214,33 +219,31 @@ export function buildTransmissionDto(
 	const change = records.find(r => r.kind === "recording-change")
 	const call = records.find(r => r.kind === "decoder-reception")
 	const callFields = callFieldsOf(call)
-	const item = src.items.find(i => i.kind === "scanner-analog") ?? src.items[0]
-	const facts = item?.facts ?? null
-	const kind = kindOf(view, item, records)
+	const firstItem =
+		src.items.find(i => i.kind === "scanner-analog") ?? src.items[0]
+	const kind = kindOf(view, firstItem, records)
 	const privacy = privacyOf(kind, view, callFields, src.linkedRecordingKeys)
+	const digital = kind === "voice-digital"
+	const linked = (key: string): boolean =>
+		privacy === "clear" && src.linkedRecordingKeys.includes(key)
+	const isLinked = (i: RecordingInventoryItem): boolean => linked(i.key ?? i.id)
 
-	// Audio: only what the recordings route serves, and for a digital call only the file the
-	// decoder linked (recordingLinkable). An unproven or encrypted call lists none.
+	// Rule six: a digital call's unlinked files are unlisted, so nothing of them shows (key,
+	// facts, times, frequency, verdict). A clear call reads only the file the decoder linked
+	// (recordingLinkable); an unproven or encrypted call reads none and falls back to what the
+	// registry and its call row know. Every field below reads `item`, never `src.items[0]`.
+	const item = digital ? src.items.find(isLinked) : firstItem
+	const facts = item?.facts ?? null
+
+	// Audio: only what the recordings route serves, under the same rule.
 	const served = src.audioServed ? src.items : []
-	const audio =
-		kind === "voice-digital"
-			? privacy === "clear"
-				? served.filter(i => src.linkedRecordingKeys.includes(i.key ?? i.id))
-				: []
-			: served
+	const audio = digital ? served.filter(isLinked) : served
 	const artefacts = audio.map(artefactOf)
-	// The raw item follows the same rule: a digital call shows only a file the decoder linked.
-	const rawRecording =
-		kind !== "voice-digital"
-			? (item ?? null)
-			: privacy === "clear"
-				? (src.items.find(i =>
-						src.linkedRecordingKeys.includes(i.key ?? i.id),
-					) ?? null)
-				: null
+	const rawRecording = item ?? null
 
 	const recordingKeys: string[] = []
-	for (const k of src.recordingKeys) pushUnique(recordingKeys, k)
+	for (const k of src.recordingKeys)
+		if (!digital || linked(k)) pushUnique(recordingKeys, k)
 	const eventIds: string[] = []
 	for (const e of src.eventIds) pushUnique(eventIds, e)
 
@@ -316,7 +319,11 @@ export function buildTransmissionDto(
 
 	const members = src.members
 		.slice(0, TRANSMISSION_GROUP_MEMBERS_MAX)
-		.map(memberOf)
+		.map(m =>
+			memberOf(m, (key, memberDigital) =>
+				digital || memberDigital ? linked(key) : true,
+			),
+		)
 
 	const speech = item?.speech ?? "unchecked"
 	const close =

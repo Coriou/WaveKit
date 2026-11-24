@@ -3,7 +3,8 @@
  * demodulator reports CTCSS and DCS at its close; the recorder's facts carry the CTCSS tone or
  * DCS code (with its polarity) of each kept file. A heard value wins over none or not measured; a
  * recorder `none` wins over not measured; two different heard values read the recorder's and are
- * marked ambiguous. DCS was looked for when the live demodulator reported, or a recorder fact is
+ * marked ambiguous (a DCS code differs by code or by polarity; a reading that stored no polarity
+ * matches either and takes the other's). DCS was looked for when the live demodulator reported, or a recorder fact is
  * a DCS code or `none` (both need its DCS decoder's analysis; a CTCSS fact may predate it).
  */
 import type { RecordingTone } from "@wavekit/api-types"
@@ -37,7 +38,18 @@ function heardOfLive(tone: TxLiveTone | null): Heard | null {
 function same(a: Heard, b: Heard): boolean {
 	if (a.ctcssHz !== null && b.ctcssHz !== null)
 		return Math.abs(a.ctcssHz - b.ctcssHz) <= SAME_TONE_HZ
-	return a.dcs !== null && a.dcs === b.dcs
+	return (
+		a.dcs !== null &&
+		a.dcs === b.dcs &&
+		(a.polarity === null || b.polarity === null || a.polarity === b.polarity)
+	)
+}
+
+/** `a` with the polarity `b` adds when both read the same code and `a` stored none. */
+function withPolarity(a: Heard, b: Heard): Heard {
+	return a.dcs !== null && a.polarity === null && b.dcs === a.dcs
+		? { ...a, polarity: b.polarity }
+		: a
 }
 
 export function deriveTone(
@@ -55,10 +67,13 @@ export function deriveTone(
 		if (heard === null) continue
 		if (recorder === null) recorder = heard
 		else if (!same(recorder, heard)) ambiguous = true
+		else recorder = withPolarity(recorder, heard)
 	}
 	const live = heardOfLive(liveTone)
-	if (recorder !== null && live !== null && !same(recorder, live))
-		ambiguous = true
+	if (recorder !== null && live !== null) {
+		if (!same(recorder, live)) ambiguous = true
+		else recorder = withPolarity(recorder, live)
+	}
 	const value = recorder ?? live
 	if (value !== null)
 		return {

@@ -431,6 +431,155 @@ describe("GET /api/transmissions/:ref", () => {
 			expect(enc.artefacts).toEqual([])
 			expect(enc.noAudioReason).toBe("encrypted")
 		})
+
+		// A file with distinctive values, so any of them in a body is a leak.
+		const LEAK = {
+			hz: 123_456_789,
+			measuredHz: 123_456_987,
+			operationId: "op-leak-7f3",
+			observationId: "o_01JLEAKOBSERVATION",
+			discoveryId: "d_01JLEAKDISCOVERY",
+			startedAt: "2025-03-04T05:06:07.000Z",
+			endedAt: "2025-03-04T05:06:19.000Z",
+		}
+		const leakyItem = (key: string) => {
+			const base = analogItem(key)
+			return {
+				...base,
+				kind: "dsd-fme-call" as const,
+				frequencyHz: LEAK.hz,
+				discoveryId: LEAK.discoveryId,
+				ownerDiscoveryId: LEAK.discoveryId,
+				observationId: LEAK.observationId,
+				startedAt: LEAK.startedAt,
+				part: 2,
+				parts: 3,
+				facts: {
+					...base.facts!,
+					operationId: LEAK.operationId,
+					discoveryId: LEAK.discoveryId,
+					observationId: LEAK.observationId,
+					frequencyHz: LEAK.measuredHz,
+					startedAt: LEAK.startedAt,
+					endedAt: LEAK.endedAt,
+				},
+			}
+		}
+		const expectNoLeak = (body: string, key: string) => {
+			expect(body).not.toContain(key)
+			expect(body).not.toContain(DSD_NAME)
+			for (const v of Object.values(LEAK)) expect(body).not.toContain(String(v))
+		}
+
+		it.each([false, true])(
+			"an unlinked digital call's file (encrypted: %s) leaks no key, facts, times or frequency by tx_, evt: or rec:",
+			async encrypted => {
+				h = await harness(at)
+				const claim = dvClaim(h, at - 4_200)
+				h.publish("dsd-a", callEnd(claim.txId, encrypted))
+				await h.rows(1)
+				const row = (await h.runtime.service.search({ query: {}, limit: 10 }))
+					.items[0]!
+				const key = `dsd~${DSD_NAME}`
+				h.registry.attach(claim.txId, `rec:${key}`)
+				h.items.set(key, leakyItem(key))
+				for (const ref of [claim.txId, `evt:${row.eventId}`, `rec:${key}`]) {
+					const res = await get(ref)
+					expect(res.statusCode).toBe(200)
+					const dto = res.json<TransmissionDto>()
+					expect(dto).toMatchObject({
+						id: claim.txId,
+						kind: "voice-digital",
+						privacy: encrypted ? "encrypted" : "unproven",
+						protocol: "ysf",
+						artefacts: [],
+						part: null,
+						verdict: { speech: "unchecked", keptBy: null },
+						raw: { recording: null, facts: null },
+						refs: {
+							recordingKeys: [],
+							operationId: null,
+							discoveryId: null,
+							ownerDiscoveryId: null,
+						},
+						channel: { measuredHz: null },
+					})
+					// Times fall back to the registry's own.
+					expect(dto.startedAt).toBe(new Date(at - 4_200).toISOString())
+					expect(
+						dto.group?.members.every(m => m.audioId === null && !m.hasAudio),
+					).toBe(true)
+					expectNoLeak(res.body, key)
+				}
+			},
+		)
+
+		it("a pre-id unproven call reached by evt: or rec: leaks nothing of its file", async () => {
+			h = await harness(at)
+			const { txId: _none, ...data } = callEnd(TX_A, false).data
+			h.publish("dsd-a", { ...callEnd(TX_A, false), data })
+			await h.rows(1)
+			const row = (await h.runtime.service.search({ query: {}, limit: 10 }))
+				.items[0]!
+			const key = `dsd~${DSD_NAME}`
+			h.items.set(key, leakyItem(key))
+			for (const ref of [`evt:${row.eventId}`, `rec:${key}`]) {
+				const res = await get(ref)
+				expect(res.statusCode).toBe(200)
+				expect(res.json<TransmissionDto>()).toMatchObject({
+					id: null,
+					privacy: "unproven",
+					startedAt: null,
+					raw: { recording: null, facts: null },
+					refs: { recordingKeys: [] },
+				})
+				expectNoLeak(res.body, key)
+			}
+		})
+
+		it("a clear call shows only its decoder-linked file, not another file it names", async () => {
+			h = await harness(at)
+			const claim = dvClaim(h, at - 4_200)
+			h.publish("dsd-a", callEnd(claim.txId, false))
+			await h.rows(1)
+			const key = `dsd~${DSD_NAME}`
+			const other = "dsd~20261016_120100_09876_YSF_1_GROUP_TGT_100_SRC_2002.wav"
+			h.registry.attach(claim.txId, `rec:${other}`)
+			h.items.set(other, leakyItem(other))
+			h.runtime.recordingLinks?.()?.link({
+				type: "link-call",
+				decoderId: "dsd-a",
+				callId: "call-1",
+				recording: { id: key, durationMs: 4_200 },
+			})
+			await expect
+				.poll(
+					async () =>
+						(
+							await h!.runtime.service.search({
+								query: { hasRecording: true },
+							})
+						).items.length,
+				)
+				.toBe(1)
+			h.items.set(key, {
+				...analogItem(key),
+				kind: "dsd-fme-call",
+				discoveryId: null,
+				facts: null,
+			})
+			const res = await get(claim.txId)
+			const dto = res.json<TransmissionDto>()
+			expect(dto).toMatchObject({
+				privacy: "clear",
+				artefacts: [{ id: key }],
+				refs: { recordingKeys: [key] },
+				raw: { recording: { key } },
+			})
+			expect(res.body).not.toContain(other)
+			expect(res.body).not.toContain(LEAK.operationId)
+			expect(res.body).not.toContain(String(LEAK.hz))
+		})
 	})
 
 	it.each([

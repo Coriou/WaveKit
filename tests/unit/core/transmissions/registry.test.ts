@@ -509,6 +509,43 @@ describe("deriveTone", () => {
 				.ambiguous,
 		).toBe(false)
 	})
+
+	it("a DCS code differs by polarity too; a recorder code with no polarity takes the live one", () => {
+		const live = (polarity: "normal" | "inverted") => ({
+			ctcssHz: null,
+			dcs: { code: "023", polarity },
+		})
+		expect(
+			deriveTone(live("inverted"), [
+				{ kind: "dcs", code: "023", polarity: "normal" },
+			]),
+		).toMatchObject({
+			dcs: "023",
+			dcsPolarity: "normal",
+			source: "recorder",
+			ambiguous: true,
+		})
+		expect(
+			deriveTone(live("normal"), [
+				{ kind: "dcs", code: "023", polarity: "normal" },
+			]).ambiguous,
+		).toBe(false)
+		expect(
+			deriveTone(live("inverted"), [{ kind: "dcs", code: "023" }]),
+		).toMatchObject({
+			dcs: "023",
+			dcsPolarity: "inverted",
+			source: "recorder",
+			ambiguous: false,
+		})
+		// A different code keeps the recorder's (unknown) polarity, ambiguous.
+		expect(
+			deriveTone(
+				{ ctcssHz: null, dcs: { code: "754", polarity: "inverted" } },
+				[{ kind: "dcs", code: "023" }],
+			),
+		).toMatchObject({ dcs: "023", dcsPolarity: null, ambiguous: true })
+	})
 })
 
 describe("TransmissionRefSchema", () => {
