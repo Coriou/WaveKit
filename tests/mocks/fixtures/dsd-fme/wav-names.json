@@ -1,0 +1,59 @@
+{
+	"label": "source-derived dsd-fme ed1d1d6 (dsd_file.c close_and_rename_wav_file, dsd_events.c watchdog_event_history); not recorded from disk; every id and callsign synthetic",
+	"names": [
+		{
+			"protocol": "dstar",
+			"label": "source-derived",
+			"name": "20260109_105327_04321_DSTAR__TGT_CQCQCQ___SRC_N0CALL__TEST.wav",
+			"call": {
+				"talkgroup": 0,
+				"source": 0,
+				"dstar": { "my": "N0CALL", "ur": "CQCQCQ" }
+			}
+		},
+		{
+			"protocol": "ysf",
+			"label": "source-derived",
+			"name": "20260109_105327_04321_YSF__TGT_ALL________SRC_N0CALL____.wav",
+			"call": { "talkgroup": 0, "source": 0, "ysf": { "callsign": "N0CALL" } }
+		},
+		{
+			"protocol": "p25p1",
+			"label": "source-derived",
+			"name": "20260109_105327_04321_P25_2A5_GROUP_TGT_56_SRC_1234.wav",
+			"call": { "talkgroup": 56, "source": 1234, "p25": { "nac": "2A5" } }
+		},
+		{
+			"protocol": "p25p2",
+			"label": "source-derived",
+			"name": "20260109_105327_04321_P25_BEE001232A5_1_1_GROUP_TGT_7070_SRC_40820.wav",
+			"call": { "talkgroup": 7070, "source": 40820, "p25": { "nac": "2A5" } }
+		},
+		{
+			"protocol": "nxdn48",
+			"label": "source-derived",
+			"name": "20260109_105327_04321_NXDN_RAN_5_GROUP_TGT_5678_SRC_1234.wav",
+			"call": { "talkgroup": 5678, "source": 1234, "nxdn": { "ran": 5 } }
+		},
+		{
+			"protocol": "nxdn96",
+			"label": "source-derived",
+			"name": "20260109_105327_04321_NXDN_12_3_RAN_5_PRIVATE_TGT_5678_SRC_1234.wav",
+			"call": { "talkgroup": 5678, "source": 1234, "nxdn": { "ran": 5 } }
+		},
+		{
+			"protocol": "dmr",
+			"label": "source-derived",
+			"name": "20260109_105327_04321_DMR_CC_1_GROUP_TGT_9001_SRC_91.wav",
+			"call": { "talkgroup": 9001, "source": 91, "dmr": { "cc": 1 } }
+		}
+	],
+	"unlinked": [
+		{
+			"protocol": "dpmr",
+			"label": "source-derived",
+			"name": "20260109_105327_04321_DPMR_CC_5_GROUP_TGT_0001234_SRC_0005678.wav",
+			"why": "a dPMR call carries no identity (its ids are not trusted), so no call can claim the file"
+		}
+	]
+}

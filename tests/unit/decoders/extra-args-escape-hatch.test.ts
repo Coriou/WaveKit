@@ -304,7 +304,7 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 			fs.writeFileSync(
 				path.join(
 					dir,
-					"20260109_105327_123_NXDN_CC_1_GROUP_TGT_100_SRC_200.wav",
+					"20260109_105327_12345_NXDN_RAN_1_GROUP_TGT_100_SRC_200.wav",
 				),
 				"",
 			)

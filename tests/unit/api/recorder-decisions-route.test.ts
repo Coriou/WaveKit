@@ -160,7 +160,13 @@ describe("GET /api/scanner/recorder/decisions", () => {
 		const body = (
 			await server.inject({ url: "/api/scanner/recorder/decisions" })
 		).json<RecorderDecisionsResponse>()
-		expect(body).toMatchObject({ items: [], held: 0, counts: {}, streak: null })
+		expect(body).toMatchObject({
+			items: [],
+			held: 0,
+			counts: {},
+			refusalAttempts: {},
+			streak: null,
+		})
 	})
 
 	it("shows the refusal streak with its fix", async () => {
@@ -170,11 +176,14 @@ describe("GET /api/scanner/recorder/decisions", () => {
 			recent: [],
 			recentRefusals: entries(3, "refused:cpu", 0, 10_000, "r"),
 			counts: { "refused:cpu": 3 },
+			refusalAttempts: { "refused:cpu": 40 },
 			logsSuppressed: 0,
 		})
 		const body = (
 			await server.inject({ url: "/api/scanner/recorder/decisions" })
 		).json<RecorderDecisionsResponse>()
+		expect(body.counts).toEqual({ "refused:cpu": 3 })
+		expect(body.refusalAttempts).toEqual({ "refused:cpu": 40 })
 		expect(body.streak).toMatchObject({
 			since: iso(T0),
 			durationMs: 200_000,

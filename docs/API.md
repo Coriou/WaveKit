@@ -4398,7 +4398,10 @@ voice, eviction, final decision, or the refusal or discard that ended one; newes
 snapshot refusals, observations refused before any recording started for them, kept apart so
 they never push a recording's decisions out of `recent`; same fields; absent from older cores,
 whose `recent` held both), `counts` (decisions per code since the core started, refusals
-included) and `logsSuppressed` (recording decision log lines left out by the 20-a-minute info
+included: a snapshot refusal counts once per observation and code, so an observation refused for
+slots on 10 snapshots counts 1 under `refused:slots`, and 1 more under `refused:cpu` if it is
+later refused for CPU), `refusalAttempts` (every refused snapshot per code, retries included;
+absent from older cores) and `logsSuppressed` (recording decision log lines left out by the 20-a-minute info
 log limit; snapshot refusals are logged at debug, outside it). The codes are listed in
 `SCANNER_RECORDER_DECISIONS` and explained in
 [SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings). Newer cores add the
@@ -4478,6 +4481,7 @@ has ended and all its files are written, and only when none of its snapshots was
 		}
 	],
 	"counts": { "refused:cpu": 1, "started": 1, "voiced": 1 },
+	"refusalAttempts": { "refused:cpu": 6 },
 	"logsSuppressed": 0
 }
 ```
@@ -5611,6 +5615,7 @@ or another parameter, answers 400 `VALIDATION_ERROR` naming the field.
 	],
 	"held": 96,
 	"counts": { "refused:tuning": 31, "finalized": 12 },
+	"refusalAttempts": { "refused:tuning": 240 },
 	"streak": {
 		"since": "2026-01-01T10:00:00.000Z",
 		"durationMs": 420000,
@@ -5631,7 +5636,8 @@ decisions), `outcome` (`kept` for `finalized`, `refused`, `discarded`, or `progr
 (`discoveryId` null for a shadow not yet placed), `frequencyHz` (the discovery's frequency now;
 null without a discovery or once it is gone) and, when the decision has them, `unclean` and
 `receipt` as on `GET /api/scanner`. `held` is how many decisions the rings hold now; `counts`
-counts every decision since the core started.
+counts every decision since the core started (a snapshot refusal once per observation and code)
+and `refusalAttempts` every refused snapshot, as on `GET /api/scanner`.
 
 `streak` is null unless refusals with a fixable code (listed under
 [`GET /api/status`](#get-apistatus) `recorder-refusal-streak`) follow the last kept file or
@@ -6776,13 +6782,13 @@ no response field carries a filesystem path. DTOs in
 `packages/api-types/src/storage.ts`. `HEAD` is supported; `Cache-Control:
 no-store`. Access is the same as the other read routes. A report is cached for
 30 s (`cachedUntil` = `generatedAt` + 30 s) and concurrent requests share one
-scan. A failure answers 500 `{ error, code: "STORAGE_REPORT_FAILED" }` and is not
+report. A failure answers 500 `{ error, code: "STORAGE_REPORT_FAILED" }` and is not
 cached.
 
 **Response** (200) `StorageReport`: `generatedAt`, `cachedUntil`, `filesystem`
 (`totalBytes`, `freeBytes`, `availableBytes` of the filesystem holding
 `stateDir`; `availableBytes` is what WaveKit's user may use; null when `statfs`
-failed or did not answer in time), `areas`, `kept` and `lowSpace`.
+failed or did not answer in time), `areas`, `kept`, `lowSpace` and `count`.
 
 Areas, in this order (`access` and `logs` are omitted when not configured; an
 area with no path, such as `digital-voice-wav` without a recording dsd-fme, reports
@@ -6848,14 +6854,42 @@ directory reached only through a symlink is not inside: the walk counts the
 link, not its target. The scanner-evidence `cap` is null when the scanner is not
 running.
 
-The scan is bounded per report: 50,000 entries, depth 16, 2,000 ms wall time
-(`statfs` included) and 8 filesystem calls in flight. When a bound is reached the
-current area is `partial` with `partialReason` `entry-limit`, `depth-limit` or
-`time-limit`, and every later area is not scanned: it reports `exists: false`, 0
-bytes, 0 files and the same reason. The first reason wins. A permission error is
+Sizes come from a background count of the areas, not from a walk inside the
+request. A report starts a count when the last one is older than 30 s (or the
+areas changed) and serves the last finished count at once; it waits for the
+count, at most 2,000 ms (`statfs` included), only when an area has no finished
+count yet or the last count is older than 120 s. A failed count keeps the
+previous one served; a failed first count answers 500. The core starts the
+first count at startup, so a report shortly after it usually serves finished
+sizes already. When the areas change while a count runs, the new count starts
+when that one finishes and its file-system calls drain, and meanwhile the areas
+the previous count holds (same id and paths) are served from it.
+
+`count` (since 2026-11-24; absent from older cores) says how old the sizes are:
+`countedAt` (when the served count finished, null while no area is served from
+a finished count), `ageMs` (`generatedAt` minus `countedAt`, null with it) and
+`refreshing` (a count is running). A report built while a count runs is shared
+only until it finishes, so requesting again after it finishes returns the new
+sizes. Before the first count of an area finishes, the report serves the
+count's progress: finished areas as counted, the rest `partial` with
+`time-limit` (0 bytes and `exists: false` for areas not reached yet); asking
+again once `refreshing` is false clears it. A served count older than 120 s
+(30 s before a refresh starts, at most 60 s of count, 30 s of report cache)
+whose refresh did not finish within the 2,000 ms marks the areas it serves
+`partial` with `partialReason` `stale` (since 2026-11-24): their sizes were
+exact when counted and may be higher or lower now, and `overBound` is null. A
+50,000-file state tree is counted completely.
+
+One count is bounded: 200,000 entries, depth 16, 60 s wall time and 2
+filesystem calls in flight (1 after a `statfs` that did not answer in time), so
+it never holds more than half of the core's filesystem thread pool; a report's
+`statfs` is one more call. When a bound is reached the current area is
+`partial` with `partialReason` `entry-limit`, `depth-limit` or `time-limit`,
+and every later area is not counted: it reports `exists: false`, 0 bytes, 0
+files and the same reason. The first reason wins. A permission error is
 `permission`, any other error except a missing path is `io-error`; a missing
-path is `exists: false` and not partial. A partial area's `bytes` and `files` are
-lower bounds.
+path is `exists: false` and not partial. A partial area's `bytes` and `files`
+are lower bounds, except with `stale`.
 
 `kept` reports the recording keep store in protected mode:
 `{ "state": "ready", "recordings", "bytes", "maxRecordings": 2000, "maxBytes": 536870912 }`

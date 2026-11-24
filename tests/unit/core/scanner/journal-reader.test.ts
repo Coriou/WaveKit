@@ -124,6 +124,33 @@ describe("prefixSeq", () => {
 })
 
 describe("readJournalFiles", () => {
+	it("skips a listed file that is gone before it is opened (a prune deleted it)", async () => {
+		const dir = await tmp()
+		await writeFile(join(dir, DAY2), line(3) + line(4))
+		const read = await readJournalFiles(options(dir, [DAY1, DAY2]))
+		expect(read.files.map(f => f.name)).toEqual([DAY2])
+		expect(read.entries.map(e => e.seq)).toEqual([3, 4])
+		expect(read.maxSeq).toBe(4)
+	})
+
+	it("counts the prefix seq of an invalid uncovered line in the file's maxSeq, not the read's", async () => {
+		const dir = await tmp()
+		await writeFile(join(dir, DAY1), line(1) + line(2))
+		// Uncovered (past fromSeq 2) and invalid: dropped from replay, but the file still holds it.
+		const corrupt = '{"seq":9,"at":"x",CORRUPT\n'
+		await writeFile(join(dir, DAY2), corrupt)
+		const read = await readJournalFiles(
+			options(dir, [DAY1, DAY2], { fromSeq: 2 }),
+		)
+		expect(read.files).toEqual([
+			{ name: DAY1, maxSeq: 2, bytes: Buffer.byteLength(line(1) + line(2)) },
+			{ name: DAY2, maxSeq: 9, bytes: Buffer.byteLength(corrupt) },
+		])
+		expect(read.maxSeq).toBe(2)
+		expect(read.dropped).toBe(1)
+		expect(read.entries).toEqual([])
+	})
+
 	it("skips covered lines without parsing them: a valid prefix with a corrupt body is neither parsed nor dropped", async () => {
 		const dir = await tmp()
 		const corrupt = '{"seq":2,"at":"x","op":"delete","payload":{CORRUPT\n'

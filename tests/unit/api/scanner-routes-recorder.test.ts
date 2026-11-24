@@ -60,6 +60,7 @@ const status: ScannerRecorderStatus = {
 	parked: 0,
 	recent: [decisions.last],
 	counts: decisions.counts,
+	refusalAttempts: { "refused:cpu": 9 },
 	logsSuppressed: 0,
 }
 

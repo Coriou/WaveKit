@@ -8,19 +8,26 @@ import type {
 	StorageActivityRetention,
 	StorageArea,
 	StorageAreaPart,
+	StorageCountState,
 	StorageFilesystem,
 	StorageKeptSummary,
 	StorageLowSpaceState,
 	StorageReport,
 } from "@wavekit/api-types"
 import { WaveKitError } from "../../utils/errors.js"
+import {
+	STORAGE_COUNT_FS_CONCURRENCY,
+	STORAGE_COUNT_MAX_ENTRIES,
+	STORAGE_COUNT_MAX_SERVE_AGE_MS,
+	STORAGE_COUNT_MAX_WALL_MS,
+} from "./contract.js"
 import type {
 	StorageAreaSource,
 	StorageReportOptions,
 	StorageReportProvider,
 } from "./contract.js"
 import { scanStorageAreas } from "./scan.js"
-import { DEFAULT_STORAGE_SCAN_LIMITS } from "./scan.js"
+import { DEFAULT_STORAGE_SCAN_LIMITS, nodeStorageScanFs } from "./scan.js"
 import type {
 	StorageAreaScan,
 	StorageScanFs,
@@ -38,8 +45,15 @@ export interface StorageReporterInternals {
 		bsize: Num
 	}>
 	fs?: StorageScanFs
-	limits?: Partial<StorageScanLimits>
+	/** Request budget (maxWallMs) and the count's maxDepth. */
+	limits?: Partial<Pick<StorageScanLimits, "maxWallMs" | "maxDepth">>
+	/** The background count's own bounds (defaults STORAGE_COUNT_MAX_*, STORAGE_COUNT_FS_CONCURRENCY). */
+	countLimits?: Partial<
+		Pick<StorageScanLimits, "maxEntries" | "maxWallMs" | "concurrency">
+	>
 	cacheMs?: number
+	/** Oldest count served as exact (default STORAGE_COUNT_MAX_SERVE_AGE_MS). */
+	maxServeAgeMs?: number
 }
 
 export function createStorageReporter(
@@ -87,8 +101,16 @@ export function createStorageReporter(
 	const scan = internal.scan ?? scanStorageAreas
 	const statfs = internal.statfs ?? nodeStatfs
 	const cacheMs = internal.cacheMs ?? STORAGE_REPORT_CACHE_MS
+	const maxServeAgeMs = internal.maxServeAgeMs ?? STORAGE_COUNT_MAX_SERVE_AGE_MS
+	const countConcurrency =
+		internal.countLimits?.concurrency ?? STORAGE_COUNT_FS_CONCURRENCY
 
-	let cached: { report: StorageReport; until: number } | null = null
+	let cached: {
+		report: StorageReport
+		until: number
+		/** Built while a count ran: dropped when it finishes, so its sizes show at once. */
+		provisional: boolean
+	} | null = null
 	let inflight: Promise<StorageReport> | null = null
 
 	function readRetention(): StorageActivityRetention | null {
@@ -122,7 +144,165 @@ export function createStorageReporter(
 		}
 	}
 
-	async function build(): Promise<StorageReport> {
+	/** One area's count identity: two areas with one key count the same files. */
+	function oneKey(a: StorageAreaSource): string {
+		return JSON.stringify([
+			a.id,
+			a.paths,
+			a.exclude ?? [],
+			a.parts?.parts.map(p => p.names) ?? null,
+		])
+	}
+
+	/** What a count walks: two area lists with one key count the same files. */
+	function areaKey(areas: readonly StorageAreaSource[]): string {
+		return JSON.stringify(areas.map(oneKey))
+	}
+
+	/**
+	 * The last finished count (of the area set `key`), served until the next one finishes. An
+	 * area whose own key is in `byKey` is served from it even when the set changed since.
+	 */
+	let tally: {
+		key: string
+		byKey: Map<string, StorageAreaScan>
+		countedAt: number
+	} | null = null
+	/** The background count running, at most one. */
+	let counting: {
+		key: string
+		done: Promise<StorageAreaScan[]>
+		peek: (() => StorageAreaScan[]) | null
+	} | null = null
+	/** A count of other areas asked for while one ran: started when it finishes (no overlap). */
+	let queued: {
+		areas: readonly StorageAreaSource[]
+		key: string
+		concurrency: number
+	} | null = null
+	/** Counts settled so far: a report built during a count is not cached past it. */
+	let settledCounts = 0
+	/**
+	 * fs calls of the counts still in flight. A count that hit its wall time settles with its
+	 * calls still pending (a stalled filesystem); no count starts until they drain, so the
+	 * counts never hold more than STORAGE_COUNT_FS_CONCURRENCY pool threads together.
+	 */
+	let fsInFlight = 0
+	/** Whether a count queued behind pending fs calls was logged (once per reporter). */
+	let drainWarned = false
+	const baseFs = internal.fs ?? nodeStorageScanFs
+	const track = <T>(call: Promise<T>): Promise<T> => {
+		fsInFlight++
+		const done = (): void => {
+			fsInFlight--
+			if (fsInFlight === 0) startQueued()
+		}
+		call.then(done, done)
+		return call
+	}
+	const baseRealpath = baseFs.realpath
+	const countFs: StorageScanFs = {
+		lstat: p => track(baseFs.lstat(p)),
+		readdir: p => track(baseFs.readdir(p)),
+		...(baseRealpath === undefined
+			? {}
+			: { realpath: (p: string) => track(baseRealpath.call(baseFs, p)) }),
+	}
+
+	/** Starts a count now, or queues it while one runs or an earlier one's fs calls drain. */
+	function requestCount(
+		areas: readonly StorageAreaSource[],
+		key: string,
+		concurrency: number,
+	): void {
+		if (counting === null && fsInFlight === 0)
+			startCount(areas, key, concurrency)
+		else {
+			if (counting === null && !drainWarned) {
+				drainWarned = true
+				options.logger?.warn(
+					"Storage count waits for an earlier count's file-system calls (stalled filesystem?)",
+				)
+			}
+			queued = { areas, key, concurrency }
+		}
+	}
+
+	/** The queued count, once no count runs and no count's fs call is in flight. */
+	function startQueued(): void {
+		if (counting !== null || fsInFlight !== 0 || queued === null) return
+		const next = queued
+		queued = null
+		startCount(next.areas, next.key, next.concurrency)
+	}
+
+	/**
+	 * Starts the background count: off the request path, with its own bounds (entries, wall
+	 * time and fs calls sized for a live state tree), never more than one at a time.
+	 */
+	function startCount(
+		areas: readonly StorageAreaSource[],
+		key: string,
+		concurrency: number,
+	): void {
+		const scanOptions: Parameters<typeof scanStorageAreas>[1] = {
+			limits: {
+				maxEntries:
+					internal.countLimits?.maxEntries ?? STORAGE_COUNT_MAX_ENTRIES,
+				maxDepth:
+					internal.limits?.maxDepth ?? DEFAULT_STORAGE_SCAN_LIMITS.maxDepth,
+				maxWallMs: internal.countLimits?.maxWallMs ?? STORAGE_COUNT_MAX_WALL_MS,
+				concurrency,
+			},
+			progress: peek => {
+				entry.peek = peek
+			},
+			fs: countFs,
+		}
+		const entry: NonNullable<typeof counting> = {
+			key,
+			peek: null,
+			done: Promise.resolve([]),
+		}
+		counting = entry
+		const settle = (): void => {
+			settledCounts++
+			if (counting === entry) counting = null
+			// A report built during the count is dropped, so the next one shows the result.
+			if (cached?.provisional === true) cached = null
+			const next = queued
+			queued = null
+			// The areas changed while this count ran: count them now (or once its calls drain).
+			if (next !== null && next.key !== key && counting === null)
+				requestCount(next.areas, next.key, next.concurrency)
+		}
+		entry.done = scan(areas, scanOptions).then(
+			scans => {
+				const byId = new Map(scans.map(s => [s.id, s]))
+				const byKey = new Map<string, StorageAreaScan>()
+				for (const a of areas) {
+					const s = byId.get(a.id)
+					if (s !== undefined) byKey.set(oneKey(a), s)
+				}
+				tally = { key, byKey, countedAt: now() }
+				settle()
+				return scans
+			},
+			(err: unknown) => {
+				// A failed refresh keeps serving the previous count; the next report retries.
+				settle()
+				throw err
+			},
+		)
+		// A request that stopped waiting must not leave the rejection unhandled.
+		entry.done.catch(() => undefined)
+	}
+
+	async function build(): Promise<{
+		report: StorageReport
+		provisional: boolean
+		finished: number
+	}> {
 		const started = now()
 		const areas = currentAreas()
 		const min = currentMinFree()
@@ -130,9 +310,10 @@ export function createStorageReporter(
 			...DEFAULT_STORAGE_SCAN_LIMITS,
 			...internal.limits,
 		}
-		// One wall budget for statfs + scan, measured in real time from report start.
+		const key = areaKey(areas)
+		// One wall budget for statfs + the wait on the count, in real time from report start.
 		const wallStart = Date.now()
-		// statfs runs before the scan so peak fs concurrency stays within the limit; it gets
+		// statfs is one fs call outside the count's limit (STORAGE_COUNT_FS_CONCURRENCY); it gets
 		// a bounded wait so a stalled statfs cannot hang the report.
 		let timer: ReturnType<typeof setTimeout> | undefined
 		const timedOut = Symbol("timeout")
@@ -144,36 +325,93 @@ export function createStorageReporter(
 		])
 		clearTimeout(timer)
 		const filesystem = fsResult === timedOut ? null : fsResult
-		const scanOptions: Parameters<typeof scanStorageAreas>[1] = {
-			limits: {
-				...limits,
-				// A statfs timeout spent the whole budget; recomputing the remainder from the
-				// clock could leave a millisecond of timer/clock rounding and start a scan.
-				maxWallMs:
-					fsResult === timedOut
-						? 0
-						: Math.max(0, limits.maxWallMs - (Date.now() - wallStart)),
-				// A stalled statfs still holds one fs slot.
-				concurrency:
-					fsResult === timedOut
-						? Math.max(1, limits.concurrency - 1)
-						: limits.concurrency,
-			},
+		const fresh =
+			tally !== null && tally.key === key && now() - tally.countedAt < cacheMs
+		if (fresh || counting?.key === key) queued = null
+		else {
+			// A stalled statfs still holds one pool thread: the count takes one call less.
+			const concurrency =
+				fsResult === timedOut
+					? Math.max(1, countConcurrency - 1)
+					: countConcurrency
+			requestCount(areas, key, concurrency)
 		}
-		if (internal.fs) scanOptions.fs = internal.fs
-		const scans = await scan(areas, scanOptions)
-		const byId = new Map(scans.map(s => [s.id, s]))
+		// A statfs timeout spent the whole budget; recomputing the remainder from the clock
+		// could leave a millisecond of timer/clock rounding.
+		const remaining =
+			fsResult === timedOut
+				? 0
+				: Math.max(0, limits.maxWallMs - (Date.now() - wallStart))
+		// A finished count that holds every area and is within the serve age is served at once
+		// (the refresh shows in the next report). Otherwise the report waits for the count of
+		// these areas within the budget: the first one, or the refresh of a too old one.
+		const running = counting
+		const before = tally
+		const complete =
+			before !== null && areas.every(a => before.byKey.has(oneKey(a)))
+		const tooOld =
+			before !== null && Math.max(0, started - before.countedAt) > maxServeAgeMs
+		if (
+			running !== null &&
+			running.key === key &&
+			(!complete || tooOld) &&
+			remaining > 0
+		) {
+			const waited = Symbol("waited")
+			let wait: ReturnType<typeof setTimeout> | undefined
+			try {
+				await Promise.race([
+					// A failed first count fails the report (uncached); a failed refresh serves the
+					// previous count.
+					complete ? running.done.catch(() => undefined) : running.done,
+					new Promise<typeof waited>(resolve => {
+						wait = setTimeout(() => resolve(waited), remaining)
+					}),
+				])
+			} finally {
+				clearTimeout(wait)
+			}
+		}
+		const finished = settledCounts
+		// A queued count waiting for in-flight fs calls to drain is a refresh too.
+		const refreshing = counting !== null || queued !== null
+		const served = tally
+		const ageMs =
+			served === null ? null : Math.max(0, started - served.countedAt)
+		const stale = ageMs !== null && ageMs > maxServeAgeMs
+		// Before the first count of an area finishes: the running count's progress, as lower bounds.
+		const progress = new Map(
+			(counting?.key === key ? (counting.peek?.() ?? []) : []).map(s => [
+				s.id,
+				s,
+			]),
+		)
+		let fromCount = false
 		const out: StorageArea[] = areas.map(source => {
-			const s = byId.get(source.id)
+			let s: StorageAreaScan | undefined = served?.byKey.get(oneKey(source))
+			if (s !== undefined) {
+				fromCount = true
+				// Too old and not refreshed in time: once exact, not any more (first reason wins).
+				if (stale && s.partialReason === null)
+					s = { ...s, partialReason: "stale" }
+			} else {
+				s = progress.get(source.id) ?? {
+					id: source.id,
+					bytes: 0,
+					files: 0,
+					exists: false,
+					partialReason: "time-limit",
+				}
+			}
 			const parts = partsOf(source, s)
 			const area: StorageArea = {
 				id: source.id,
 				class: STORAGE_AREA_CLASS[source.id],
-				bytes: s?.bytes ?? 0,
-				files: s?.files ?? 0,
-				exists: s?.exists ?? false,
-				partial: (s?.partialReason ?? null) !== null,
-				partialReason: s?.partialReason ?? null,
+				bytes: s.bytes,
+				files: s.files,
+				exists: s.exists,
+				partial: s.partialReason !== null,
+				partialReason: s.partialReason,
 				cap: source.capBytes === null ? null : { bytes: source.capBytes },
 				retention: source.id === "activity" ? readRetention() : null,
 			}
@@ -184,17 +422,30 @@ export function createStorageReporter(
 		if (min !== null && filesystem !== null) {
 			state = filesystem.availableBytes < min ? "low" : "ok"
 		}
+		const count: StorageCountState =
+			fromCount && served !== null
+				? {
+						countedAt: new Date(served.countedAt).toISOString(),
+						ageMs,
+						refreshing,
+					}
+				: { countedAt: null, ageMs: null, refreshing }
 		return {
-			generatedAt: new Date(started).toISOString(),
-			cachedUntil: new Date(started + cacheMs).toISOString(),
-			filesystem,
-			areas: out,
-			kept: readKept(),
-			lowSpace: {
-				policy: "scanner-evidence-stops-writing",
-				minFreeBytes: min,
-				state,
+			report: {
+				generatedAt: new Date(started).toISOString(),
+				cachedUntil: new Date(started + cacheMs).toISOString(),
+				filesystem,
+				areas: out,
+				kept: readKept(),
+				lowSpace: {
+					policy: "scanner-evidence-stops-writing",
+					minFreeBytes: min,
+					state,
+				},
+				count,
 			},
+			provisional: refreshing,
+			finished,
 		}
 	}
 
@@ -235,13 +486,29 @@ export function createStorageReporter(
 	}
 
 	return {
+		warm() {
+			// Off the request path: the first report then serves a finished count.
+			try {
+				if (counting !== null || inflight !== null) return
+				const areas = currentAreas()
+				const key = areaKey(areas)
+				if (tally?.key === key && now() - tally.countedAt < cacheMs) return
+				requestCount(areas, key, countConcurrency)
+			} catch {
+				// Invalid areas: the next report fails with the reason.
+			}
+		},
 		report() {
 			if (cached && now() < cached.until) return Promise.resolve(cached.report)
 			if (inflight) return inflight
 			const started = now()
 			const p = build().then(
-				report => {
-					cached = { report, until: started + cacheMs }
+				({ report, provisional, finished }) => {
+					// A count that finished after this report was built makes it stale already.
+					cached =
+						provisional && finished !== settledCounts
+							? null
+							: { report, until: started + cacheMs, provisional }
 					inflight = null
 					return report
 				},

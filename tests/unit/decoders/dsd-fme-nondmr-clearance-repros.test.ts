@@ -134,7 +134,8 @@ function provoiceCall(t0: number): Item[] {
 }
 
 // --- D-STAR, YSF ---
-const DSTAR = "03:04:05 Sync: +DSTAR VOICE "
+const DSTAR =
+	"03:04:05 Sync: +DSTAR VOICE   RPT 2: DIRECT   RPT 1: DIRECT   DST: CQCQCQ   SRC: N0CALL  TEST"
 const YSF = (frame: string) =>
 	`03:04:05 Sync: +YSF  V/D2 Group/CQ -Simplex ${frame}`
 
@@ -171,6 +172,8 @@ interface Trace {
 	violations: string[]
 	/** Call ends that linked a recording, as `tg/src`. */
 	linked: string[]
+	/** The file names those ends linked, in order. */
+	files: string[]
 	ends: number
 	/** Every call_start and call_end (not a recording follow-up), in order. */
 	calls: string[]
@@ -179,7 +182,12 @@ interface Trace {
 const pad = (n: number, w = 2) => String(n).padStart(w, "0")
 
 /** dsd-fme's per-call name for one call key, stamped `atMs` after T0 (local time). */
-function wavName(system: string, tg: number, src: number, atMs = 0): string {
+function wavName(
+	system: string,
+	tg: number | string,
+	src: number | string,
+	atMs = 0,
+): string {
 	const d = new Date(T0 + atMs)
 	const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
 	return `${stamp}_12345_${system}_GROUP_TGT_${tg}_SRC_${src}.wav`
@@ -190,7 +198,9 @@ let root = ""
 async function replay(
 	mode: string,
 	items: Item[],
-	files: Array<[system: string, tg: number, src: number, atMs?: number]>,
+	files: Array<
+		[system: string, tg: number | string, src: number | string, atMs?: number]
+	>,
 ): Promise<Trace> {
 	for (const [system, tg, src, atMs] of files)
 		fs.writeFileSync(path.join(root, wavName(system, tg, src, atMs)), "")
@@ -211,6 +221,7 @@ async function replay(
 	const pubs: Pub[] = []
 	const violations: string[] = []
 	const linked: string[] = []
+	const linkedFiles: string[] = []
 	let ends = 0
 	const calls: string[] = []
 	const judge = (pub: Omit<Pub, "verdict">) => {
@@ -231,7 +242,10 @@ async function replay(
 		if (o.type === "call_end" && !d.flags?.wavFileUpdate) ends++
 		if (o.type === "call_start" || !d.flags?.wavFileUpdate)
 			calls.push(`${o.type} ${d.protocol} ${d.talkgroup}/${d.source}`)
-		if (isLinked) linked.push(`${d.talkgroup}/${d.source}`)
+		if (isLinked) {
+			linked.push(`${d.talkgroup}/${d.source}`)
+			linkedFiles.push(path.basename(d.wavFile ?? ""))
+		}
 		judge({
 			kind: o.type,
 			callId: d.callId,
@@ -283,7 +297,7 @@ async function replay(
 		await tail
 		if (internals.wavSearch === tail) break
 	}
-	return { pubs, violations, linked, ends, calls }
+	return { pubs, violations, linked, files: linkedFiles, ends, calls }
 }
 
 /** Every publication is authorized and no recording is linked. */
@@ -304,17 +318,17 @@ function expectLinked(trace: Trace, keys: string[]): void {
 }
 
 const P1_FILE = (tg = 56, src = 1234): [string, number, number] => [
-	"P25P_CC_2A5",
+	"P25_2A5",
 	tg,
 	src,
 ]
-const P2_FILE: [string, number, number] = ["P25P_CC_0", 7070, 40820]
+const P2_FILE: [string, number, number] = ["P25_BEE001232A5_1_1", 7070, 40820]
 const NX_FILE = (
 	tg = 5678,
 	src = 1234,
 	atMs = 0,
-): [string, number, number, number] => ["NXDN_CC_5", tg, src, atMs]
-const DP_FILE: [string, number, number] = ["DPMR_CC_5", 0, 0]
+): [string, number, number, number] => ["NXDN_RAN_5", tg, src, atMs]
+const DP_FILE: [string, string, string] = ["DPMR_CC_5", "0001234", "0005678"]
 const PV_FILE: [string, number, number] = ["PROVOICE_CC_0", 0, 0]
 
 describe("dsd-fme non-DMR recording clearance repro corpus", () => {
@@ -327,6 +341,82 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 		vi.useRealTimers()
 		vi.restoreAllMocks()
 		fs.rmSync(root, { recursive: true, force: true })
+	})
+
+	describe("same-station previous over (one identity, one slot)", () => {
+		// A 2 s over (TDU at 2 000 ms), then 1 s later an over of the same talkgroup and source:
+		// the earlier over's file (stamped at 0) lies in the later over's window (start - 5 s).
+		const EARLY = (alg: string) =>
+			p25Over(0, { alg: () => alg, superframes: 5 })
+		const LATE = p25Over(3000, { alg: () => LDU2_CLEAR, superframes: 5 })
+		const EARLY_FILE = wavName("P25_2A5", 56, 1234, 0)
+		const LATE_FILE = wavName("P25_2A5", 56, 1234, 3000)
+
+		it("own file missing, the earlier same-identity file in the window: no link", async () => {
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_CLEAR), ...LATE],
+				[[...P1_FILE(), 0]],
+			)
+			expect(trace.ends).toBe(2)
+			expectLinked(trace, ["56/1234"])
+			expect(trace.files).toEqual([EARLY_FILE])
+		})
+
+		it("with both files, each over links its own", async () => {
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_CLEAR), ...LATE],
+				[
+					[...P1_FILE(), 0],
+					[...P1_FILE(), 3000],
+				],
+			)
+			expectLinked(trace, ["56/1234", "56/1234"])
+			expect(trace.files).toEqual([EARLY_FILE, LATE_FILE])
+		})
+
+		it("an encrypted earlier over's file is never taken by the later clear over", async () => {
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_ENC), ...LATE],
+				[[...P1_FILE(), 0]],
+			)
+			expect(trace.ends).toBe(2)
+			expectNeverLinked(trace)
+		})
+
+		it("an encrypted earlier over: the later clear over links its own file, not the earlier one", async () => {
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_ENC), ...LATE],
+				[
+					[...P1_FILE(), 0],
+					[...P1_FILE(), 3000],
+				],
+			)
+			expectLinked(trace, ["56/1234"])
+			expect(trace.files).toEqual([LATE_FILE])
+		})
+
+		it("a lagged previous end past the re-key's stamp second: the re-key still links its own file", async () => {
+			// The earlier over ends at 4 160 ms as the adapter saw it (a lagging stdout), while
+			// dsd-fme stamped the re-key's file at 3 000: before the end's second, after the
+			// earlier start's second.
+			const LONG = p25Over(0, { alg: () => LDU2_CLEAR, superframes: 11 })
+			const REKEY = p25Over(4300, { alg: () => LDU2_CLEAR, superframes: 5 })
+			const trace = await replay(
+				"p25",
+				[...LONG, ...REKEY],
+				[
+					[...P1_FILE(), 0],
+					[...P1_FILE(), 3000],
+				],
+			)
+			expect(trace.ends).toBe(2)
+			expectLinked(trace, ["56/1234", "56/1234"])
+			expect(trace.files).toEqual([EARLY_FILE, LATE_FILE])
+		})
 	})
 
 	describe("P25 phase 1", () => {
@@ -613,15 +703,18 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 	describe("D-STAR and YSF (no privacy field)", () => {
 		it("(e) a D-STAR call is linked", async () => {
 			expectLinked(
-				await replay("dstar", dstarCall(0), [["DSTAR_CC_0", 0, 0]]),
+				await replay("dstar", dstarCall(0), [
+					["DSTAR", "CQCQCQ__", "N0CALL__TEST"],
+				]),
 				["0/0"],
 			)
 		})
 
 		it("(e) a YSF call is linked", async () => {
-			expectLinked(await replay("ysf", ysfCall(0), [["YSF_CC_0", 0, 0]]), [
-				"0/0",
-			])
+			expectLinked(
+				await replay("ysf", ysfCall(0), [["YSF", "ALL_______", "N0CALL____"]]),
+				["0/0"],
+			)
 		})
 	})
 

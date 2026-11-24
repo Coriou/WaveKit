@@ -246,8 +246,13 @@ export interface RecorderDecisionsResponse {
 	items: RecorderDecisionRow[]
 	/** Entries the recorder holds now (both rings), at most `maxLimit`. */
 	held: number
-	/** Decisions since the core started, per code. */
+	/**
+	 * Decisions since the core started, per code; a snapshot refusal once per observation and code
+	 * (`ScannerRecorderStatus.counts`).
+	 */
 	counts: Partial<Record<ScannerRecorderDecision, number>>
+	/** Every refused snapshot since the core started, per code (`ScannerRecorderStatus.refusalAttempts`). */
+	refusalAttempts?: Partial<Record<ScannerRecorderDecision, number>> | undefined
 	/** Null while no blocking refusal follows the last kept file. */
 	streak: RecorderRefusalStreak | null
 }

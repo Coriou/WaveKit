@@ -3,6 +3,11 @@ import { WaveKitError } from "../../../../src/utils/errors.js"
 import { createStorageReporter } from "../../../../src/core/storage-report/reporter.js"
 import type { StorageAreaSource } from "../../../../src/core/storage-report/contract.js"
 import type { StorageActivityRetention } from "@wavekit/api-types"
+import {
+	STORAGE_COUNT_FS_CONCURRENCY,
+	STORAGE_COUNT_MAX_ENTRIES,
+	STORAGE_COUNT_MAX_WALL_MS,
+} from "../../../../src/core/storage-report/contract.js"
 
 type ScanFn = NonNullable<Parameters<typeof createStorageReporter>[1]>["scan"]
 type StatfsFn = NonNullable<
@@ -201,7 +206,7 @@ describe("storage reporter", () => {
 		expect(scan).toHaveBeenCalledTimes(2)
 	})
 
-	it("runs statfs before the scan so fs concurrency stays <= 8", async () => {
+	it("counts with 2 fs calls in flight (STORAGE_COUNT_FS_CONCURRENCY), statfs before the first count", async () => {
 		let inFlight = 0
 		let peak = 0
 		const track = async <T>(v: T): Promise<T> => {
@@ -233,23 +238,14 @@ describe("storage reporter", () => {
 		const report = await r.report()
 		expect(report.areas[0]?.files).toBe(40)
 		expect(report.filesystem).not.toBeNull()
-		expect(peak).toBe(8)
+		expect(peak).toBe(STORAGE_COUNT_FS_CONCURRENCY)
+		expect(STORAGE_COUNT_FS_CONCURRENCY).toBe(2)
 	})
 
-	it("bounds a stalled statfs within the report deadline", async () => {
-		let lstats = 0
-		const fs = {
-			lstat: () => {
-				lstats++
-				return Promise.resolve({
-					size: 1,
-					isFile: () => true,
-					isDirectory: () => false,
-					isSymbolicLink: () => false,
-				})
-			},
-			readdir: () => Promise.resolve([]),
-		}
+	it("bounds a stalled statfs within the report deadline and does not wait on the count", async () => {
+		const scan = vi.fn<NonNullable<ScanFn>>(
+			() => new Promise<never>(() => undefined),
+		)
 		const r = createStorageReporter(
 			{
 				areas: [{ id: "logs", paths: ["/d"], capBytes: null }],
@@ -257,21 +253,24 @@ describe("storage reporter", () => {
 				minFreeBytes: 1,
 			},
 			{
-				fs,
+				scan,
 				limits: { maxWallMs: 20 },
 				statfs: () => new Promise<never>(() => undefined),
 			},
 		)
-		const started = Date.now()
 		const report = await r.report()
-		expect(Date.now() - started).toBeLessThan(1_000)
 		expect(report.filesystem).toBeNull()
 		expect(report.lowSpace.state).toBe("unknown")
 		expect(report.areas[0]?.partialReason).toBe("time-limit")
-		expect(lstats).toBe(0)
+		expect(report.count).toEqual({
+			countedAt: null,
+			ageMs: null,
+			refreshing: true,
+		})
+		expect(scan).toHaveBeenCalledTimes(1)
 	})
 
-	it("passes the remaining budget and concurrency - 1 after a statfs timeout", async () => {
+	it("counts with one fs call less and the count's own bounds after a statfs timeout", async () => {
 		const scanSpy = vi.fn(okScan)
 		const r = createStorageReporter(
 			{ areas: [src("logs")], stateDir: "/d", minFreeBytes: null },
@@ -283,8 +282,9 @@ describe("storage reporter", () => {
 		)
 		await r.report()
 		const limits = scanSpy.mock.calls[0]?.[1]?.limits
-		expect(limits?.concurrency).toBe(7)
-		expect(limits?.maxWallMs).toBeLessThanOrEqual(1)
+		expect(limits?.concurrency).toBe(STORAGE_COUNT_FS_CONCURRENCY - 1)
+		expect(limits?.maxEntries).toBe(STORAGE_COUNT_MAX_ENTRIES)
+		expect(limits?.maxWallMs).toBe(STORAGE_COUNT_MAX_WALL_MS)
 	})
 
 	it("reads area and minFreeBytes providers at each scan, not on cache hits", async () => {

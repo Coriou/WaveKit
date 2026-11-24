@@ -53,15 +53,26 @@ export const STORAGE_AREA_CLASS: Readonly<
 	logs: "other",
 }
 
-/** Why an area's totals are lower bounds. */
+/**
+ * Why an area's totals are not exact. Every reason but `stale` makes them lower bounds; `stale`
+ * (since 2026-11-24) means they come from a finished count older than the core's maximum serve
+ * age (120 s) whose refresh did not finish within the report's time: once exact, now possibly
+ * higher or lower.
+ */
 export type StoragePartialReason =
 	| "entry-limit"
 	| "depth-limit"
 	| "time-limit"
 	| "permission"
 	| "io-error"
+	| "stale"
 
-/** Bounds of one report (all areas share them). */
+/**
+ * Former per-report walk bounds. The core now counts in the background (200,000 entries, depth
+ * STORAGE_SCAN_MAX_DEPTH); a report waits on that count at most STORAGE_SCAN_MAX_WALL_MS and
+ * is cached STORAGE_REPORT_CACHE_MS. STORAGE_SCAN_MAX_ENTRIES is kept for older clients (and as
+ * the core's default for a one-off walk); it no longer bounds a report.
+ */
 export const STORAGE_SCAN_MAX_ENTRIES = 50_000
 export const STORAGE_SCAN_MAX_DEPTH = 16
 export const STORAGE_SCAN_MAX_WALL_MS = 2_000
@@ -183,6 +194,26 @@ export interface StorageKeptUnavailable {
 }
 export type StorageKeptSummary = StorageKeptReady | StorageKeptUnavailable
 
+/**
+ * When the reported sizes were counted. The core counts the areas in the background and a report
+ * waits for that count only within STORAGE_SCAN_MAX_WALL_MS; when it is not done, the report
+ * serves the previous count (refreshing true; areas `stale` when that count is older than 120 s)
+ * or, before the first count of an area finishes, the count's progress as `time-limit` lower
+ * bounds. Requesting again after the count finishes clears the `stale` and progress
+ * `time-limit` marks; a `time-limit` the count itself reached stays.
+ */
+export interface StorageCountState {
+	/**
+	 * When the count the served sizes come from finished; null while no area is served from a
+	 * finished count (the first count runs, or none started).
+	 */
+	countedAt: string | null
+	/** generatedAt minus countedAt (0 at least); null with countedAt null. */
+	ageMs: number | null
+	/** A count is running; the first report after it finishes carries its sizes. */
+	refreshing: boolean
+}
+
 export interface StorageReport {
 	generatedAt: string
 	/** generatedAt + STORAGE_REPORT_CACHE_MS; requests before it share this report. */
@@ -203,4 +234,6 @@ export interface StorageReport {
 		/** low when filesystem.availableBytes < minFreeBytes; unknown without either. */
 		state: StorageLowSpaceState
 	}
+	/** How old the area sizes are (absent from older cores). */
+	count?: StorageCountState
 }

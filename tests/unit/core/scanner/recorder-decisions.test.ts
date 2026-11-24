@@ -100,7 +100,7 @@ describe("RecorderDecisions", () => {
 		expect(d.status().counts.started).toBe(24)
 	})
 
-	it("a refusal repeating the observation's last decision is no new decision; other codes always count", () => {
+	it("a snapshot refusal counts once per observation and code; refusalAttempts counts every one; session codes always count", () => {
 		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
 		d.note("refused:slots", ref(1))
 		d.note("refused:slots", ref(1))
@@ -109,9 +109,13 @@ describe("RecorderDecisions", () => {
 		d.note("finalized", ref(1), true)
 		d.note("finalized", ref(1), true)
 		expect(d.status().counts).toEqual({
-			"refused:slots": 2,
+			"refused:slots": 1,
 			"refused:cpu": 1,
 			finalized: 2,
+		})
+		expect(d.status().refusalAttempts).toEqual({
+			"refused:slots": 3,
+			"refused:cpu": 1,
 		})
 		expect(d.status().recentRefusals.map(e => e.code)).toEqual([
 			"refused:slots",
@@ -122,6 +126,64 @@ describe("RecorderDecisions", () => {
 			"finalized",
 			"finalized",
 		])
+	})
+
+	it("an observation refused for slots on 10 snapshots counts 1; a later CPU refusal 1 more; another observation counts on its own", () => {
+		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+		for (let i = 0; i < 10; i++) d.note("refused:slots", ref(1, "d_1"))
+		expect(d.status().counts).toEqual({ "refused:slots": 1 })
+		for (let i = 0; i < 4; i++) {
+			d.note("refused:cpu", ref(1, "d_1"))
+			d.note("refused:slots", ref(1, "d_1"))
+		}
+		d.note("refused:slots", ref(2, "d_1"))
+		expect(d.status().counts).toEqual({
+			"refused:slots": 2,
+			"refused:cpu": 1,
+		})
+		expect(d.status().refusalAttempts).toEqual({
+			"refused:slots": 15,
+			"refused:cpu": 4,
+		})
+		// The discovery read sums its two observations, each counted once per code.
+		expect(d.forDiscovery("d_1")?.counts).toEqual({
+			"refused:slots": 2,
+			"refused:cpu": 1,
+		})
+	})
+
+	it(`the codes an observation was counted under are kept with its memory: at RECORDER_MAX_OBSERVATIONS (${RECORDER_MAX_OBSERVATIONS}) they hold, past it the least recent is counted again`, () => {
+		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+		d.note("refused:slots", ref(0))
+		d.note("refused:cpu", ref(0))
+		// At the bound: o_0 and RECORDER_MAX_OBSERVATIONS - 1 others are remembered.
+		for (let i = 1; i < RECORDER_MAX_OBSERVATIONS; i++)
+			d.note("refused:not-analog", ref(i))
+		d.note("refused:slots", ref(0))
+		expect(d.status().counts["refused:slots"]).toBe(1)
+		// Past it: RECORDER_MAX_OBSERVATIONS newer observations push o_0 out, and it counts again.
+		for (let i = 1; i <= RECORDER_MAX_OBSERVATIONS; i++)
+			d.note("refused:not-analog", ref(RECORDER_MAX_OBSERVATIONS + i))
+		d.note("refused:slots", ref(0))
+		expect(d.status().counts["refused:slots"]).toBe(2)
+		expect(d.status().refusalAttempts["refused:slots"]).toBe(3)
+	})
+
+	it("an observation still being retried stays recent, so a flood of newer ones never makes it count again", () => {
+		const d = new RecorderDecisions(pino({ level: "silent" }), () => 0)
+		d.note("refused:slots", ref(0))
+		for (let i = 1; i <= 2 * RECORDER_MAX_OBSERVATIONS; i++) {
+			d.note("refused:not-analog", ref(i))
+			// The same refusal again (the last decision repeated): not counted, but kept recent.
+			d.note("refused:slots", ref(0))
+		}
+		d.note("refused:cpu", ref(0))
+		d.note("refused:slots", ref(0))
+		expect(d.status().counts["refused:slots"]).toBe(1)
+		expect(d.status().counts["refused:cpu"]).toBe(1)
+		expect(d.status().refusalAttempts["refused:slots"]).toBe(
+			2 * RECORDER_MAX_OBSERVATIONS + 2,
+		)
 	})
 
 	it("a repeated refusal binds the discovery it now carries, without counting or logging again", async () => {
@@ -346,6 +408,10 @@ describe("WidebandAnalogRecorder decisions (synthetic signals)", () => {
 			h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge())))
 		await h.feed(0.5, true, report)
 		expect(h.rec.diagnostics().counts).toEqual({ "refused:cpu": 1 })
+		// Every retried snapshot is a raw attempt.
+		expect(
+			h.rec.diagnostics().refusalAttempts?.["refused:cpu"],
+		).toBeGreaterThan(1)
 		full = false
 		await h.feed(0.1, true, report)
 		expect(h.rec.diagnostics().recentRefusals?.map(e => e.code)).toEqual([

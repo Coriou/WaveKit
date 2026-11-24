@@ -55,6 +55,12 @@ interface ObservationMemory {
 	at: number
 	lastUnclean: ScannerRecorderFlagDetail | null
 	counts: Map<ScannerRecorderDecision, number>
+	/**
+	 * The snapshot refusal codes this observation was already counted under: each counts once per
+	 * observation. At most one per closed code (SCANNER_RECORDER_DECISIONS), and it lives in this
+	 * memory, so it goes when the observation leaves `byObservation` (RECORDER_MAX_OBSERVATIONS).
+	 */
+	refusedOnce: Set<ScannerRecorderDecision>
 }
 
 interface Entry {
@@ -73,6 +79,8 @@ export class RecorderDecisions {
 	/** Snapshot refusals, newest last (RECORDER_RECENT_REFUSALS). */
 	private readonly refusals: Entry[] = []
 	private readonly counts = new Map<ScannerRecorderDecision, number>()
+	/** Every snapshot refusal noted, retried snapshots included, per code (the raw count). */
+	private readonly attempts = new Map<ScannerRecorderDecision, number>()
 	/** Insertion order is recency: an update moves the observation to the end. */
 	private readonly byObservation = new Map<string, ObservationMemory>()
 	private windowStart = Number.NEGATIVE_INFINITY
@@ -86,11 +94,17 @@ export class RecorderDecisions {
 	) {}
 
 	/**
-	 * One decision. A snapshot refusal (`session` false) repeating the observation's last decision
-	 * (a snapshot retried while slots or CPU stay full, a class that stays non-analog) is no new
-	 * decision: it is not counted, kept or logged, but the discovery it now carries is still bound
-	 * (an observation may be associated only after its first refusal). Any other code always
-	 * counts: a session's decisions are each about a file or the session (two files of one session
+	 * One decision. A snapshot refusal (`session` false) counts once per observation and code: an
+	 * observation refused for slots on 10 snapshots counts 1 under `refused:slots`, and 1 more under
+	 * `refused:cpu` if a later snapshot is refused for CPU, however often the two alternate
+	 * (`refusalAttempts` counts every one). The observation is its core observation id; what it was
+	 * counted under is kept with its memory, so it is forgotten with it (the least recent past
+	 * RECORDER_MAX_OBSERVATIONS; a repeated refusal keeps it recent) and counted again after that.
+	 * A refusal repeating the observation's last decision (a snapshot retried while slots or CPU
+	 * stay full, a class that stays non-analog) is no new decision: it is not kept or logged, but
+	 * the discovery it now carries is still bound (an observation may be associated only after its
+	 * first refusal). A refusal changing the last decision is kept and logged, counted or not.
+	 * Session decisions always count: each is about a file or the session (two files of one session
 	 * finalize twice, two files refused by the store are refused twice). A snapshot refusal is
 	 * logged at debug and kept in the refusal ring; a session decision at info (rate limited) and in
 	 * the session ring. `unclean`: the session's unclean-snapshot detail (copied), when it has one.
@@ -104,8 +118,13 @@ export class RecorderDecisions {
 	): void {
 		const at = this.now()
 		const known = this.byObservation.get(ref.observationId)
+		if (!session) this.attempts.set(code, (this.attempts.get(code) ?? 0) + 1)
 		if (!session && known?.last === code && code.startsWith("refused:")) {
 			known.discoveryId = ref.discoveryId ?? known.discoveryId
+			// Still refused: the observation stays recent, so its counted codes are not forgotten
+			// while it is retried.
+			this.byObservation.delete(ref.observationId)
+			this.byObservation.set(ref.observationId, known)
 			return
 		}
 		const memory: ObservationMemory = known ?? {
@@ -116,6 +135,7 @@ export class RecorderDecisions {
 			lastUnclean: null,
 			receipt: undefined,
 			counts: new Map(),
+			refusedOnce: new Set(),
 		}
 		const detail = unclean === null ? null : { ...unclean }
 		memory.receipt = receipt
@@ -123,14 +143,16 @@ export class RecorderDecisions {
 		memory.at = at
 		memory.lastUnclean = detail
 		memory.discoveryId = ref.discoveryId ?? memory.discoveryId
-		memory.counts.set(code, (memory.counts.get(code) ?? 0) + 1)
+		const counted = session || !memory.refusedOnce.has(code)
+		if (!session) memory.refusedOnce.add(code)
+		if (counted) memory.counts.set(code, (memory.counts.get(code) ?? 0) + 1)
 		this.byObservation.delete(ref.observationId)
 		this.byObservation.set(ref.observationId, memory)
 		if (this.byObservation.size > RECORDER_MAX_OBSERVATIONS) {
 			const oldest = this.byObservation.keys().next()
 			if (oldest.done !== true) this.byObservation.delete(oldest.value)
 		}
-		this.counts.set(code, (this.counts.get(code) ?? 0) + 1)
+		if (counted) this.counts.set(code, (this.counts.get(code) ?? 0) + 1)
 		const entry: Entry = {
 			receipt,
 			code,
@@ -207,12 +229,14 @@ export class RecorderDecisions {
 		recent: ScannerRecorderDecisionEntry[]
 		recentRefusals: ScannerRecorderDecisionEntry[]
 		counts: Partial<Record<ScannerRecorderDecision, number>>
+		refusalAttempts: Partial<Record<ScannerRecorderDecision, number>>
 		logsSuppressed: number
 	} {
 		return {
 			recent: this.recent.map(dto),
 			recentRefusals: this.refusals.map(dto),
 			counts: Object.fromEntries(this.counts),
+			refusalAttempts: Object.fromEntries(this.attempts),
 			logsSuppressed: this.suppressedTotal,
 		}
 	}
