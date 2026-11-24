@@ -85,7 +85,8 @@ const dirs: string[] = []
 // slowest measured: 6.4 s for one split plus one restore and replay per emitted prefix, 4.7 s
 // for one split plus one restore, 14.2 s for an interleaved batch replayed per prefix. 60 s is
 // four times the slowest of those, so load average 400 still fits; it bounds a hang, never
-// speed. The 5 s default stays for the small cases.
+// speed. Every describe or case that builds or restores a full table gets it, small cases
+// inside those describes included.
 const FULL_TABLE_BUDGET = { timeout: 60_000 }
 
 afterEach(async () => {
@@ -1475,30 +1476,34 @@ describe("temporary guards at their bounds", () => {
 		expect(again.overflowCount).toEqual({ folders: 0, all: true })
 	})
 
-	it(`replay safety marks: ${HELD_OVERFLOW_FOLDERS_MAX} kept one by one, one more marks every folder`, () => {
-		const table = new HeldRecordingTable()
-		table.restore(heldEntries(HELD_RECORDINGS_MAX, "d_B"))
-		table.apply(
-			Array.from({ length: HELD_OVERFLOW_FOLDERS_MAX }, (_, i) => ({
-				id: `d_S${i}~s.wav`,
-				ownerId: "d_B",
-				observationId: "os",
-			})),
-		)
-		table.setOverflow({ folders: [], all: false })
-		expect(table.overflowCount).toEqual({
-			folders: HELD_OVERFLOW_FOLDERS_MAX,
-			all: false,
-		})
-		expect(table.overflowed("d_S0")).toBe(true)
-		expect(table.overflowed("d_OTHER")).toBe(false)
-		table.apply([{ id: "d_SX~s.wav", ownerId: "d_B", observationId: "os" }])
-		table.setOverflow({ folders: [], all: false })
-		expect(table.overflowCount).toEqual({ folders: 0, all: true })
-		expect(table.overflowed("d_OTHER")).toBe(true)
-		// Replay marks are never journaled by themselves.
-		expect(table.takeOverflowChange()).toBeUndefined()
-	})
+	it(
+		`replay safety marks: ${HELD_OVERFLOW_FOLDERS_MAX} kept one by one, one more marks every folder`,
+		FULL_TABLE_BUDGET,
+		() => {
+			const table = new HeldRecordingTable()
+			table.restore(heldEntries(HELD_RECORDINGS_MAX, "d_B"))
+			table.apply(
+				Array.from({ length: HELD_OVERFLOW_FOLDERS_MAX }, (_, i) => ({
+					id: `d_S${i}~s.wav`,
+					ownerId: "d_B",
+					observationId: "os",
+				})),
+			)
+			table.setOverflow({ folders: [], all: false })
+			expect(table.overflowCount).toEqual({
+				folders: HELD_OVERFLOW_FOLDERS_MAX,
+				all: false,
+			})
+			expect(table.overflowed("d_S0")).toBe(true)
+			expect(table.overflowed("d_OTHER")).toBe(false)
+			table.apply([{ id: "d_SX~s.wav", ownerId: "d_B", observationId: "os" }])
+			table.setOverflow({ folders: [], all: false })
+			expect(table.overflowCount).toEqual({ folders: 0, all: true })
+			expect(table.overflowed("d_OTHER")).toBe(true)
+			// Replay marks are never journaled by themselves.
+			expect(table.takeOverflowChange()).toBeUndefined()
+		},
+	)
 
 	it(`at ${HELD_OPEN_GUARDS_MAX} open guards each still closes; one more is a mark at once`, () => {
 		const table = new HeldRecordingTable()
@@ -1659,111 +1664,122 @@ describe("an analog failure cleanup never removes a file in a marked folder", ()
 	})
 })
 
-describe("only an entry of this writer's format is trusted with its refusal outcomes", () => {
-	/**
-	 * The table is full (65,536 entries: B's, and C's old.wav listed by B's observation o2 but
-	 * recorded under A, stale). o2 lists C's old.wav and A~held.wav: the runtime re-points the
-	 * first listing to B, refuses the second and marks A's folder.
-	 */
-	async function listing() {
-		const root = await tempRoot()
-		const first = newStore()
-		const a = await discovery(first, root, 1)
-		const b = await discovery(first, root, 2)
-		const c = await discovery(first, root, 3)
-		const heldPath = await writeWav(root, a, "held.wav")
-		await writeWav(root, c, "old.wav")
-		const snapshot: StoreSnapshot = {
-			...first.snapshot(),
-			heldRecordings: [
-				...heldEntries(HELD_RECORDINGS_MAX - 1, b),
-				{ id: `${c}~old.wav`, ownerId: a, observationId: "o2" },
-			],
+describe(
+	"only an entry of this writer's format is trusted with its refusal outcomes",
+	FULL_TABLE_BUDGET,
+	() => {
+		/**
+		 * The table is full (65,536 entries: B's, and C's old.wav listed by B's observation o2 but
+		 * recorded under A, stale). o2 lists C's old.wav and A~held.wav: the runtime re-points the
+		 * first listing to B, refuses the second and marks A's folder.
+		 */
+		async function listing() {
+			const root = await tempRoot()
+			const first = newStore()
+			const a = await discovery(first, root, 1)
+			const b = await discovery(first, root, 2)
+			const c = await discovery(first, root, 3)
+			const heldPath = await writeWav(root, a, "held.wav")
+			await writeWav(root, c, "old.wav")
+			const snapshot: StoreSnapshot = {
+				...first.snapshot(),
+				heldRecordings: [
+					...heldEntries(HELD_RECORDINGS_MAX - 1, b),
+					{ id: `${c}~old.wav`, ownerId: a, observationId: "o2" },
+				],
+			}
+			const store = restored(snapshot)
+			const emitted: JournalEntry[] = []
+			store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+				emitted.push({ ...e, seq: emitted.length + 1 }),
+			)
+			expect(
+				store.attachRecordings(
+					"o2",
+					[`${c}~old.wav`, `${a}~held.wav`],
+					"linked",
+				),
+			).toBe(true)
+			const entry = emitted.at(-1)
+			const payload = payloadOf(entry)
+			expect(payload?.heldRecordings).toEqual([
+				{ id: `${c}~old.wav`, ownerId: b, observationId: "o2" },
+			])
+			expect(payload?.heldOverflow).toEqual({ folders: [a], all: false })
+			return { root, snapshot, a, heldPath, entry: entry as JournalEntry }
 		}
-		const store = restored(snapshot)
-		const emitted: JournalEntry[] = []
-		store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
-			emitted.push({ ...e, seq: emitted.length + 1 }),
-		)
-		expect(
-			store.attachRecordings("o2", [`${c}~old.wav`, `${a}~held.wav`], "linked"),
-		).toBe(true)
-		const entry = emitted.at(-1)
-		const payload = payloadOf(entry)
-		expect(payload?.heldRecordings).toEqual([
-			{ id: `${c}~old.wav`, ownerId: b, observationId: "o2" },
-		])
-		expect(payload?.heldOverflow).toEqual({ folders: [a], all: false })
-		return { root, snapshot, a, heldPath, entry: entry as JournalEntry }
-	}
 
-	/** The entry as an earlier format wrote it: held changes, no marks, no format marker. */
-	function earlier(entry: JournalEntry, marks?: StoreMutation["heldOverflow"]) {
-		const {
-			heldOverflow: _marks,
-			heldFormat: _format,
-			...rest
-		} = entry.payload as StoreMutation
-		return {
-			...entry,
-			payload: {
-				...rest,
-				...(marks !== undefined ? { heldOverflow: marks } : {}),
-			} satisfies StoreMutation,
+		/** The entry as an earlier format wrote it: held changes, no marks, no format marker. */
+		function earlier(
+			entry: JournalEntry,
+			marks?: StoreMutation["heldOverflow"],
+		) {
+			const {
+				heldOverflow: _marks,
+				heldFormat: _format,
+				...rest
+			} = entry.payload as StoreMutation
+			return {
+				...entry,
+				payload: {
+					...rest,
+					...(marks !== undefined ? { heldOverflow: marks } : {}),
+				} satisfies StoreMutation,
+			}
 		}
-	}
 
-	it("every entry this writer emits carries the format marker and parses", async () => {
-		const s = await listing()
-		expect(payloadOf(s.entry)?.heldFormat).toBe(HELD_JOURNAL_FORMAT)
-		expect(StoreMutationSchema.safeParse(s.entry.payload).success).toBe(true)
-		const store = newStore()
-		const emitted: JournalEntry[] = []
-		store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
-			emitted.push({ ...e, seq: emitted.length + 1 }),
-		)
-		store.ingest(
-			makeObs({
-				id: "o9",
-				centreHz: BASE_HZ,
-				startedAt: T0,
-				cls: "analog-fm",
-				open: false,
-				gate: "passed",
-			}),
-		)
-		expect(emitted.length).toBeGreaterThan(0)
-		for (const e of emitted)
-			expect(payloadOf(e)?.heldFormat).toBe(HELD_JOURNAL_FORMAT)
-		expect(
-			StoreMutationSchema.safeParse({
-				discoveries: [],
-				observations: [],
-				deleted: [],
-				heldFormat: 1,
-			}).success,
-		).toBe(false)
-	})
+		it("every entry this writer emits carries the format marker and parses", async () => {
+			const s = await listing()
+			expect(payloadOf(s.entry)?.heldFormat).toBe(HELD_JOURNAL_FORMAT)
+			expect(StoreMutationSchema.safeParse(s.entry.payload).success).toBe(true)
+			const store = newStore()
+			const emitted: JournalEntry[] = []
+			store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+				emitted.push({ ...e, seq: emitted.length + 1 }),
+			)
+			store.ingest(
+				makeObs({
+					id: "o9",
+					centreHz: BASE_HZ,
+					startedAt: T0,
+					cls: "analog-fm",
+					open: false,
+					gate: "passed",
+				}),
+			)
+			expect(emitted.length).toBeGreaterThan(0)
+			for (const e of emitted)
+				expect(payloadOf(e)?.heldFormat).toBe(HELD_JOURNAL_FORMAT)
+			expect(
+				StoreMutationSchema.safeParse({
+					discoveries: [],
+					observations: [],
+					deleted: [],
+					heldFormat: 1,
+				}).success,
+			).toBe(false)
+		})
 
-	it("this writer's entry replays to the runtime's marks", async () => {
-		const s = await listing()
-		const replayed = restored(s.snapshot)
-		replayed.replay(s.entry)
-		expect(replayed.heldFolderUnknown(s.a)).toBe(true)
-		expect(replayed.heldRecordingCounts.overflowFolders).toBe(1)
-	})
-
-	for (const marks of [undefined, { folders: [], all: false }])
-		it(`an earlier-format entry ${marks === undefined ? "without marks" : "replacing the marks with none"}: the re-derived refusal marks A's folder, and A's delete keeps B's WAV`, async () => {
+		it("this writer's entry replays to the runtime's marks", async () => {
 			const s = await listing()
 			const replayed = restored(s.snapshot)
-			replayed.replay(earlier(s.entry, marks))
-			expect(replayed.heldRecordingOwner(`${s.a}~held.wav`)).toBeNull()
+			replayed.replay(s.entry)
 			expect(replayed.heldFolderUnknown(s.a)).toBe(true)
-			const ev = evidenceFor(s.root, () => replayed)
-			await ev.loadFolderIndex()
-			expect(replayed.delete(s.a)).toBe(true)
-			await ev.removeDiscovery(s.a)
-			expect(existsSync(s.heldPath)).toBe(true)
+			expect(replayed.heldRecordingCounts.overflowFolders).toBe(1)
 		})
-})
+
+		for (const marks of [undefined, { folders: [], all: false }])
+			it(`an earlier-format entry ${marks === undefined ? "without marks" : "replacing the marks with none"}: the re-derived refusal marks A's folder, and A's delete keeps B's WAV`, async () => {
+				const s = await listing()
+				const replayed = restored(s.snapshot)
+				replayed.replay(earlier(s.entry, marks))
+				expect(replayed.heldRecordingOwner(`${s.a}~held.wav`)).toBeNull()
+				expect(replayed.heldFolderUnknown(s.a)).toBe(true)
+				const ev = evidenceFor(s.root, () => replayed)
+				await ev.loadFolderIndex()
+				expect(replayed.delete(s.a)).toBe(true)
+				await ev.removeDiscovery(s.a)
+				expect(existsSync(s.heldPath)).toBe(true)
+			})
+	},
+)
