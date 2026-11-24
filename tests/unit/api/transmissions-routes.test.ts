@@ -160,7 +160,7 @@ describe("GET /api/transmissions/:ref", () => {
 		}
 		const toneOf = async (
 			i: number,
-			tone: Parameters<typeof analogItem>[1]["tone"],
+			tone: NonNullable<Parameters<typeof analogItem>[1]>["tone"],
 		) => {
 			const txId = claimAt(i)
 			const key = keyOf(10 + i)
