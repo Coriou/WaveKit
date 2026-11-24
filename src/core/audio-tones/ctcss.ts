@@ -24,6 +24,36 @@ const RAW_POWER_FRACTION = 0.01
 const MIN_VOTE_FRACTION = 0.6
 /** Ignore numerical dust so a silent band cannot win on a ratio of zeros. */
 const MIN_POWER = 1e-12
+/**
+ * A block no tone won still leans on one (partialBlockCount) when its best tone dominates (3× the
+ * next, as a vote) and holds at least this share of the band: half the 0.65 a vote needs. A tone
+ * keyed on for half of a block keeps about half its power on its own Goertzel bin, the rest
+ * spread over keying sidebands; white noise puts about 2 Hz / 250 Hz < 1% of the band on one bin,
+ * and a gliding voice pitch spreads its energy over many bins.
+ */
+const PARTIAL_BAND_FRACTION = 0.325
+/**
+ * A weaker lean also counts when two consecutive blocks lean on the same tone at this share or
+ * more (the vote's own two-block rule): a steady tone under noise. Modelled (60 s each, 239
+ * blocks, three seeds): white noise low-passed at 300 Hz and pink noise reach a dominant share
+ * of at most 0.12 in single blocks and never lean on one tone twice in a row; a gliding voice
+ * pitch (110-170 Hz) reaches 0.16 but never dominates; random 134.4 bps NRZ dominates at most
+ * 0.20, never twice on one tone. A steady 88.5 Hz tone 12 dB under the band's noise holds about
+ * 0.15 and leans twice in a row in 5 of 23 block pairs over 6 s; at 9 dB under, 15 of 23.
+ */
+const LEAN_BAND_FRACTION = 0.1
+/**
+ * Ceilings of a quiet analysis block (CtcssBank.quietBlockCount), in the bank's own units: the
+ * mean square of the samples pushed, full scale 1. A block is quiet when its band power (the
+ * band the vote divides by) is at most `bandMax` and its raw power at most `rawMax`. A caller
+ * that knows its audio's scale derives them from the weakest tone it must not miss
+ * (recording-facts.ts RECORDER_TONE_QUIET).
+ */
+export interface CtcssQuietCeilings {
+	readonly bandMax: number
+	readonly rawMax: number
+}
+
 /** Tones evaluated together in one Goertzel pass (see `CtcssBank.goertzel`). */
 const GOERTZEL_LANES = 10
 
@@ -143,8 +173,28 @@ export class CtcssBank {
 	private votedBlocks = 0
 	/** Analysis blocks no tone won that still held sub-audible band energy (subAudibleBlockCount). */
 	private subAudibleBlocks = 0
+	/** Analysis blocks no tone won whose best tone still dominated (partialBlockCount). */
+	private partialBlocks = 0
+	/** The tone the previous block leaned on at LEAN_BAND_FRACTION or more, or -1. */
+	private lastLean = -1
+	/** Analysis blocks under both quiet ceilings (quietBlockCount). */
+	private quietBlocks = 0
+	/** Samples pushed as gap fill (pushGapSample, gapSampleCount). */
+	private gapSamples = 0
+	/** `seen` index (1-based) of the latest gap-fill sample, or 0: none yet. */
+	private lastGapAt = 0
+	private readonly quiet: CtcssQuietCeilings | null
 
-	constructor() {
+	/** `quiet`: the quiet-block ceilings (quietBlockCount); none: no block counts as quiet. */
+	constructor(quiet?: CtcssQuietCeilings) {
+		this.quiet =
+			quiet !== undefined &&
+			Number.isFinite(quiet.bandMax) &&
+			Number.isFinite(quiet.rawMax) &&
+			quiet.bandMax >= 0 &&
+			quiet.rawMax >= 0
+				? quiet
+				: null
 		for (let i = 0; i < CTCSS_HZ.length; i++) {
 			this.coeffs[i] =
 				2 * Math.cos((2 * Math.PI * (CTCSS_HZ[i] ?? 0)) / RATE_HZ)
@@ -172,6 +222,23 @@ export class CtcssBank {
 		if (this.seen !== this.nextAt) return
 		this.analyse()
 		this.nextAt += HOP_SAMPLES
+	}
+
+	/**
+	 * `sample` stands in for audio the input never delivered (a source gap's fill): analysed
+	 * exactly as `pushSample` (votes, blocks and every other count unchanged), but any analysis
+	 * block holding at least one such sample is never quiet (quietBlockCount), and the sample is
+	 * counted (gapSampleCount). Fill proves nothing about a tone: it was not heard.
+	 */
+	pushGapSample(sample: number): void {
+		this.gapSamples += 1
+		this.lastGapAt = this.seen + 1
+		this.pushSample(sample)
+	}
+
+	/** Samples pushed with pushGapSample since construction or the last reset. */
+	gapSampleCount(): number {
+		return this.gapSamples
 	}
 
 	/**
@@ -220,6 +287,26 @@ export class CtcssBank {
 		return this.subAudibleBlocks
 	}
 
+	/**
+	 * Analysis blocks no tone won whose best tone still dominated the others (≥ 3× the next, and
+	 * held 1% of whole-audio power) with at least PARTIAL_BAND_FRACTION of the band, or with at
+	 * least LEAN_BAND_FRACTION when the previous block leaned on the same tone that far too: a tone
+	 * too broken up or too weak to vote, never one a vote counted. Does not affect `result()`.
+	 */
+	partialBlockCount(): number {
+		return this.partialBlocks
+	}
+
+	/**
+	 * Analysis blocks whose band power was at most the quiet ceilings' `bandMax` and whose raw
+	 * power at most `rawMax` (exactly at a ceiling is quiet), voted or not: a block too quiet to
+	 * hide a tone at the level the ceilings were derived for. 0 when the bank has no ceilings. A
+	 * block holding a gap-fill sample (pushGapSample) is never quiet. Does not affect `result()`.
+	 */
+	quietBlockCount(): number {
+		return this.quietBlocks
+	}
+
 	result(): number | null {
 		if (this.seen < MIN_SAMPLES) return null
 		const tone = selectCtcssTone(this.votes, this.qualified, this.firstBlock)
@@ -251,6 +338,11 @@ export class CtcssBank {
 		this.lastBlockWinner = -1
 		this.votedBlocks = 0
 		this.subAudibleBlocks = 0
+		this.partialBlocks = 0
+		this.lastLean = -1
+		this.quietBlocks = 0
+		this.gapSamples = 0
+		this.lastGapAt = 0
 	}
 
 	private analyse(): void {
@@ -270,6 +362,16 @@ export class CtcssBank {
 			aboveEnergy += above * above
 		}
 		const bandEnergy = Math.max(0, rawEnergy - belowEnergy - aboveEnergy)
+		const quiet = this.quiet
+		// The block holds samples seen - BLOCK_SAMPLES + 1 .. seen (1-based): one of them gap fill
+		// (lastGapAt) and it is not quiet.
+		if (
+			quiet !== null &&
+			this.lastGapAt <= this.seen - BLOCK_SAMPLES &&
+			bandEnergy / BLOCK_SAMPLES <= quiet.bandMax &&
+			rawEnergy / BLOCK_SAMPLES <= quiet.rawMax
+		)
+			this.quietBlocks += 1
 		this.goertzel()
 		const powers = this.powers
 		let best = 0
@@ -309,6 +411,21 @@ export class CtcssBank {
 			bandMean >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
 		)
 			this.subAudibleBlocks += 1
+		const leanShare =
+			winner < 0 &&
+			dominates &&
+			bandMean > MIN_POWER &&
+			bestPower > MIN_POWER &&
+			bestPower >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
+				? bestPower / bandMean
+				: 0
+		const lean = leanShare >= LEAN_BAND_FRACTION ? best : -1
+		if (
+			leanShare >= PARTIAL_BAND_FRACTION ||
+			(lean >= 0 && lean === this.lastLean)
+		)
+			this.partialBlocks += 1
+		this.lastLean = lean
 		this.lastBlockWinner = winner
 		if (winner >= 0 && winner === this.lastWinner) this.streak += 1
 		else if (winner >= 0) {

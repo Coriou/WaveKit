@@ -222,12 +222,18 @@ export interface RecordingAdmissionFacts {
 
 /**
  * The sub-audible tone a kept analog recording was sent with: a CTCSS tone (one of the 50
- * EIA/TIA-603 tones, 67.0-254.1 Hz) or a DCS code (three octal digits, e.g. "023"). The core
- * produces only `ctcss` today (it measures no DCS); `dcs` is reserved in the shape.
+ * EIA/TIA-603 tones, 67.0-254.1 Hz) or a DCS code (three octal digits, e.g. "023") with its
+ * polarity as the live transmission path reports it ("normal": the stream as demodulated); a
+ * sidecar written before the core measured DCS has none.
  */
-export type RecordingTone =
-	| { kind: "ctcss"; hz: number }
-	| { kind: "dcs"; code: string }
+export type RecordingTone = { kind: "ctcss"; hz: number } | RecordingDcsTone
+
+/** A DCS tone of RecordingTone; `polarity` is absent on a sidecar that stored none. */
+export interface RecordingDcsTone {
+	kind: "dcs"
+	code: string
+	polarity?: "normal" | "inverted" | undefined
+}
 
 /**
  * Facts of a kept scanner analog recording, written once beside its receipt at the keep
