@@ -63,10 +63,19 @@ import {
 } from "./names.js"
 import { parseRiffDurationMs } from "./riff.js"
 import {
+	readRecordingCopy,
 	readRecordingReceipt,
 	recordingParts,
 	type RecordingReceiptFacts,
 } from "./recording-cut.js"
+
+/**
+ * Names waiting for a copy-sidecar re-read (copyChanged), at most this many (oldest forgotten:
+ * the slow reconcile reads a forgotten one's sidecar with its receipt only when its WAV changes,
+ * so a forgotten change waits for the next restart; 4 096 far exceeds the 63 writes one
+ * re-point can make).
+ */
+export const RECORDINGS_COPY_DIRTY_MAX = 4096
 
 /**
  * Pause of the slow reconcile between two folders: 1 500 folders take at least 30 s, so a
@@ -306,6 +315,17 @@ export interface RecordingInventory {
 	 * RECORDINGS_ITEMS_OF_KEYS_MAX keys read; a key not listed now is left out). Never throws.
 	 */
 	itemsOfKeys?(keys: readonly string[]): readonly RecordingInventoryItem[]
+	/**
+	 * Memory only: the keep keys of the listed scanner analog files that are copies of the root
+	 * `key` (their copy sidecar names it, and it is listed and not itself a copy). Every one, in
+	 * no particular order; empty when none.
+	 */
+	keysOfCopyRoot?(key: string): readonly string[]
+	/**
+	 * Writers: the copy sidecar of the analog file `alias` (`<discovery>~analog-<uuid>.wav`) was
+	 * written or removed. Its WAV and receipt are unchanged, so only the sidecar is read again.
+	 */
+	copyChanged?(alias: string): void
 	/** Writers: these discoveries' folders changed (finalize, delete, retention). */
 	touchDiscoveries?(ids: readonly string[]): Promise<void>
 	/** Writers: a dsd-fme call of `decoderId` ended (no id: every dsd-fme directory). */
@@ -941,6 +961,10 @@ export function createRecordingInventory(
 	 * (a file's txId + 7 moreTxIds, recording-facts.ts).
 	 */
 	const byTx = new Map<string, Set<IndexedEntry>>()
+	/** Indexed scanner analog copies per root key their copy sidecar names (every copy). */
+	const byCopyRoot = new Map<string, Set<IndexedEntry>>()
+	/** File names whose copy sidecar changed (copyChanged), re-read by their next refresh. */
+	const copyDirty = new Set<string>()
 	/** First full build: null until started, then its promise. */
 	let build: Promise<void> | null = null
 	let built = false
@@ -1105,6 +1129,12 @@ export function createRecordingInventory(
 			set.add(e)
 			byTx.set(txId, set)
 		}
+		const root = e.receipt?.copy?.of.key
+		if (root !== undefined) {
+			const set = byCopyRoot.get(root) ?? new Set<IndexedEntry>()
+			set.add(e)
+			byCopyRoot.set(root, set)
+		}
 		if (e.key !== null) {
 			const copies = byKey.get(e.key) ?? new Set<IndexedEntry>()
 			copies.add(e)
@@ -1134,6 +1164,12 @@ export function createRecordingInventory(
 			const set = byTx.get(txId)
 			set?.delete(e)
 			if (set?.size === 0) byTx.delete(txId)
+		}
+		const root = e.receipt?.copy?.of.key
+		if (root !== undefined) {
+			const set = byCopyRoot.get(root)
+			set?.delete(e)
+			if (set?.size === 0) byCopyRoot.delete(root)
 		}
 		const copies = byId.get(e.item.id)
 		if (!copies) return
@@ -1514,6 +1550,32 @@ export function createRecordingInventory(
 		}
 		clearPending(state, name)
 		const prev = state.files.get(name)
+		// A copy sidecar change (copyChanged): the WAV stat is unchanged, so the stat-equal pass
+		// below would never see it. Only the sidecar is read again (a changed WAV reads it anyway).
+		const copyStale = copyDirty.delete(name)
+		const copyRoot = spec.dirs[0]
+		if (
+			copyStale &&
+			prev &&
+			prev.receipt !== null &&
+			spec.kind === "scanner-analog" &&
+			copyRoot !== undefined &&
+			prev.dev === st.dev &&
+			prev.ino === st.ino &&
+			prev.size === st.size &&
+			prev.mtimeMs === st.mtimeMs
+		) {
+			const copy = await handleSem.run(() =>
+				readRecordingCopy(fs, copyRoot, name),
+			)
+			if (!attached(state) || state.files.get(name) !== prev) return
+			setFile(state, name, {
+				...prev,
+				listed: false,
+				receipt: { ...prev.receipt, copy },
+			})
+			return
+		}
 		if (
 			prev &&
 			prev.dev === st.dev &&
@@ -1913,8 +1975,10 @@ export function createRecordingInventory(
 			item.keptBy = receipt?.keptBy ?? null
 			item.facts = receipt?.facts ?? null
 			// The transmission open at the file's first sample (its facts); null: unknown.
-			if (e.item.kind === "scanner-analog")
+			if (e.item.kind === "scanner-analog") {
 				item.txId = receipt?.facts?.txId ?? null
+				item.copyOf = copyOfEntry(e)
+			}
 			if (kept !== undefined) item.kept = kept
 			if (eventIdOf !== undefined) {
 				let eventId: string | null = null
@@ -1929,6 +1993,43 @@ export function createRecordingInventory(
 			return item
 		}
 		return { ownerOf, keptOf, itemOf }
+	}
+
+	/** The listed, non-copy root entry of `key`, or null. */
+	function listedRootOf(key: string): IndexedEntry | null {
+		for (const r of byKey.get(key) ?? [])
+			if (r.listed) return (r.receipt?.copy ?? null) === null ? r : null
+		return null
+	}
+
+	/**
+	 * A listed scanner analog file's copy link as served: its sidecar's root, only while that root
+	 * is listed and not itself a copy (else null: the file is shown again).
+	 */
+	function copyOfEntry(
+		e: IndexedEntry,
+	): { key: string; evidence: string[] } | null {
+		const c = e.receipt?.copy ?? null
+		if (c === null || e.item.kind !== "scanner-analog") return null
+		if (c.of.key === (e.key ?? e.item.id)) return null
+		if (listedRootOf(c.of.key) === null) return null
+		return { key: c.of.key, evidence: [...c.evidence] }
+	}
+
+	/** Listed copies over the whole catalogue (counts.copiesTotal): O(copies indexed). */
+	function copiesListed(): number {
+		let n = 0
+		for (const [root, set] of byCopyRoot) {
+			if (listedRootOf(root) === null) continue
+			for (const e of set)
+				if (
+					e.listed &&
+					e.item.kind === "scanner-analog" &&
+					(e.key ?? e.item.id) !== root
+				)
+					n++
+		}
+		return n
 	}
 
 	function page(q: NormalisedQuery): RecordingInventoryPage {
@@ -1953,6 +2054,7 @@ export function createRecordingInventory(
 			if (q.sinceMs !== null && e.mtimeMs < q.sinceMs) return false
 			if (q.untilMs !== null && e.mtimeMs > q.untilMs) return false
 			if (q.kept !== null && (kept === true) !== q.kept) return false
+			if (!q.copies && copyOfEntry(e) !== null) return false
 			if (wanted !== null) {
 				if (e.discoveryId === null) return false
 				if (
@@ -2003,6 +2105,7 @@ export function createRecordingInventory(
 			q.sinceMs !== null ||
 			q.untilMs !== null ||
 			q.kept !== null ||
+			!q.copies ||
 			wanted !== null ||
 			q.minHz !== null ||
 			q.maxHz !== null ||
@@ -2082,6 +2185,7 @@ export function createRecordingInventory(
 				kept: keptTotal,
 				bytes: v.bytes,
 				byKind: { ...v.byKind },
+				copiesTotal: copiesListed(),
 			},
 			truncatedBefore:
 				cutoff !== null ? new Date(cutoff.m).toISOString() : null,
@@ -2530,6 +2634,32 @@ export function createRecordingInventory(
 			}
 			if (counts.lookupErrors > 0) logSkipped(counts)
 			return out
+		},
+
+		keysOfCopyRoot(key) {
+			if (listedRootOf(key) === null) return []
+			const keys: string[] = []
+			for (const e of byCopyRoot.get(key) ?? []) {
+				if (!e.listed || e.item.kind !== "scanner-analog") continue
+				const k = e.key ?? e.item.id
+				if (k !== key && !keys.includes(k)) keys.push(k)
+			}
+			return keys
+		},
+
+		copyChanged(alias) {
+			if (typeof alias !== "string") return
+			const targets = statesOf(`scan:${alias}`)
+			for (const { state, name } of targets) {
+				copyDirty.delete(name)
+				copyDirty.add(name)
+				while (copyDirty.size > RECORDINGS_COPY_DIRTY_MAX) {
+					const oldest = copyDirty.values().next()
+					if (oldest.done === true) break
+					copyDirty.delete(oldest.value)
+				}
+				void trackUrgent(indexFolder(state.spec, newCounts(), new Set([name])))
+			}
 		},
 
 		keysOfTx(txId) {

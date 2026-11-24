@@ -103,9 +103,12 @@ import type { TunerController } from "../tuner-controller.js"
 import { sourceScannerConfig } from "../../config.js"
 import {
 	priorsFor,
+	snapToRaster,
 	type Bandplan,
 	type BandRegionCode,
 } from "./bandplan/index.js"
+import { CopyDetector } from "./channel/copy-detector.js"
+import type { RasterFit } from "./channel/copy-intermod.js"
 import { builtinBandplansFor } from "../bandplans/builtin-supplement.js"
 import {
 	createBandRangeCache,
@@ -1768,7 +1771,20 @@ export class ScannerService extends EventEmitter {
 					}
 				},
 			})
+			// Copy (ghost) detection over the kept files: the store writes its sidecars, its removals
+			// reach the detector and its sidecar changes the recordings catalogue (`recording-copy-changed`).
+			const copies = new CopyDetector({
+				write: (operationId, copy) =>
+					this.evidence.writeCopy(operationId, copy),
+				logger: deps.logger,
+			})
+			this.evidence.onAnalogNotice(n => {
+				if (n.kind === "removed") copies.forget(n.operationId)
+				else this.emit("recording-copy-changed", n.alias)
+			})
 			this.widebandAnalog = new WidebandAnalogRecorder({
+				copies,
+				rasterOf: (sourceId, hz) => this.rasterFit(sourceId, hz),
 				engine: sourceId => this.spectrum.engine(sourceId),
 				settings: () => ({
 					...this.settings().hold,
@@ -3882,6 +3898,13 @@ export class ScannerService extends EventEmitter {
 		if (jobs.some(j => j.passive))
 			out.push(...this.channelRastersAt(sourceId, hz))
 		return out
+	}
+
+	/** Copy detection's raster fit of `hz`: on or off the rasters at it, unknown with none. */
+	private rasterFit(sourceId: string, hz: number): RasterFit {
+		const rasters = this.rastersAt(sourceId, hz)
+		if (rasters.length === 0) return "unknown"
+		return snapToRaster(hz, rasters, 0).snapped ? "on" : "off"
 	}
 
 	/**

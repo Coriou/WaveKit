@@ -135,4 +135,26 @@ export interface TransmissionDto {
 	}
 	/** Null for analog transmissions (no encryption to prove). */
 	privacy: TransmissionPrivacy | null
+	/**
+	 * Analog recordings only: copies (ghosts: the same audio heard again on another frequency)
+	 * linked to this transmission's recording. `of`: the root this recording is a copy of;
+	 * `copies`: the listed copies of this recording (at most 8, `copiesTotal` all of them).
+	 * Null when neither; absent from older cores.
+	 */
+	copy?: TransmissionCopy | null
+}
+
+/** TransmissionDto.copy. */
+export interface TransmissionCopy {
+	of: { ref: string; hz: number | null } | null
+	copies: TransmissionCopyMember[]
+	copiesTotal: number
+}
+
+/** One copy of a transmission's recording: its transmission ref (or `rec:` alias), frequency, key and evidence. */
+export interface TransmissionCopyMember {
+	ref: string
+	hz: number | null
+	recordingKey: string
+	evidence: string[]
 }

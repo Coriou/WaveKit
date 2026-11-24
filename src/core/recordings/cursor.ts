@@ -30,6 +30,8 @@ export interface NormalisedQuery {
 	kind: RecordingInventoryKind | null
 	decoderId: string | null
 	kept: boolean | null
+	/** False: copies (a scanner analog file whose copy sidecar names a listed root) are left out. */
+	copies: boolean
 	discoveryId: string | null
 	talkgroup: string | null
 	source: string | null
@@ -91,6 +93,7 @@ const QUERY_KEYS = new Set([
 	"kind",
 	"decoderId",
 	"kept",
+	"copies",
 	"discoveryId",
 	"talkgroup",
 	"source",
@@ -137,6 +140,7 @@ export function defaultInventoryQuery(): NormalisedQuery {
 		kind: null,
 		decoderId: null,
 		kept: null,
+		copies: true,
 		discoveryId: null,
 		talkgroup: null,
 		source: null,
@@ -205,6 +209,12 @@ export function parseInventoryQuery(raw: unknown): NormalisedQuery | null {
 	if (kept !== undefined) {
 		if (kept === true || kept === "true") q.kept = true
 		else if (kept === false || kept === "false") q.kept = false
+		else return null
+	}
+	const copies = get("copies")
+	if (copies !== undefined) {
+		if (copies === true || copies === "true") q.copies = true
+		else if (copies === false || copies === "false") q.copies = false
 		else return null
 	}
 	const discoveryId = get("discoveryId")

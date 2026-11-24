@@ -38,6 +38,8 @@ import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
 import { IqRing } from "../../../../src/core/spectrum/iq-ring.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import { NfmSource } from "./wideband-nfm-fixtures.js"
+import type { CopyDetector } from "../../../../src/core/scanner/channel/copy-detector.js"
+import type { RasterFit } from "../../../../src/core/scanner/channel/copy-intermod.js"
 
 export const FS = 1_024_000
 /** The recorder's wall clock (ms): fixed, or at sample 0 with `liveClock`. */
@@ -274,6 +276,10 @@ export function harness(
 		txOf?: (observationId: string) => string | null
 		/** The recorder's transmission refusals (WidebandAnalogDeps.txRefusal); default absent. */
 		txRefusal?: (observationId: string, code: TxRefusalCode) => void
+		/** Copy detection (WidebandAnalogDeps.copies); default absent (no fingerprint). */
+		copies?: CopyDetector
+		/** The raster fit of a frequency (WidebandAnalogDeps.rasterOf); default absent. */
+		rasterOf?: (sourceId: string, hz: number) => RasterFit
 		/** Wraps the fake store's beginAnalog (failure injection: a throw, a rejected push). */
 		beginWrap?: (
 			begin: (input: AnalogInput) => AnalogHandle,
@@ -334,6 +340,8 @@ export function harness(
 		...(opts.voicePrior ? { voicePrior: opts.voicePrior } : {}),
 		...(opts.txOf ? { txOf: opts.txOf } : {}),
 		...(opts.txRefusal ? { txRefusal: opts.txRefusal } : {}),
+		...(opts.copies ? { copies: opts.copies } : {}),
+		...(opts.rasterOf ? { rasterOf: opts.rasterOf } : {}),
 		timer: (ms, run) => {
 			const t = { ms, run, live: true }
 			timers.push(t)

@@ -1263,6 +1263,32 @@ export interface ScannerRecorderStatus {
 	 * refusals are logged at debug, outside the limit).
 	 */
 	logsSuppressed: number
+	/** Copy (ghost) detection counters since the core started. Absent when it is off or on older cores. */
+	copies?: ScannerRecorderCopyStatus | undefined
+}
+
+/** `ScannerRecorderStatus.copies`: copy detection's counters (since the core started). */
+export interface ScannerRecorderCopyStatus {
+	/** Envelope comparisons run. */
+	copyCompared: number
+	/** Copy sidecars asked to be written (a file marked or re-pointed). */
+	copyMarked: number
+	/** Same audio whose weaker file had no evidence of its own (nothing changed). */
+	copySameAudioNoEvidence: number
+	/** Comparisons where a file was too flat or too unvoiced to compare. */
+	copyIneligible: number
+	/** A new file passed against more than one root (attached to the strongest only). */
+	copyMultiRoot: number
+	/** Copies set back to candidates (their sidecar removed). */
+	copyUnlinked: number
+	/** Fingerprints evicted by the ring's count bound. */
+	copyRingOverflow: number
+	/** Jobs dropped by the queue bound. */
+	copyQueueDropped: number
+	/** The slowest comparison (ms of one core). */
+	copyComparisonMsMax: number
+	/** Track spans dropped by the intermod ring's count bound. */
+	copyTrackSpansDropped: number
 }
 
 /** `Discovery.recorder`: the recorder's decisions for one discovery's observations. */

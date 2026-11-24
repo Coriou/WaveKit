@@ -51,10 +51,45 @@ import {
 } from "./recording-operation.js"
 import {
 	RECORDING_FACTS_FILE,
+	RECORDING_FACTS_MAX_BYTES,
 	RECORDING_FACTS_TEMP,
 	factsFitFolder,
 	recordingFactsBytes,
 } from "./recording-facts.js"
+import {
+	COPY_FACTS_FILE,
+	COPY_FACTS_TEMP,
+	copyFactsBytes,
+	type CopyFactsInput,
+} from "./copy-facts.js"
+
+/**
+ * Every name an operation folder may hold (the recovery scan's allowed names, the cleanup list):
+ * the intent, the receipt, the staged media, the facts sidecar and the copy sidecar, each with
+ * its temp. A folder listing reads at most this many names (children's bound is derived from
+ * the list, never a literal): 9 now.
+ */
+export const OPERATION_FOLDER_NAMES: readonly string[] = [
+	"intent.json",
+	"intent.tmp",
+	"receipt.json",
+	"receipt.tmp",
+	"payload.wav.part",
+	RECORDING_FACTS_FILE,
+	RECORDING_FACTS_TEMP,
+	COPY_FACTS_FILE,
+	COPY_FACTS_TEMP,
+]
+
+/** What the store tells its observers (copy detection, the catalogue). */
+export type AnalogNotice =
+	/** An operation's copy.json was written or removed (the file's alias). */
+	| { readonly kind: "copy-changed"; readonly alias: string }
+	/** An operation's folder was removed (retention, a delete, recovery, a failed finish). */
+	| { readonly kind: "removed"; readonly operationId: string }
+
+/** Ids of operations whose cleanup began and did not complete, kept at most this many. */
+const RETIRING_MAX = 4096
 
 export const MAX_ACTIVE_ANALOG_OPERATIONS = 8
 /**
@@ -656,6 +691,8 @@ interface Context {
 		evicted: number
 		held: number
 	}) => void
+	/** Store notices (copy-changed, removed); never throws into the store. */
+	notice?: (n: AnalogNotice) => void
 	/**
 	 * The noise quarantine (noise-quarantine.ts NoiseQuarantine.admit): moves a cancelled noise
 	 * file's `payload.wav.part` out; true when moved, false (never throws) when the caller deletes it.
@@ -968,6 +1005,12 @@ export class AnalogOperations {
 	private readonly mediaFree = new Map<string, number>()
 	private root: string
 	private rootAnchored = false
+	/**
+	 * Operations whose cleanup (cleanupOwned) began: writeCopy never writes into one. Removed when
+	 * the cleanup completes (the folder is gone); one that failed part-way stays (at most
+	 * RETIRING_MAX, oldest forgotten).
+	 */
+	private readonly retiring = new Set<string>()
 	constructor(private readonly context: Context) {
 		this.io = context.io ?? defaultIo
 		this.root = resolve(context.root)
@@ -2487,7 +2530,10 @@ export class AnalogOperations {
 			return
 		}
 		if (owned) {
-			for (const child of await this.children(dir, 8))
+			for (const child of await this.children(
+				dir,
+				OPERATION_FOLDER_NAMES.length,
+			))
 				await account(join(dir, child), true)
 			return
 		}
@@ -2520,23 +2566,15 @@ export class AnalogOperations {
 			return
 		}
 		let metadataBytes = 0
-		const directoryNames = await this.children(dir, 8)
+		const directoryNames = await this.children(
+			dir,
+			OPERATION_FOLDER_NAMES.length,
+		)
 		if (cleanup && directoryNames.some(name => name !== "intent.json"))
 			out.unknown = true
 		for (const name of directoryNames) {
 			const metadata = name !== "payload.wav.part"
-			if (
-				![
-					"intent.json",
-					"intent.tmp",
-					"receipt.json",
-					"receipt.tmp",
-					"payload.wav.part",
-					RECORDING_FACTS_FILE,
-					RECORDING_FACTS_TEMP,
-				].includes(name)
-			)
-				out.unknown = true
+			if (!OPERATION_FOLDER_NAMES.includes(name)) out.unknown = true
 			const before = out.bytes
 			await account(join(dir, name), metadata)
 			if (metadata) metadataBytes += out.bytes - before
@@ -3278,6 +3316,12 @@ export class AnalogOperations {
 		this.requireCleanupClosure(intent.operationId)
 		if (ownedMedia && (this.heldUnknown(intent.discoveryId) || !ownedNow()))
 			throw heldRefusal()
+		// From here the folder is being removed: writeCopy never writes into it.
+		this.retiring.add(intent.operationId)
+		if (this.retiring.size > RETIRING_MAX) {
+			const oldest = this.retiring.values().next()
+			if (oldest.done !== true) this.retiring.delete(oldest.value)
+		}
 		if (ownedIntent) await this.validateCleanupMarker(intent)
 		const remove = async (path: string): Promise<void> => {
 			this.requireCleanupClosure(intent.operationId)
@@ -3313,6 +3357,8 @@ export class AnalogOperations {
 			"intent.tmp",
 			RECORDING_FACTS_TEMP,
 			RECORDING_FACTS_FILE,
+			COPY_FACTS_TEMP,
+			COPY_FACTS_FILE,
 		]) {
 			try {
 				await remove(join(dir, name))
@@ -3344,7 +3390,107 @@ export class AnalogOperations {
 		}
 		await this.checkpoint("cleanup-rmdir", intent.operationId)
 		if (ownedIntent) await remove(this.cleanupPath(intent.operationId))
+		this.retiring.delete(intent.operationId)
+		this.notify({ kind: "removed", operationId: intent.operationId })
 	}
+	private notify(n: AnalogNotice): void {
+		try {
+			this.context.notice?.(n)
+		} catch {
+			/* an observer never fails the store */
+		}
+	}
+	/**
+	 * Writes (`copy`) or removes (null) a kept file's copy sidecar (copy-facts.ts) under the lock:
+	 * only for an operation the inventory lists whose receipt is finalized and available, that is
+	 * not active (still finishing) and whose cleanup has not begun (`retiring`); else "skipped".
+	 * Nothing here waits for a finish (the detector asks only for settled operations; an active
+	 * one is skipped), so the lock is never held across another lock user's wait. Tmp + fsync +
+	 * rename; a failure removes the temp (best effort: an allowed name, removed with the
+	 * operation) and leaves the folder as it was. Skipped when intent + receipt + the largest facts
+	 * sidecar + this sidecar would exceed the folder's metadata bound (MAX_OPERATION_METADATA_BYTES).
+	 * Refreshes the operation's inventory entry like retire, and notifies `copy-changed` after a
+	 * write or a removal.
+	 */
+	writeCopy(
+		operationId: string,
+		copy: CopyFactsInput | null,
+	): Promise<"written" | "removed" | "skipped"> {
+		if (this.stopped || !UUIDSchema.safeParse(operationId).success)
+			return Promise.resolve("skipped")
+		return this.exclusive(async () => {
+			const intent = this.inventory.intents.get(operationId)
+			if (
+				intent === undefined ||
+				this.inventory.unknown ||
+				this.active.has(operationId) ||
+				this.retiring.has(operationId)
+			)
+				return "skipped"
+			const slot = this.available.get(intent.alias)
+			if (
+				slot === undefined ||
+				!slot.available ||
+				slot.receipt.outcome !== "finalized" ||
+				slot.receipt.operationId !== operationId
+			)
+				return "skipped"
+			const dir = this.opDir(operationId)
+			const target = join(dir, COPY_FACTS_FILE)
+			const temp = join(dir, COPY_FACTS_TEMP)
+			let outcome: "written" | "removed" | "skipped" = "skipped"
+			this.auditTouched?.add(operationId)
+			try {
+				if (copy === null) {
+					await this.safeTarget(target)
+					try {
+						await this.io.unlink(target)
+						outcome = "removed"
+					} catch (cause) {
+						if (nativeCode(cause) !== "ENOENT") throw cause
+					}
+				} else {
+					const bytes = copyFactsBytes(operationId, copy, Date.now())
+					const metadata =
+						boundedJson(intent).length +
+						boundedJson(slot.receipt).length +
+						RECORDING_FACTS_MAX_BYTES
+					if (
+						bytes !== null &&
+						metadata + bytes.length <= MAX_OPERATION_METADATA_BYTES
+					) {
+						await this.safeTarget(temp)
+						try {
+							await this.io.unlink(temp)
+						} catch (cause) {
+							if (nativeCode(cause) !== "ENOENT") throw cause
+						}
+						await this.writeSynced(temp, bytes)
+						await this.safeTarget(target)
+						await rename(temp, target)
+						outcome = "written"
+					}
+				}
+			} catch {
+				outcome = "skipped"
+				try {
+					await this.io.unlink(temp)
+				} catch {
+					/* an allowed name: inventoried, removed with the operation */
+				}
+			} finally {
+				try {
+					await this.refresh([operationId])
+				} catch {
+					this.inventory.unknown = true
+				}
+			}
+			if (outcome !== "skipped")
+				this.notify({ kind: "copy-changed", alias: intent.alias })
+			return outcome
+		})
+	}
+
 	path(alias: string): string | null {
 		if (!this.ready) return null
 		const item = this.available.get(alias)

@@ -9,7 +9,9 @@
  * - scanner `recordings-removed` events: retention deleted files (it does not change
  *   `evidence.recordings`): those discoveries' folders are re-indexed;
  * - digital voice `call` events: a call that ended checks that decoder's dsd-fme directory for
- *   newer calls (the file settles 10 s after its last write, then a timer lists it).
+ *   newer calls (the file settles 10 s after its last write, then a timer lists it);
+ * - scanner `recording-copy-changed` events: a kept analog file's copy sidecar was written or
+ *   removed (copy detection): only that sidecar is read again (copyChanged).
  *
  * Keep, unkeep and delete reach the catalogue through `invalidate(id)` (the keep service). The
  * catalogue's slow reconcile catches anything else (a file removed by hand).
@@ -27,11 +29,19 @@ export interface CatalogueDiscoverySource {
 		listener: (d: ScannerDiscoveryEventData) => void,
 	): unknown
 	on(event: "recordings-removed", listener: (ids: string[]) => void): unknown
+	on(
+		event: "recording-copy-changed",
+		listener: (alias: string) => void,
+	): unknown
 	off(
 		event: "discovery",
 		listener: (d: ScannerDiscoveryEventData) => void,
 	): unknown
 	off(event: "recordings-removed", listener: (ids: string[]) => void): unknown
+	off(
+		event: "recording-copy-changed",
+		listener: (alias: string) => void,
+	): unknown
 }
 
 interface EndedCall {
@@ -52,6 +62,7 @@ export interface CatalogueWiring {
 		| "ownersChanged"
 		| "discoveriesRemoved"
 		| "onChange"
+		| "copyChanged"
 	>
 	scanner?: CatalogueDiscoverySource | null
 	digitalVoice?: CatalogueCallSource | null
@@ -105,14 +116,19 @@ export function wireRecordingCatalogue(w: CatalogueWiring): () => void {
 	const onRemoved = (ids: string[]): void => {
 		if (Array.isArray(ids) && ids.length > 0) void inv.touchDiscoveries?.(ids)
 	}
+	const onCopy = (alias: string): void => {
+		if (typeof alias === "string") inv.copyChanged?.(alias)
+	}
 	w.scanner?.on("discovery", onDiscovery)
 	w.scanner?.on("recordings-removed", onRemoved)
+	w.scanner?.on("recording-copy-changed", onCopy)
 	w.digitalVoice?.on("call", onCall)
 	const unsubscribe =
 		w.broadcast !== undefined ? inv.onChange?.(w.broadcast) : undefined
 	return () => {
 		w.scanner?.off("discovery", onDiscovery)
 		w.scanner?.off("recordings-removed", onRemoved)
+		w.scanner?.off("recording-copy-changed", onCopy)
 		w.digitalVoice?.off("call", onCall)
 		unsubscribe?.()
 	}
