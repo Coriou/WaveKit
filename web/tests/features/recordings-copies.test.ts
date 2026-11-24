@@ -33,6 +33,7 @@ import {
 	moreCopiesText,
 } from "../../src/features/transmission/words.ts"
 import { json, scripted } from "../data/fake-fetch.ts"
+import { recordingsParams } from "../../src/data/recordings-store.ts"
 
 const ROOT = "scan:d_ROOT~analog-00000000-0000-4000-8000-000000000001.wav"
 const GHOST = "scan:d_GHOST~analog-00000000-0000-4000-8000-000000000002.wav"
@@ -76,6 +77,23 @@ afterEach(() => {
 })
 
 describe("Recordings: copies hidden by default, Show copies, the copy chip", () => {
+	it("sends copies=false on the wire (the store's query string)", () => {
+		const q = recordingsQuery({ tokens: [], text: "", filter: "all" })
+		expect(recordingsParams(q, 50, null)).toMatchObject({ copies: "false" })
+		expect(
+			recordingsParams(
+				recordingsQuery({
+					tokens: [],
+					text: "",
+					filter: "all",
+					showCopies: true,
+				}),
+				50,
+				null,
+			),
+		).not.toHaveProperty("copies")
+	})
+
 	it("asks the core for the list without copies until Show copies is on", () => {
 		expect(recordingsUi.get().showCopies).toBe(false)
 		const hidden = recordingsQuery({ ...recordingsUi.get() })

@@ -49,6 +49,8 @@ export const RECORDINGS_WINDOW_MAX = 10_000
 /** The server-side filters the panel uses (GET /api/recordings query keys). */
 export interface RecordingsQuery {
 	kept?: true
+	/** false: copies (items with a copyOf) are left out; the core lists them by default. */
+	copies?: false
 	kind?: RecordingInventoryKind
 	talkgroup?: string
 	source?: string
@@ -139,6 +141,7 @@ export function recordingsParams(
 	const p: Record<string, QueryValue> = { limit }
 	if (cursor !== null) p["cursor"] = cursor
 	if (q.kept) p["kept"] = "true"
+	if (q.copies === false) p["copies"] = "false"
 	if (q.kind !== undefined) p["kind"] = q.kind
 	if (q.talkgroup !== undefined) p["talkgroup"] = q.talkgroup
 	if (q.source !== undefined) p["source"] = q.source
