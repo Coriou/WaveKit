@@ -378,7 +378,13 @@ const comparable = (plan: PlacementPlan) => ({
 			: w,
 	),
 	unplaced: [...plan.unplaced],
-	activity: plan.activity,
+	// The move kind, trial mark and lane were added after the frozen planner.
+	activity: plan.activity && {
+		...plan.activity,
+		moves: plan.activity.moves.map(
+			({ kind: _kind, trial: _trial, lane: _lane, ...m }) => m,
+		),
+	},
 })
 
 /**
@@ -407,12 +413,81 @@ function againstReference(
 	input: PlannerInput,
 	plan: PlacementPlan,
 	reference: PlacementPlan,
-): "reference" | "projection" | "victim" | "yield" | "kept" {
+): "reference" | "projection" | "victim" | "yield" | "kept" | "limited" {
 	const act = input.activity!
 	const now = act.nowMonoMs
 	const pinned = new Set(act.pendingStarts.map(p => p.key))
 	const got = comparable(plan)
 	const ref = comparable(reference)
+	// Intended limits the frozen planner lacks: an unknown or no-sync-tier
+	// challenger enters an occupied dsd-fme slot only with the group's trial
+	// token (one move per pass, then 300 s), and the other moves stop
+	// DSD_RECLAIM_RESERVE = 2 short of the window budget (kept for live
+	// reclaims). Where that cuts a dsd-fme group's moves ("limited") the
+	// non-activity placements, unplaced list and queries are equal, the
+	// dsd-fme group makes at most one move (into a channel the reference
+	// moves in, unless the cut left it more budget than the reference had),
+	// and a multimon-ng group (more budget left) at least the reference's.
+	const groupOf = (m: { decoderId: string; sourceId: string }) =>
+		JSON.stringify([m.decoderId, m.sourceId])
+	const movesIn = (c: ReturnType<typeof comparable>, g: string) =>
+		(c.activity?.moves ?? []).filter(m => groupOf(m) === g)
+	const moveGroups = [
+		...new Set(
+			[...(got.activity?.moves ?? []), ...(ref.activity?.moves ?? [])].map(
+				groupOf,
+			),
+		),
+	]
+	const cut = moveGroups.filter(
+		g =>
+			!g.startsWith('["pager"') &&
+			movesIn(got, g).length < movesIn(ref, g).length,
+	)
+	if (cut.length) {
+		expect(got.wanted.filter(w => w.origin !== "activity")).toStrictEqual(
+			ref.wanted.filter(w => w.origin !== "activity"),
+		)
+		expect(got.unplaced).toStrictEqual(ref.unplaced)
+		expect(got.activity?.queries).toStrictEqual(ref.activity?.queries)
+		for (const g of moveGroups) {
+			const mine = movesIn(got, g)
+			const theirs = movesIn(ref, g)
+			if (g.startsWith('["pager"')) {
+				// More budget left by a cut dsd-fme group: never fewer moves.
+				expect(mine.length).toBeGreaterThanOrEqual(theirs.length)
+				continue
+			}
+			// Unknown challengers only: each move took the trial token, one per
+			// lane (fresh, retry).
+			const lanes = (plan.activity?.moves ?? [])
+				.filter(m => groupOf(m) === g)
+				.map(m => m.lane)
+			expect(mine.length).toBeLessThanOrEqual(2)
+			expect(new Set(lanes).size).toBe(lanes.length)
+			if (mine.length <= theirs.length)
+				for (const m of mine)
+					expect(theirs.map(r => r.toKey)).toContain(m.toKey)
+			// The slot count is the reference's; every activity placement is
+			// a reference placement, an incumbent the reference moved out, or a
+			// sync-held incumbent (it now ranks first, so a shrink the
+			// reference resolved by dropping it keeps it).
+			const slotsOf = (c: ReturnType<typeof comparable>) =>
+				c.wanted.filter(w => w.origin === "activity" && groupOf(w) === g)
+			const refKeys = new Set(slotsOf(ref).map(w => w.key))
+			const movedOut = new Set(theirs.map(m => m.fromKey))
+			const held = new Set(
+				act.incumbents.filter(i => i.syncSeen === true).map(i => i.key),
+			)
+			expect(slotsOf(got)).toHaveLength(slotsOf(ref).length)
+			for (const w of slotsOf(got))
+				expect(
+					refKeys.has(w.key) || movedOut.has(w.key) || held.has(w.key),
+					w.key,
+				).toBe(true)
+		}
+		return "limited"
+	}
 	const groupKeys = [
 		...new Set(
 			act.incumbents
@@ -618,6 +693,7 @@ describe("the split planner against the frozen pre-change planner", () => {
 				victim: 0,
 				yield: 0,
 				kept: 0,
+				limited: 0,
 				wanted: 0,
 				queries: 0,
 				moves: 0,
@@ -685,7 +761,10 @@ describe("the split planner against the frozen pre-change planner", () => {
 			// Path reach, measured over five runs of 400: reference 122-131 (30-33 %),
 			// projection 150-186, victim choice 88-110 (22-28 %), kept 1-9, yield 0
 			// (the generator never holds every slot). Every run takes one path.
+			// The trial token and the T1 move reserve move some former reference
+			// runs to "limited", which must be reached.
 			expect(reach.reference / reach.runs).toBeGreaterThanOrEqual(0.2)
+			expect(reach.limited).toBeGreaterThan(0)
 			expect(reach.victim / reach.runs).toBeGreaterThanOrEqual(0.1)
 			expect(reach.projection).toBeGreaterThan(0)
 			expect(reach.victim).toBeGreaterThan(0)
@@ -694,7 +773,8 @@ describe("the split planner against the frozen pre-change planner", () => {
 					reach.projection +
 					reach.victim +
 					reach.yield +
-					reach.kept,
+					reach.kept +
+					reach.limited,
 			).toBe(reach.runs)
 		},
 	)

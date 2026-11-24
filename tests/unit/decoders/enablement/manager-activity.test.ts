@@ -227,6 +227,7 @@ function setup(withActivity = true, type = "multimon-ng") {
 		listeners,
 		placements,
 		runningHz,
+		mono: () => mono,
 		advance: async (ms: number) => {
 			mono += ms
 			await vi.advanceTimersByTimeAsync(ms)
@@ -547,10 +548,12 @@ it("a one-off burst never moves a dsd-fme slot; a sustained transmission does", 
 	expect(f.runningHz()).not.toContain(oldHz)
 })
 
-// A burst shorter than DSD_CHALLENGE_MIN_SPAN_MS (10 s) on a digital-tier
-// channel reclaims a slot at once; the same burst on an unknown channel does not.
+// A burst shorter than DSD_CHALLENGE_MIN_SPAN_MS (10 s) reclaims a slot at
+// once only on a channel with a checked dsd-fme sync (live reclaim, T1). A
+// channel with scanner digital evidence but no sync here (class S) has no
+// live reclaim: like an unknown one it needs the 10 s rule or a burst pair.
 it.each([true, false])(
-	"a 3 s burst on a digital-tier channel reclaims a dsd-fme slot (digital=%s)",
+	"a 3 s burst without a dsd-fme sync never reclaims a dsd-fme slot (scanner digital=%s)",
 	async digital => {
 		const f = setup(true, "dsd-fme")
 		await f.m.startAll()
@@ -572,12 +575,11 @@ it.each([true, false])(
 			await f.advance(500)
 		}
 		await f.advance(1_000)
-		expect(f.runningHz().includes(challenger)).toBe(digital)
-		expect(f.runningHz().includes(incumbent.hz)).toBe(!digital)
-		if (digital)
-			expect(
-				f.placements().find(p => p.channelHz === challenger)?.activity?.reasons,
-			).toContain("digital-memory")
+		expect(f.runningHz().includes(challenger)).toBe(false)
+		expect(f.runningHz().includes(incumbent.hz)).toBe(true)
+		expect(
+			f.inputs.at(-1)!.activity!.snapshots.flatMap(s => s.channels),
+		).toContainEqual(expect.objectContaining({ hz: challenger, live: true }))
 	},
 )
 
@@ -728,6 +730,87 @@ describe("dsd-fme no-sync failures follow the source link (m1/m2)", () => {
 		expect(drop).toHaveBeenCalledWith("rtl")
 		expect(tiers.snapshot(1_100, policy).tiers).toEqual([])
 		drop.mockRestore()
+	})
+
+	it("m-1: a crash of a remembered slot counts its listened time once, not the backoff, and a disconnect in the restarted run adds nothing until reconnect + 2 s", async () => {
+		const { f, incumbent } = await start()
+		const tiers = (f.m as unknown as { dsdChannelTiers: DsdChannelTiers })
+			.dsdChannelTiers
+		const key = dsdTierKey(incumbent.decoderId, "rtl", incumbent.hz)!
+		const decoder = f.m.getDecoder(incumbent.key) as unknown as RateDecoder
+		decoder.emit("link", {
+			protocol: "dmr",
+			at: 7,
+			verified: true,
+			crcErr: false,
+			fecErrs: 0,
+		})
+		// Live during [t0, tc]: the crash tick is never energized.
+		f.heat.set(incumbent.hz, { state: "hot", score: 101, live: true })
+		const quiet = () => tiers.quiet(key, f.mono())!
+		// A pass, then its coalesced follow-ups (100 ms steps).
+		const pass = async (drain = true) => {
+			f.notify()
+			await f.advance(0)
+			if (drain) for (let i = 0; i < 5; i++) await f.advance(100)
+		}
+		const lastPass = () => f.inputs.at(-1)!.activity!.nowMonoMs
+		// t0: a pass sets the cursor (past the run's 2 s warm-up).
+		await f.advance(5_000)
+		await pass()
+		const t0 = lastPass()
+		const at0 = quiet()
+		const starts: number[] = []
+		decoder.on("started", () => starts.push(f.mono()))
+		// tc = t0 + a: the child crashes; "stopped" and "exit" both fire.
+		const a = 5_000
+		const passesAt0 = f.inputs.length
+		await f.advance(a - (f.mono() - t0))
+		const tc = f.mono()
+		// No pass in (t0, tc]: only the crash tick accounts [t0, tc].
+		expect(f.inputs.length).toBe(passesAt0)
+		decoder.running = false
+		decoder.emit("stopped")
+		decoder.emit("exit", 1, null)
+		expect(quiet().quietMs - at0.quietMs).toBe(a)
+		expect(quiet().quietLiveMs).toBe(at0.quietLiveMs)
+		f.heat.delete(incumbent.hz)
+		// The lifecycle restarts it after its backoff (tr).
+		for (let i = 0; i < 100 && starts.length === 0; i++) await f.advance(100)
+		expect(starts).toHaveLength(1)
+		const tr = starts[0]!
+		expect(tr).toBeGreaterThan(tc)
+		expect(quiet().quietMs - at0.quietMs).toBe(a)
+		// t1: the next pass, past the restarted run's warm-up.
+		await f.advance(5_000)
+		await pass()
+		const t1 = lastPass()
+		const grown = quiet().quietMs - at0.quietMs
+		expect(grown).toBe(a + (t1 - (tr + 2_000)))
+		expect(grown).not.toBe(t1 - t0)
+		expect(quiet().quietLiveMs).toBe(at0.quietLiveMs)
+		// A disconnect inside the restarted run: nothing until reconnect + 2 s.
+		let connected = true
+		f.sources.getStatus = (id: string) =>
+			id === "rtl" ? { id, connected } : undefined
+		await f.advance(1_000)
+		await pass()
+		const beforeDrop = quiet().quietMs
+		connected = false
+		await f.advance(10_000)
+		await pass()
+		expect(quiet().quietMs).toBe(beforeDrop)
+		connected = true
+		f.sources.emit("connected", "rtl")
+		const tk = f.mono()
+		await f.advance(1_999)
+		await pass(false)
+		expect(lastPass()).toBe(tk + 1_999)
+		expect(quiet().quietMs).toBe(beforeDrop)
+		await f.advance(3_001)
+		await pass()
+		expect(quiet().quietMs).toBe(beforeDrop + (lastPass() - (tk + 2_000)))
+		expect(f.runningHz()).toContain(incumbent.hz)
 	})
 
 	it("a placement without a channel frequency is never keyed (no sync, no failure)", async () => {

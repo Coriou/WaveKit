@@ -135,6 +135,8 @@ import type {
 } from "./enablement/activity-plan.js"
 import {
 	DSD_DIGITAL_HOLD_MS,
+	DSD_LISTEN_WARMUP_MS,
+	DSD_VICTIM_STOP_KILL_MS,
 	DsdChallengeEvidence,
 	DsdChannelTiers,
 	dsdChallengeKey,
@@ -179,7 +181,12 @@ import {
 } from "../utils/version.js"
 import { safeErrorFields } from "./safe-error-fields.js"
 import { processChannelInputMode } from "./channel-input-mode.js"
-import { abandonDecoderOutput, decoderOutputDrained } from "./base-decoder.js"
+import {
+	abandonDecoderOutput,
+	decoderOutputDrained,
+	resetDecoderStopKill,
+	shortenDecoderStopKill,
+} from "./base-decoder.js"
 import {
 	CHANNEL_FATE_MS,
 	channelStatsDelta,
@@ -1188,6 +1195,13 @@ export class DecoderManager extends EventEmitter {
 			startedMonoMs: number | null
 			cleanSyncMonoMs: number | null
 			demoted: boolean
+			/**
+			 * dsd-fme listened-time cursor (DsdChannelTiers.account): set at the
+			 * run's start, advanced by each pass, null once the run stopped.
+			 */
+			listenCursorMonoMs?: number | null
+			liveAtCursor?: boolean
+			connectedAtCursor?: boolean
 		}
 	>()
 	private applyingCaps = false
@@ -2748,17 +2762,38 @@ export class DecoderManager extends EventEmitter {
 				if (list) list.push(placement)
 				else vfoSecondaries.set(placement.decoderId, [placement])
 			}
+			const victimKeys = new Set(
+				(plan.activity?.moves ?? []).map(move => move.fromKey),
+			)
 			if (plan.activity) {
 				for (const move of plan.activity.moves) {
 					this.activityMoves.push({
 						sourceId: move.sourceId,
 						atMonoMs: move.atMonoMs,
 					})
-					if (move.analogRetry)
-						this.dsdChannelTiers.noteAnalogRetry(
-							dsdGroupKey(move.decoderId, move.sourceId),
+					const group = dsdGroupKey(move.decoderId, move.sourceId)
+					if (move.kind === "analog-try")
+						this.dsdChannelTiers.noteAnalogRetry(group, move.atMonoMs)
+					// A move without a lane (an older plan) counts as a retry: the
+					// longer gap, fail safe.
+					const lane = move.lane ?? "retry"
+					if (move.kind === "burst-trial")
+						this.dsdChannelTiers.noteTrial(
+							group,
+							`burst:${lane}`,
 							move.atMonoMs,
 						)
+					if (move.trial)
+						this.dsdChannelTiers.noteTrial(
+							group,
+							`trial:${lane}`,
+							move.atMonoMs,
+						)
+					if (move.kind === "reclaim") {
+						const key = dsdTierKey(move.decoderId, move.sourceId, move.toHz)
+						if (key !== null)
+							this.dsdChannelTiers.noteReclaim(key, move.atMonoMs)
+					}
 				}
 				// An activity move hands the victim's earned probation to its
 				// replacement before the victim is removed below.
@@ -2772,6 +2807,7 @@ export class DecoderManager extends EventEmitter {
 							sourceId: move.sourceId,
 							fromHz: move.fromHz,
 							toHz: move.toHz,
+							...(move.kind ? { kind: move.kind } : {}),
 							reasonCode: "activity-move",
 						},
 						"Decoder channel follows activity",
@@ -2846,7 +2882,23 @@ export class DecoderManager extends EventEmitter {
 					}
 				}
 				if (worker.placement) this.logPlacement(worker.placement, "removed")
-				await this.removeDecoder(worker.config.id)
+				// A dsd-fme activity victim stops fast: its replacement starts only
+				// after it exited (SIGTERM, SIGKILL after 1,000 ms). A victim
+				// already stopping has its pending kill brought forward to 1 s
+				// after its SIGTERM.
+				const fastStop =
+					worker.config.type === "dsd-fme" &&
+					worker.placement !== undefined &&
+					victimKeys.has(worker.placement.key)
+				if (fastStop)
+					shortenDecoderStopKill(worker.decoder, DSD_VICTIM_STOP_KILL_MS)
+				try {
+					await this.removeDecoder(worker.config.id)
+				} finally {
+					// A removal left pending (DECODER_STOP_PENDING) keeps the worker:
+					// its later stops use the default timeout again.
+					if (fastStop) resetDecoderStopKill(worker.decoder)
+				}
 			}
 			for (const parent of [...this.decoders.values()]) {
 				if (parent.owner !== "config") continue
@@ -3236,17 +3288,85 @@ export class DecoderManager extends EventEmitter {
 					startedMonoMs: running ? now : null,
 					cleanSyncMonoMs: null,
 					demoted: false,
+					listenCursorMonoMs: running ? now : null,
+					liveAtCursor: false,
+					connectedAtCursor:
+						this.sourceManager?.getStatus(placement.sourceId)?.connected ===
+						true,
 				})
-			else if (running && since.startedMonoMs === null)
+			else if (running && since.startedMonoMs === null) {
 				since.startedMonoMs = now
-			else if (!running && !state.processStartPending) {
+				since.listenCursorMonoMs ??= now
+			} else if (!running && !state.processStartPending) {
 				since.startedMonoMs = null
 				since.cleanSyncMonoMs = null
 				since.demoted = false
+				since.listenCursorMonoMs = null
 			}
 		}
 		for (const key of this.activitySince.keys())
 			if (!present.has(key)) this.activitySince.delete(key)
+	}
+
+	/**
+	 * dsd-fme listened-time tick of one running placement
+	 * (DsdChannelTiers.account): from max(cursor, run start or last reconnect
+	 * + DSD_LISTEN_WARMUP_MS) to now, counted only when the source was
+	 * connected at the cursor and now, energized only when the channel was
+	 * live at both. True when the channel decayed (its tier changed).
+	 */
+	private dsdListenTick(
+		state: DecoderState,
+		now: number,
+		live: boolean,
+	): boolean {
+		const placement = state.placement
+		if (state.config.type !== "dsd-fme" || !placement) return false
+		const since = this.activitySince.get(placement.key)
+		const cursor = since?.listenCursorMonoMs
+		if (!since || cursor === null || cursor === undefined) return false
+		const tierKey = dsdTierKey(
+			placement.decoderId,
+			placement.sourceId,
+			placement.channelHz ?? Number.NaN,
+		)
+		const connected =
+			this.sourceManager?.getStatus(placement.sourceId)?.connected === true
+		const listenFrom =
+			Math.max(
+				since.startedMonoMs ?? cursor,
+				this.sourceConnectedMono.get(placement.sourceId) ??
+					Number.NEGATIVE_INFINITY,
+			) + DSD_LISTEN_WARMUP_MS
+		const changed =
+			tierKey !== null &&
+			since.connectedAtCursor === true &&
+			connected &&
+			this.dsdChannelTiers.account(
+				tierKey,
+				Math.max(cursor, listenFrom),
+				now,
+				since.liveAtCursor === true && live,
+			)
+		since.listenCursorMonoMs = now
+		since.liveAtCursor = live
+		since.connectedAtCursor = connected
+		return changed
+	}
+
+	/** A dsd-fme run stopped or exited: its listened time up to now counts (not energized), then none until its next start. */
+	private dsdListenEnd(state: DecoderState): void {
+		if (
+			state.config.type !== "dsd-fme" ||
+			!state.placement ||
+			!this.config.enablement?.activity
+		)
+			return
+		const since = this.activitySince.get(state.placement.key)
+		if (!since || since.listenCursorMonoMs == null) return
+		const now = this.activityMonoNow()
+		if (this.dsdListenTick(state, now, false)) this.requestActivityPass()
+		since.listenCursorMonoMs = null
 	}
 
 	/**
@@ -3332,10 +3452,27 @@ export class DecoderManager extends EventEmitter {
 			)
 				// The failed run goes on: its cooldown counts from its end.
 				this.dsdChannelTiers.renewFailure(tierKey, now, activity.policy)
+			// The current run's listened dwell without a sync, from the later of
+			// its start, its last sync and the source's reconnect.
+			const noSyncRun =
+				tierKey !== null &&
+				running &&
+				since?.startedMonoMs !== null &&
+				since?.startedMonoMs !== undefined &&
+				this.sourceManager?.getStatus(placement.sourceId)?.connected === true &&
+				now -
+					Math.max(
+						since.startedMonoMs,
+						since.cleanSyncMonoMs ?? Number.NEGATIVE_INFINITY,
+						this.sourceConnectedMono.get(placement.sourceId) ??
+							Number.NEGATIVE_INFINITY,
+					) >=
+					activity.policy.dwellMs
 			incumbents.push({
 				...(syncSeen
 					? { syncSeen: true, syncUntilMonoMs: syncUntilMonoMs! }
 					: {}),
+				...(tierKey !== null ? { noSyncRun } : {}),
 				key: placement.key,
 				decoderId: placement.decoderId,
 				sourceId: placement.sourceId,
@@ -3406,22 +3543,57 @@ export class DecoderManager extends EventEmitter {
 			}
 		// R2: each pass records the energy timestamps of its dsd-fme answers;
 		// only channels past the hysteresis may displace a running slot.
+		// Their live flags also open and close each channel's burst runs, and
+		// feed the listened-time accounting below.
+		const liveNow = new Map<string, boolean>()
 		for (const query of queries) {
 			if (query.decoderType !== "dsd-fme") continue
 			const ready = readySnapshot(query, snapshots)
-			for (const channel of ready?.channels ?? [])
+			for (const channel of ready?.channels ?? []) {
+				const key = dsdChallengeKey(
+					query.decoderId,
+					query.epoch.sourceId,
+					channel.hz,
+				)
+				liveNow.set(key, channel.live)
 				this.dsdChallengeEvidence.note(
-					dsdChallengeKey(query.decoderId, query.epoch.sourceId, channel.hz),
+					key,
 					channel.lastEnergyMonoMs,
 					now,
+					channel.live,
 				)
+			}
+		}
+		// Listened time of every running dsd-fme placement (slot, VFO or primary).
+		let decayed = false
+		for (const state of this.decoders.values()) {
+			const placement = state.placement
+			if (
+				placement?.channelHz == null ||
+				state.config.type !== "dsd-fme" ||
+				!state.decoder.getStatus().running
+			)
+				continue
+			const key = dsdChallengeKey(
+				placement.decoderId,
+				placement.sourceId,
+				placement.channelHz,
+			)
+			decayed =
+				this.dsdListenTick(state, now, liveNow.get(key) === true) || decayed
 		}
 		return {
 			...input,
 			activity: {
 				...plannerActivity,
+				...(decayed
+					? {
+							tiers: this.dsdChannelTiers.snapshot(now, activity.policy).tiers,
+						}
+					: {}),
 				snapshots,
 				confirmedChallengers: this.dsdChallengeEvidence.snapshot(now),
+				burstPairedChallengers: this.dsdChallengeEvidence.burstPairedKeys(now),
 			},
 			...(grouping ? { grouping } : {}),
 		}
@@ -5403,6 +5575,11 @@ export class DecoderManager extends EventEmitter {
 					startedMonoMs: now,
 					cleanSyncMonoMs: null,
 					demoted: false,
+					listenCursorMonoMs: now,
+					liveAtCursor: false,
+					connectedAtCursor:
+						this.sourceManager?.getStatus(state.placement.sourceId)
+							?.connected === true,
 				})
 			}
 			state.lifecycle?.kick()
@@ -5429,6 +5606,7 @@ export class DecoderManager extends EventEmitter {
 		// Handle stopped event
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("stopped", () => {
+			this.dsdListenEnd(state)
 			if (state.lifecycle && decoder.getStatus().running) return
 			state.lifecycle?.exited()
 			if (!decoder.getStatus().running && !state.lifecycle?.pending) {
@@ -5464,6 +5642,7 @@ export class DecoderManager extends EventEmitter {
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("exit", (code: number | null, signal: string | null) => {
 			try {
+				this.dsdListenEnd(state)
 				this.handleDecoderExit(state, code, signal)
 			} catch (err) {
 				this.log.error(

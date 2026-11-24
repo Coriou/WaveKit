@@ -341,6 +341,40 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	}
 
 	/**
+	 * SIGKILL this long after SIGTERM when a stop has not finished (a manager
+	 * may shorten it). Read when a stop arms its kill timer; a stop already
+	 * pending follows a shorter value through shortenStopKill.
+	 */
+	stopKillAfterMs = GRACEFUL_STOP_TIMEOUT
+	/** The armed SIGKILL of a pending stop: its SIGTERM time and due time (performance clock). */
+	private pendingKill: {
+		termAtMs: number
+		dueAtMs: number
+		timer: ReturnType<typeof setTimeout>
+		fire: () => void
+	} | null = null
+
+	/**
+	 * Sets the SIGKILL delay to `ms` for later stops, and re-arms the kill of a
+	 * stop already pending to `ms` after its SIGTERM when that is sooner (at
+	 * once when that time has passed). It never delays a pending kill.
+	 */
+	shortenStopKill(ms: number): void {
+		if (!Number.isFinite(ms) || ms < 0) return
+		this.stopKillAfterMs = ms
+		const pending = this.pendingKill
+		if (!pending) return
+		const due = pending.termAtMs + ms
+		if (due >= pending.dueAtMs) return
+		clearTimeout(pending.timer)
+		pending.dueAtMs = due
+		pending.timer = setTimeout(
+			pending.fire,
+			Math.max(0, due - performance.now()),
+		)
+	}
+
+	/**
 	 * Stops the decoder process gracefully (Requirement 4.3).
 	 * Sends SIGTERM first, waits 5 seconds, then SIGKILL if needed.
 	 */
@@ -360,17 +394,30 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 				return
 			}
 
-			// Set up timeout for SIGKILL
-			const killTimeout = setTimeout(() => {
+			// Set up timeout for SIGKILL (the delay as of now; shortenStopKill
+			// may bring it forward).
+			const fire = (): void => {
+				if (this.pendingKill === kill) this.pendingKill = null
 				if (proc.exitCode !== null || proc.signalCode !== null) return
 				this.logger.warn({ pid }, "Graceful stop timeout, sending SIGKILL")
 				signalDecoder(proc, "SIGKILL")
-			}, GRACEFUL_STOP_TIMEOUT)
+			}
+			const termAtMs = performance.now()
+			const kill = {
+				termAtMs,
+				dueAtMs: termAtMs + this.stopKillAfterMs,
+				timer: setTimeout(fire, this.stopKillAfterMs),
+				fire,
+			}
+			// A second stop of the same run arms its own timer; the earlier one
+			// still fires (each checks for an exit first).
+			this.pendingKill = kill
 
 			// Failed spawns emit close without exit; running processes emit exit
 			// before inherited pipeline stdio necessarily closes.
 			const finish = (): void => {
-				clearTimeout(killTimeout)
+				clearTimeout(kill.timer)
+				if (this.pendingKill === kill) this.pendingKill = null
 				proc.off("exit", finish)
 				proc.off("close", finish)
 				if (this.process === proc) this.process = null
@@ -694,4 +741,15 @@ export function decoderOutputDrained(decoder: object): Promise<void> {
 /** BaseDecoder.abandonOutput on a BaseDecoder; nothing for another decoder, whose output the manager cannot see. */
 export function abandonDecoderOutput(decoder: object): void {
 	if (decoder instanceof BaseDecoder) decoder.abandonOutput()
+}
+
+/** BaseDecoder.shortenStopKill for a manager-held decoder (a no-op for others). */
+export function shortenDecoderStopKill(decoder: object, ms: number): void {
+	if (decoder instanceof BaseDecoder) decoder.shortenStopKill(ms)
+}
+
+/** Restores the default SIGKILL delay for later stops (a pending stop keeps its timer). */
+export function resetDecoderStopKill(decoder: object): void {
+	if (decoder instanceof BaseDecoder)
+		decoder.stopKillAfterMs = GRACEFUL_STOP_TIMEOUT
 }

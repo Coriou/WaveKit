@@ -2,21 +2,30 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
 	DSD_ANALOG_TRY_FAILURES,
-	DSD_DIGITAL_DECAY_FAILURES,
+	DSD_DECAY_LIVE_MS,
+	DSD_DECAY_QUIET_MS,
 	DSD_DIGITAL_HOLD_MS,
 	DSD_DIGITAL_MEMORY_MS,
+	DSD_LISTEN_WARMUP_MS,
 	DSD_MAX_DEMOTIONS,
 	DSD_MAX_RETRY_GROUPS,
 	DSD_MAX_TIERS,
-	DSD_NOSYNC_FORGET_MS,
+	DSD_QUIET_VICTIM_MS,
+	DSD_RECLAIM_BUDGET,
+	DSD_RECLAIM_RESERVE,
+	DSD_RECLAIM_WINDOW_MS,
 	DSD_TIER_RASTER_HZ,
+	DSD_RETRY_TRIAL_GAP_MS,
+	DSD_TRIAL_GAP_MS,
 	DSD_TRY_MEMORY_MS,
+	DSD_VICTIM_STOP_KILL_MS,
 	DsdChannelTiers,
 	dsdGroupKey,
 	dsdNoSyncCooldownAfter,
 	dsdNoSyncCooldownMs,
 	dsdSyncProtectionUntil,
 	dsdTierKey,
+	dsdTrialLane,
 	isDsdActivitySync,
 } from "../../../../src/decoders/enablement/dsd-activity.js"
 import {
@@ -138,7 +147,7 @@ describe("dsd-fme no-sync dwell cooldown", () => {
 const key = (hz: number) => dsdTierKey("voice", "rtl", hz)!
 
 describe("dsd-fme channel tiers (transition table)", () => {
-	it("escalates the no-sync cooldown 120, 240, 480, 960, 1 920 s and caps it", () => {
+	it("states the bounds", () => {
 		expect(
 			[1, 2, 3, 4, 5, 6, 50].map(n => dsdNoSyncCooldownAfter(n, policy)),
 		).toEqual([
@@ -151,7 +160,16 @@ describe("dsd-fme channel tiers (transition table)", () => {
 		expect(dsdNoSyncCooldownAfter(NaN, policy)).toBe(120_000)
 		expect(DSD_DIGITAL_HOLD_MS).toBe(1_800_000)
 		expect(DSD_DIGITAL_MEMORY_MS).toBe(21_600_000)
-		expect(DSD_NOSYNC_FORGET_MS).toBe(900_000)
+		expect(DSD_DECAY_QUIET_MS).toBe(3_600_000)
+		expect(DSD_DECAY_LIVE_MS).toBe(600_000)
+		expect(DSD_LISTEN_WARMUP_MS).toBe(2_000)
+		expect(DSD_RECLAIM_BUDGET).toBe(2)
+		expect(DSD_RECLAIM_WINDOW_MS).toBe(1_800_000)
+		expect(DSD_RECLAIM_RESERVE).toBe(2)
+		expect(DSD_QUIET_VICTIM_MS).toBe(60_000)
+		expect(DSD_TRIAL_GAP_MS).toBe(300_000)
+		expect(DSD_TRY_MEMORY_MS).toBe(21_600_000)
+		expect(DSD_VICTIM_STOP_KILL_MS).toBe(1_000)
 		expect(DSD_MAX_TIERS).toBe(256)
 	})
 
@@ -175,14 +193,14 @@ describe("dsd-fme channel tiers (transition table)", () => {
 			expect(dsdTierKey("voice", "rtl", hz)).toBeNull()
 	})
 
-	it("each failure needs a re-try to escalate; a sync resets to digital", () => {
+	it("each failure of a channel never synced needs a re-try to escalate; a sync resets", () => {
 		const tiers = new DsdChannelTiers()
 		const k = key(446_006_250)
 		let now = 1_000
 		for (const n of [1, 2, 3, 4, 5, 6]) {
 			tiers.noteFailure(k, now, policy)
 			const [e] = tiers.snapshot(now, policy).tiers
-			expect(e).toMatchObject({ failures: n, notedMonoMs: now })
+			expect(e).toMatchObject({ tier: "nosync", failures: n, notedMonoMs: now })
 			expect(e!.untilMonoMs - now).toBe(dsdNoSyncCooldownAfter(n, policy))
 			now = e!.untilMonoMs + 1
 		}
@@ -192,6 +210,9 @@ describe("dsd-fme channel tiers (transition table)", () => {
 			tier: "digital",
 			failures: 0,
 			lastSyncMonoMs: now + 1,
+			decayed: false,
+			quietMs: 0,
+			reclaims: 0,
 		})
 	})
 
@@ -204,9 +225,10 @@ describe("dsd-fme channel tiers (transition table)", () => {
 		expect(snap.tiers[0]).toMatchObject({
 			failures: 1,
 			untilMonoMs: 1_000_000 + 120_000,
+			notedMonoMs: 1_000_000,
 		})
-		expect(snap.tries).toEqual([{ key: k, atMonoMs: 1_000_000 }])
-		// Never shortens a cooldown; no entry, a digital entry or a bad clock: no-op.
+		// Never shortens a cooldown; no entry, a remembered undecayed entry or a
+		// bad clock: no-op.
 		tiers.renewFailure(k, 1_000_001 - 120_000, policy)
 		expect(tiers.snapshot(1_000_000, policy).tiers[0]!.untilMonoMs).toBe(
 			1_120_000,
@@ -221,89 +243,113 @@ describe("dsd-fme channel tiers (transition table)", () => {
 		])
 	})
 
-	it("a failure on a held digital channel leaves it unchanged (quiet between bursts)", () => {
-		const tiers = new DsdChannelTiers()
-		const k = key(446_106_250)
-		tiers.noteSync(k, 0)
-		tiers.noteFailure(k, 60_000, policy)
-		tiers.noteFailure(k, DSD_DIGITAL_HOLD_MS - 1, policy)
-		expect(
-			tiers.snapshot(DSD_DIGITAL_HOLD_MS - 1, policy).tiers[0],
-		).toMatchObject({ tier: "digital", lastSyncMonoMs: 0, failures: 0 })
-	})
-
-	it.each([0, 1])(
-		"past the 30 min hold (+%i ms) failures count; the second turns digital into nosync",
-		d => {
-			expect(DSD_DIGITAL_DECAY_FAILURES).toBe(2)
+	it.each([0, 1, DSD_DIGITAL_HOLD_MS, 2 * DSD_DIGITAL_HOLD_MS])(
+		"a failure of a remembered channel that has not decayed leaves it unchanged (%i ms after the sync)",
+		at => {
 			const tiers = new DsdChannelTiers()
 			const k = key(446_106_250)
 			tiers.noteSync(k, 0)
-			const first = DSD_DIGITAL_HOLD_MS + d
-			tiers.noteFailure(k, first, policy)
-			expect(tiers.snapshot(first, policy).tiers[0]).toMatchObject({
+			tiers.noteFailure(k, at, policy)
+			tiers.noteFailure(k, at + policy.dwellMs, policy)
+			expect(
+				tiers.snapshot(at + policy.dwellMs, policy).tiers[0],
+			).toMatchObject({
 				tier: "digital",
-				failures: 1,
 				lastSyncMonoMs: 0,
-				notedMonoMs: first,
+				failures: 0,
+				decayed: false,
 			})
-			// The earliest second failed run: one 20 s dwell later.
-			const second = first + policy.dwellMs
-			tiers.noteFailure(k, second, policy)
-			const [e] = tiers.snapshot(second, policy).tiers
-			expect(e).toMatchObject({ tier: "nosync", failures: 2 })
-			// cooldown(2) = 240 s; at the earliest 1 800 000 + 20 000 ms after the sync.
-			expect(e!.untilMonoMs - second).toBe(240_000)
-			expect(second).toBe(1_820_000 + d)
-			expect(tiers.held(k, second)).toBe(false)
-			// It then escalates as any nosync entry.
-			tiers.noteFailure(k, e!.untilMonoMs, policy)
-			expect(tiers.snapshot(e!.untilMonoMs, policy).tiers[0]).toMatchObject({
-				failures: 3,
+			expect(tiers.held(k, at + policy.dwellMs)).toBe(
+				at + policy.dwellMs < DSD_DIGITAL_HOLD_MS,
+			)
+		},
+	)
+
+	it.each([-1, 0])(
+		"decays at 60 min of listened quiet (%i ms), keeps the last sync, and failures then escalate",
+		d => {
+			const tiers = new DsdChannelTiers()
+			const k = key(446_106_250)
+			tiers.noteSync(k, 0)
+			// Listened in two stretches with a 1 h gap nobody listened in.
+			expect(tiers.account(k, 0, DSD_DECAY_QUIET_MS / 2, false)).toBe(false)
+			const later = 2 * DSD_DECAY_QUIET_MS
+			const decays = tiers.account(
+				k,
+				later,
+				later + DSD_DECAY_QUIET_MS / 2 + d,
+				false,
+			)
+			expect(decays).toBe(d === 0)
+			const now = later + DSD_DECAY_QUIET_MS / 2 + d
+			expect(tiers.snapshot(now, policy).tiers[0]).toMatchObject({
+				tier: "digital",
+				lastSyncMonoMs: 0,
+				decayed: d === 0,
+				quietMs: DSD_DECAY_QUIET_MS + d,
+			})
+			expect(tiers.held(k, 1)).toBe(d !== 0)
+			tiers.noteFailure(k, now, policy)
+			expect(tiers.snapshot(now, policy).tiers[0]!.failures).toBe(
+				d === 0 ? 1 : 0,
+			)
+		},
+	)
+
+	it.each([-1, 0])(
+		"decays at 10 min of energized listening (%i ms); time before the sync or counted twice is not counted",
+		d => {
+			const tiers = new DsdChannelTiers()
+			const k = key(446_106_250)
+			tiers.noteSync(k, 1_000)
+			// Before the sync: nothing. A VFO and a slot over one stretch: once.
+			tiers.account(k, 0, 1_000, true)
+			tiers.account(k, 1_000, 1_000 + DSD_DECAY_LIVE_MS / 2, true)
+			tiers.account(k, 1_000, 1_000 + DSD_DECAY_LIVE_MS / 2, true)
+			tiers.account(
+				k,
+				1_000 + DSD_DECAY_LIVE_MS / 2,
+				1_000 + DSD_DECAY_LIVE_MS + d,
+				true,
+			)
+			expect(
+				tiers.snapshot(1_000 + DSD_DECAY_LIVE_MS + d, policy).tiers[0],
+			).toMatchObject({
+				decayed: d === 0,
+				quietMs: DSD_DECAY_LIVE_MS + d,
+				quietLiveMs: DSD_DECAY_LIVE_MS + d,
 			})
 		},
 	)
 
-	it("a sync past the hold resets the decay count", () => {
-		const tiers = new DsdChannelTiers()
-		const k = key(446_106_250)
-		tiers.noteSync(k, 0)
-		tiers.noteFailure(k, DSD_DIGITAL_HOLD_MS, policy)
-		tiers.noteSync(k, DSD_DIGITAL_HOLD_MS + 1)
-		// The next failure lies within the renewed hold: unchanged.
-		tiers.noteFailure(k, DSD_DIGITAL_HOLD_MS + 2, policy)
-		expect(
-			tiers.snapshot(DSD_DIGITAL_HOLD_MS + 2, policy).tiers[0],
-		).toMatchObject({ tier: "digital", failures: 0 })
-		// Past the renewed hold one failure keeps it digital (count 1, not 2).
-		const later = 2 * DSD_DIGITAL_HOLD_MS + 1
-		tiers.noteFailure(k, later, policy)
-		expect(tiers.snapshot(later, policy).tiers[0]).toMatchObject({
-			tier: "digital",
-			failures: 1,
-		})
-	})
-
 	it.each([-1, 0, 1])(
-		"holds a digital channel strictly within 30 min and remembers it strictly within 6 h (%i ms)",
+		"remembers a sync strictly within 6 h (%i ms); failures stay 6 h after the last try",
 		d => {
 			const tiers = new DsdChannelTiers()
 			const k = key(446_106_250)
 			tiers.noteSync(k, 0)
-			expect(tiers.held(k, DSD_DIGITAL_HOLD_MS + d)).toBe(d < 0)
+			tiers.account(k, 0, DSD_DECAY_QUIET_MS, false)
+			tiers.noteFailure(k, DSD_DECAY_QUIET_MS, policy)
+			const at = DSD_DIGITAL_MEMORY_MS + d
+			const [e] = tiers.snapshot(at, policy).tiers
+			expect(e!.tier).toBe(d < 0 ? "digital" : "nosync")
+			expect(e!.lastSyncMonoMs).toBe(d < 0 ? 0 : undefined)
+			expect(e!.failures).toBe(1)
+			// The entry goes 6 h after its last try.
 			expect(
-				tiers.snapshot(DSD_DIGITAL_MEMORY_MS + d, policy).tiers,
+				tiers.snapshot(DSD_DECAY_QUIET_MS + DSD_TRY_MEMORY_MS + d, policy)
+					.tiers,
 			).toHaveLength(d < 0 ? 1 : 0)
 		},
 	)
 
 	it.each([-1, 0, 1])(
-		"forgets a no-sync entry strictly at until + 15 min (%i ms), failures reset",
+		"failures are kept strictly 6 h after the last try (%i ms), then reset",
 		d => {
 			const tiers = new DsdChannelTiers()
 			const k = key(446_006_250)
 			tiers.noteFailure(k, 0, policy)
-			const at = 120_000 + DSD_NOSYNC_FORGET_MS + d
+			const at = DSD_TRY_MEMORY_MS + d
 			expect(tiers.snapshot(at, policy).tiers).toHaveLength(d < 0 ? 1 : 0)
 			tiers.noteFailure(k, at, policy)
 			expect(tiers.snapshot(at, policy).tiers[0]!.failures).toBe(d < 0 ? 2 : 1)
@@ -311,23 +357,67 @@ describe("dsd-fme channel tiers (transition table)", () => {
 	)
 
 	it.each([-1, 0, 1])(
-		"keeps try times strictly within 6 h (%i ms) and the group try strictly within 1 920 s",
+		"group gates: fresh trial and burst strictly within 300 s, retry within 600 s, analog strictly within 1 920 s (%i ms)",
 		d => {
+			expect(DSD_RETRY_TRIAL_GAP_MS).toBe(600_000)
 			const tiers = new DsdChannelTiers()
-			tiers.noteFailure(key(446_006_250), 0, policy)
-			tiers.noteAnalogRetry(dsdGroupKey("voice", "rtl"), 0)
-			expect(tiers.snapshot(DSD_TRY_MEMORY_MS + d, policy).tries).toHaveLength(
-				d < 0 ? 1 : 0,
+			const g = dsdGroupKey("voice", "rtl")
+			tiers.noteTrial(g, "trial:fresh", 0)
+			tiers.noteTrial(g, "burst:fresh", 0)
+			tiers.noteTrial(g, "trial:retry", 0)
+			tiers.noteTrial(g, "burst:retry", 0)
+			const gates = (at: number) =>
+				tiers
+					.snapshot(at, policy)
+					.trials.map(t => t.gate)
+					.sort()
+			// Each lane keeps its own time: the fresh gates go at 300 s, the
+			// retry gates stay until 600 s.
+			expect(gates(DSD_TRIAL_GAP_MS + d)).toEqual(
+				d < 0
+					? ["burst:fresh", "burst:retry", "trial:fresh", "trial:retry"]
+					: ["burst:retry", "trial:retry"],
 			)
+			expect(gates(DSD_RETRY_TRIAL_GAP_MS + d)).toEqual(
+				d < 0 ? ["burst:retry", "trial:retry"] : [],
+			)
+			expect(dsdTrialLane(0, null)).toBe("fresh")
+			expect(dsdTrialLane(1, null)).toBe("retry")
+			expect(dsdTrialLane(0, 5)).toBe("retry")
 			const t2 = new DsdChannelTiers()
-			t2.noteAnalogRetry(dsdGroupKey("voice", "rtl"), 0)
+			t2.noteAnalogRetry(g, 0)
 			expect(t2.snapshot(1_920_000 + d, policy).analogRetries).toHaveLength(
 				d < 0 ? 1 : 0,
 			)
 		},
 	)
 
-	it("keeps exactly 256 tiers, 256 try times and 256 group tries; drops past the bound", () => {
+	it("reclaims count in a 30 min window and a sync resets them", () => {
+		const tiers = new DsdChannelTiers()
+		const k = key(446_106_250)
+		tiers.noteReclaim(k, 0)
+		expect(tiers.snapshot(0, policy).tiers).toEqual([])
+		tiers.noteSync(k, 0)
+		tiers.noteReclaim(k, 10)
+		tiers.noteReclaim(k, 20)
+		expect(tiers.snapshot(20, policy).tiers[0]).toMatchObject({
+			reclaims: 2,
+			reclaimWindowMonoMs: 10,
+		})
+		tiers.noteReclaim(k, 10 + DSD_RECLAIM_WINDOW_MS - 1)
+		expect(tiers.snapshot(30, policy).tiers[0]!.reclaims).toBe(3)
+		tiers.noteReclaim(k, 10 + DSD_RECLAIM_WINDOW_MS)
+		expect(tiers.snapshot(30, policy).tiers[0]).toMatchObject({
+			reclaims: 1,
+			reclaimWindowMonoMs: 10 + DSD_RECLAIM_WINDOW_MS,
+		})
+		tiers.noteSync(k, 2 * DSD_RECLAIM_WINDOW_MS)
+		expect(
+			tiers.snapshot(2 * DSD_RECLAIM_WINDOW_MS, policy).tiers[0],
+		).toMatchObject({ reclaims: 0 })
+	})
+
+	it("keeps exactly 256 tiers and 256 group gates; drops past the bound", () => {
 		const tiers = new DsdChannelTiers()
 		for (let i = 0; i < DSD_MAX_TIERS; i++) {
 			tiers.noteFailure(key(400_000_000 + i * 6_250), i, policy)
@@ -335,91 +425,59 @@ describe("dsd-fme channel tiers (transition table)", () => {
 		}
 		let snap = tiers.snapshot(300, policy)
 		expect(snap.tiers).toHaveLength(256)
-		expect(snap.tries).toHaveLength(256)
 		expect(snap.analogRetries).toHaveLength(DSD_MAX_RETRY_GROUPS)
 		tiers.noteFailure(key(500_000_000), 300, policy)
 		tiers.noteAnalogRetry(dsdGroupKey("extra", "rtl"), 300)
 		snap = tiers.snapshot(300, policy)
 		expect(snap.tiers).toHaveLength(256)
-		expect(snap.tries).toHaveLength(256)
 		expect(snap.analogRetries).toHaveLength(256)
 		expect(snap.tiers.some(e => e.key === key(400_000_000))).toBe(false)
-		expect(snap.tries.some(e => e.key === key(400_000_000))).toBe(false)
 		expect(
 			snap.analogRetries.some(e => e.groupKey === dsdGroupKey("d0", "rtl")),
 		).toBe(false)
 		expect(DSD_MAX_DEMOTIONS).toBe(256)
 	})
 
-	it("a renewed failure keeps try times at 256 when it re-adds a trimmed try", () => {
-		const tiers = new DsdChannelTiers()
-		const hz = (i: number) => 400_000_000 + i * 6_250
-		const x = key(hz(0))
-		// X fails 5 times (cooldown(5) = 1,920 s): its nosync entry lives until
-		// 4 ms + 1,920 s + 15 min = 2,820,004 ms (last failure at 4 ms).
-		for (let t = 0; t < 5; t++) tiers.noteFailure(x, t, policy)
-		// y1 fails at 10 ms and is forgotten at 10 ms + cooldown(1) 120 s +
-		// 15 min = 1,020,010 ms, swept by the snapshot at 1,100,000 ms (its
-		// try time stays 6 h).
-		tiers.noteFailure(key(hz(1)), 10, policy)
-		expect(tiers.snapshot(1_100_000, policy).tiers).toHaveLength(1)
-		// y2..y256 fail: 257 try keys trim X, the oldest; entries are X plus
-		// 255 = 256, so X's entry lives.
-		for (let i = 2; i <= DSD_MAX_TIERS; i++)
-			tiers.noteFailure(key(hz(i)), 1_100_000 + i, policy)
-		let snap = tiers.snapshot(1_200_000, policy)
-		expect(snap.tries).toHaveLength(DSD_MAX_TIERS)
-		expect(snap.tries.some(e => e.key === x)).toBe(false)
-		expect(snap.tiers.some(e => e.key === x && e.tier === "nosync")).toBe(true)
-		// The still-running failed run of X renews: its try is re-added and
-		// the oldest other try goes, 256 kept, X's newest.
-		tiers.renewFailure(x, 1_200_000, policy)
-		snap = tiers.snapshot(1_200_000, policy)
-		expect(snap.tries).toHaveLength(DSD_MAX_TIERS)
-		expect(snap.tries.at(-1)).toEqual({ key: x, atMonoMs: 1_200_000 })
-		expect(snap.tries.some(e => e.key === key(hz(1)))).toBe(false)
-	})
-
 	it("past the bound sweeps forgotten entries before evicting a live one", () => {
 		const tiers = new DsdChannelTiers()
 		const hz = (i: number) => 400_000_000 + i * 6_250
-		// One nosync at t = 0 (forgotten at cooldown(1) + 15 min = 1,020 s),
-		// then 255 digital entries written at t = 1,000,000 (6 h memory).
+		// One failure at t = 0 (forgotten 6 h later), then 255 synced entries.
 		tiers.noteFailure(key(hz(0)), 0, policy)
-		const forget = dsdNoSyncCooldownAfter(1, policy) + DSD_NOSYNC_FORGET_MS
 		for (let i = 1; i < DSD_MAX_TIERS; i++) tiers.noteSync(key(hz(i)), 1e6)
-		// 257th write at the forget time: the forgotten entry goes, no live one.
+		const forget = DSD_TRY_MEMORY_MS
 		tiers.noteFailure(key(hz(500)), forget, policy)
 		const snap = tiers.snapshot(forget, policy).tiers
 		expect(snap).toHaveLength(DSD_MAX_TIERS)
 		expect(snap.some(t => t.key === key(hz(0)))).toBe(false)
 		for (let i = 1; i < DSD_MAX_TIERS; i++)
 			expect(snap.some(t => t.key === key(hz(i)))).toBe(true)
-		expect(snap.some(t => t.key === key(hz(500)))).toBe(true)
 	})
 
-	it("a new nosync never evicts itself: the oldest other nosync goes, else the oldest digital", () => {
+	it("eviction: entries without a sync go first, oldest try first, then the oldest sync", () => {
 		const hz = (i: number) => 400_000_000 + i * 6_250
-		// 256 live digital entries: the new nosync survives, the oldest digital goes.
+		// 255 synced entries + one failed entry tried at 0: the failed one goes.
 		const a = new DsdChannelTiers()
-		for (let i = 0; i < DSD_MAX_TIERS; i++) a.noteSync(key(hz(i)), i)
-		a.noteFailure(key(hz(900)), 300, policy)
+		a.noteFailure(key(hz(0)), 0, policy)
+		for (let i = 1; i < DSD_MAX_TIERS; i++) a.noteSync(key(hz(i)), i)
+		a.noteSync(key(hz(900)), 300)
 		let snap = a.snapshot(300, policy).tiers
 		expect(snap).toHaveLength(DSD_MAX_TIERS)
-		expect(snap.find(t => t.key === key(hz(900)))?.tier).toBe("nosync")
 		expect(snap.some(t => t.key === key(hz(0)))).toBe(false)
-		expect(snap.some(t => t.key === key(hz(1)))).toBe(true)
-		// 255 digital entries + one older nosync: that nosync goes, every digital stays.
+		// Two failed entries: the one tried longer ago goes, whatever was written last.
 		const b = new DsdChannelTiers()
-		b.noteFailure(key(hz(0)), 0, policy)
-		for (let i = 1; i < DSD_MAX_TIERS; i++) b.noteSync(key(hz(i)), i)
-		b.noteFailure(key(hz(900)), 300, policy)
+		b.noteFailure(key(hz(0)), 50, policy)
+		b.noteFailure(key(hz(1)), 10, policy)
+		for (let i = 2; i < DSD_MAX_TIERS; i++) b.noteSync(key(hz(i)), i)
+		b.noteSync(key(hz(900)), 300)
 		snap = b.snapshot(300, policy).tiers
-		expect(snap).toHaveLength(DSD_MAX_TIERS)
-		expect(snap.some(t => t.key === key(hz(0)))).toBe(false)
-		expect(snap.filter(t => t.tier === "digital")).toHaveLength(
-			DSD_MAX_TIERS - 1,
-		)
+		expect(snap.some(t => t.key === key(hz(1)))).toBe(false)
+		expect(snap.some(t => t.key === key(hz(0)))).toBe(true)
+		// Only synced entries: the oldest sync goes, the new one survives.
+		const c = new DsdChannelTiers()
+		for (let i = 0; i < DSD_MAX_TIERS; i++) c.noteSync(key(hz(i)), 1_000 - i)
+		c.noteSync(key(hz(900)), 2_000)
+		snap = c.snapshot(2_000, policy).tiers
+		expect(snap.some(t => t.key === key(hz(DSD_MAX_TIERS - 1)))).toBe(false)
 		expect(snap.some(t => t.key === key(hz(900)))).toBe(true)
 	})
 
@@ -428,13 +486,14 @@ describe("dsd-fme channel tiers (transition table)", () => {
 		tiers.noteSync(dsdTierKey("voice", "a", 446_106_250)!, 0)
 		tiers.noteFailure(dsdTierKey("voice", "a", 446_006_250)!, 0, policy)
 		tiers.noteAnalogRetry(dsdGroupKey("voice", "a"), 0)
+		tiers.noteTrial(dsdGroupKey("voice", "a"), "trial:fresh", 0)
 		tiers.noteSync(dsdTierKey("voice", "b", 446_106_250)!, 0)
 		tiers.dropSource("a")
 		const snap = tiers.snapshot(1, policy)
 		expect(snap.tiers.map(t => t.key)).toEqual([
 			dsdTierKey("voice", "b", 446_106_250),
 		])
-		expect(snap.tries).toEqual([])
+		expect(snap.trials).toEqual([])
 		expect(snap.analogRetries).toEqual([])
 	})
 
@@ -443,15 +502,17 @@ describe("dsd-fme channel tiers (transition table)", () => {
 		expect(tiers.noteSync(key(446_106_250), NaN)).toBe(false)
 		tiers.noteFailure(key(446_006_250), Infinity, policy)
 		tiers.noteAnalogRetry(dsdGroupKey("voice", "rtl"), NaN)
+		tiers.noteReclaim(key(446_106_250), NaN)
+		expect(tiers.account(key(446_106_250), 0, NaN, true)).toBe(false)
 		expect(tiers.snapshot(0, policy)).toEqual({
 			tiers: [],
 			analogRetries: [],
-			tries: [],
+			trials: [],
 		})
 	})
 
-	it("evicts nosync before digital, oldest write first (insertion renewed on every write)", () => {
-		// Feature: dsd-digital-tiers, Property 1: a digital entry is never evicted while another nosync entry exists
+	it("never evicts the entry just written; at most 256 kept", () => {
+		// Feature: dsd-digital-tiers, Property 1: the bound holds and the newest write survives
 		// Validates: Requirements 3.22
 		fc.assert(
 			fc.property(
@@ -464,33 +525,204 @@ describe("dsd-fme channel tiers (transition table)", () => {
 				),
 				ops => {
 					const tiers = new DsdChannelTiers()
-					const kinds = new Map<string, "digital" | "nosync">()
 					let now = 0
 					for (const op of ops) {
 						now += 1
 						const k = key(400_000_000 + op.ch * 6_250)
-						const before = new Set(
-							tiers.snapshot(now, policy).tiers.map(t => t.key),
-						)
 						if (op.sync) tiers.noteSync(k, now)
 						else tiers.noteFailure(k, now, policy)
 						const after = tiers.snapshot(now, policy).tiers
 						expect(after.length).toBeLessThanOrEqual(DSD_MAX_TIERS)
-						const present = new Set(after.map(t => t.key))
-						const evicted = [...before].filter(x => !present.has(x))
-						// The entry just written always survives its own write.
-						expect(present.has(k)).toBe(true)
-						for (const e of evicted)
-							if (kinds.get(e) === "digital")
-								expect(
-									after.some(t => t.tier === "nosync" && t.key !== k),
-								).toBe(false)
-						kinds.clear()
-						for (const t of after) kinds.set(t.key, t.tier)
+						expect(after.some(t => t.key === k)).toBe(true)
 					}
 				},
 			),
 			{ numRuns: 100 },
+		)
+	})
+})
+
+/** Random operations on one channel: sync, listened stretch, failure, reclaim. */
+const opArb = fc.oneof(
+	fc.record({
+		op: fc.constant("sync" as const),
+		dt: fc.integer({ min: 0, max: 600_000 }),
+	}),
+	fc.record({
+		op: fc.constant("listen" as const),
+		dt: fc.integer({ min: 0, max: 900_000 }),
+		len: fc.integer({ min: 0, max: 900_000 }),
+		live: fc.boolean(),
+	}),
+	fc.record({
+		op: fc.constant("fail" as const),
+		dt: fc.integer({ min: 0, max: 600_000 }),
+	}),
+	fc.record({
+		op: fc.constant("reclaim" as const),
+		dt: fc.integer({ min: 0, max: 600_000 }),
+	}),
+)
+
+describe("dsd-fme listened-time decay (properties)", () => {
+	it("P1: no decay before 60 min of listened quiet or 10 min of energized listened quiet", () => {
+		// Feature: dsd-digital-tiers, Property 1: decay only past the listened bounds
+		// Validates: Requirements 3.3
+		fc.assert(
+			fc.property(fc.array(opArb, { maxLength: 60 }), ops => {
+				const tiers = new DsdChannelTiers()
+				const k = key(446_106_250)
+				let now = 0
+				tiers.noteSync(k, now)
+				let quiet = 0
+				let live = 0
+				for (const o of ops) {
+					now += o.dt
+					if (o.op === "sync") {
+						tiers.noteSync(k, now)
+						quiet = 0
+						live = 0
+					} else if (o.op === "listen") {
+						tiers.account(k, now, now + o.len, o.live)
+						now += o.len
+						quiet += o.len
+						if (o.live) live += o.len
+					} else if (o.op === "fail") tiers.noteFailure(k, now, policy)
+					else tiers.noteReclaim(k, now)
+					const e = tiers.snapshot(now, policy).tiers[0]
+					if (now >= DSD_DIGITAL_MEMORY_MS || !e || e.tier !== "digital") return
+					expect(e.decayed).toBe(
+						quiet >= DSD_DECAY_QUIET_MS || live >= DSD_DECAY_LIVE_MS,
+					)
+					expect(e.quietMs).toBe(quiet)
+				}
+			}),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("P2: the last sync is only ever cleared 6 h after it; P3: failures never grow while remembered and not decayed", () => {
+		// Feature: dsd-digital-tiers, Property 2: lastSync survives every event but its 6 h memory
+		// Validates: Requirements 3.4
+		// Feature: dsd-digital-tiers, Property 3: no failures while remembered-undecayed
+		// Validates: Requirements 3.5
+		fc.assert(
+			fc.property(fc.array(opArb, { maxLength: 60 }), ops => {
+				const tiers = new DsdChannelTiers()
+				const k = key(446_106_250)
+				let now = 0
+				let last = 0
+				tiers.noteSync(k, now)
+				for (const o of ops) {
+					now += o.dt
+					const before = tiers.snapshot(now, policy).tiers[0]
+					if (o.op === "sync") {
+						tiers.noteSync(k, now)
+						last = now
+					} else if (o.op === "listen") {
+						tiers.account(k, now, now + o.len, o.live)
+						now += o.len
+					} else if (o.op === "fail") tiers.noteFailure(k, now, policy)
+					else tiers.noteReclaim(k, now)
+					const e = tiers.snapshot(now, policy).tiers[0]
+					if (now - last < DSD_DIGITAL_MEMORY_MS)
+						expect(e?.lastSyncMonoMs).toBe(last)
+					else expect(e?.lastSyncMonoMs).toBeUndefined()
+					if (
+						o.op === "fail" &&
+						before?.tier === "digital" &&
+						before.decayed === false &&
+						now - last < DSD_DIGITAL_MEMORY_MS
+					)
+						expect(e!.failures).toBe(before.failures)
+				}
+			}),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("P4: counted quiet never exceeds the listened wall time; a sync resets it", () => {
+		// Feature: dsd-digital-tiers, Property 4: Σ Δ <= listened wall time
+		// Validates: Requirements 3.3
+		fc.assert(
+			fc.property(
+				fc.array(
+					fc.record({
+						from: fc.integer({ min: 0, max: 7_200_000 }),
+						len: fc.integer({ min: 0, max: 600_000 }),
+						live: fc.boolean(),
+					}),
+					{ maxLength: 40 },
+				),
+				fc.integer({ min: 0, max: 7_200_000 }),
+				(stretches, syncAt) => {
+					const tiers = new DsdChannelTiers()
+					const k = key(446_106_250)
+					tiers.noteSync(k, 0)
+					// Overlapping stretches (a VFO and a slot) in time order.
+					const sorted = [...stretches].sort((a, b) => a.from - b.from)
+					let synced = false
+					let union = 0
+					let reach = 0
+					for (const s of sorted) {
+						if (!synced && s.from >= syncAt) {
+							tiers.noteSync(k, syncAt)
+							synced = true
+							union = 0
+							reach = syncAt
+						}
+						const end = s.from + s.len
+						union += Math.max(0, end - Math.max(s.from, reach))
+						reach = Math.max(reach, end)
+						tiers.account(k, s.from, end, s.live)
+						const e = tiers.snapshot(end, policy).tiers[0]!
+						expect(e.quietMs).toBeLessThanOrEqual(union)
+						expect(e.quietLiveMs).toBeLessThanOrEqual(e.quietMs!)
+					}
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("P5: at most 2 live reclaims per 30 min without a sync", () => {
+		// Feature: dsd-digital-tiers, Property 5: reclaim budget
+		// Validates: Requirements 3.6
+		fc.assert(
+			fc.property(
+				fc.array(fc.integer({ min: 0, max: 900_000 }), { maxLength: 40 }),
+				gaps => {
+					const tiers = new DsdChannelTiers()
+					const k = key(446_106_250)
+					tiers.noteSync(k, 0)
+					let now = 0
+					const entries: number[] = []
+					for (const gap of gaps) {
+						now += gap
+						const e = tiers.snapshot(now, policy).tiers[0]!
+						const ok =
+							e.reclaimWindowMonoMs === undefined ||
+							now - e.reclaimWindowMonoMs >= DSD_RECLAIM_WINDOW_MS ||
+							e.reclaims! < DSD_RECLAIM_BUDGET
+						if (ok) {
+							tiers.noteReclaim(k, now)
+							entries.push(now)
+						}
+					}
+					for (const t of entries)
+						expect(
+							entries.filter(x => x >= t && x < t + DSD_RECLAIM_WINDOW_MS)
+								.length,
+						).toBeLessThanOrEqual(2 * DSD_RECLAIM_BUDGET)
+					// Within one window from its start: at most the budget.
+					const first = entries[0]
+					if (first !== undefined)
+						expect(
+							entries.filter(x => x < first + DSD_RECLAIM_WINDOW_MS).length,
+						).toBeLessThanOrEqual(DSD_RECLAIM_BUDGET)
+				},
+			),
+			{ numRuns: 200 },
 		)
 	})
 })

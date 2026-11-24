@@ -451,3 +451,102 @@ describe("output drain", () => {
 		decoder.abandonOutput()
 	})
 })
+
+describe("stop: SIGKILL after stopKillAfterMs", () => {
+	it.each([
+		[5_000, undefined],
+		[1_000, 1_000],
+	])(
+		"sends SIGKILL at %i ms, not 1 ms before (stopKillAfterMs %s)",
+		async (killAt, set) => {
+			const { signalDecoder } =
+				await import("../../../src/decoders/process-tools.js")
+			const signals = vi.mocked(signalDecoder)
+			signals.mockClear()
+			const decoder = new LineDecoder(
+				{ id: "kill", type: "test", enabled: true, options: {} },
+				testLogger,
+			)
+			if (set !== undefined) decoder.stopKillAfterMs = set
+			const child = fakeChild()
+			vi.mocked(spawn).mockImplementationOnce(() => {
+				queueMicrotask(() => child.emit("spawn"))
+				return child as unknown as ChildProcess
+			})
+			await decoder.start()
+			vi.useFakeTimers()
+			try {
+				// The child ignores SIGTERM.
+				const stopped = decoder.stop()
+				expect(signals.mock.calls.map(c => c[1])).toEqual(["SIGTERM"])
+				await vi.advanceTimersByTimeAsync(killAt - 1)
+				expect(signals.mock.calls.map(c => c[1])).toEqual(["SIGTERM"])
+				await vi.advanceTimersByTimeAsync(1)
+				expect(signals.mock.calls.map(c => c[1])).toEqual([
+					"SIGTERM",
+					"SIGKILL",
+				])
+				child.emit("exit", null, "SIGKILL")
+				await stopped
+			} finally {
+				vi.useRealTimers()
+			}
+		},
+	)
+})
+
+describe("stop: shortenStopKill on a pending stop", () => {
+	it.each([
+		// [ms after SIGTERM when shortened, SIGKILL due]; 3 s: due 1 s passed, at once
+		[200, 1_000],
+		[1_000, 1_000],
+		[3_000, 3_000],
+	])(
+		"shortened %i ms after SIGTERM: SIGKILL at %i ms, not 1 ms before; never later than the armed 5 s",
+		async (shortenAt, killAt) => {
+			const { signalDecoder } =
+				await import("../../../src/decoders/process-tools.js")
+			const { resetDecoderStopKill, shortenDecoderStopKill } =
+				await import("../../../src/decoders/base-decoder.js")
+			const signals = vi.mocked(signalDecoder)
+			signals.mockClear()
+			const decoder = new LineDecoder(
+				{ id: "kill-pending", type: "test", enabled: true, options: {} },
+				testLogger,
+			)
+			const child = fakeChild()
+			vi.mocked(spawn).mockImplementationOnce(() => {
+				queueMicrotask(() => child.emit("spawn"))
+				return child as unknown as ChildProcess
+			})
+			await decoder.start()
+			vi.useFakeTimers()
+			try {
+				const stopped = decoder.stop()
+				await vi.advanceTimersByTimeAsync(shortenAt)
+				shortenDecoderStopKill(decoder, 1_000)
+				// A longer value never delays the pending kill.
+				decoder.shortenStopKill(4_000)
+				shortenDecoderStopKill(decoder, 1_000)
+				expect(signals.mock.calls.map(c => c[1])).toEqual(["SIGTERM"])
+				// Past due already: SIGKILL at once.
+				if (killAt > shortenAt) {
+					await vi.advanceTimersByTimeAsync(killAt - shortenAt - 1)
+					expect(signals.mock.calls.map(c => c[1])).toEqual(["SIGTERM"])
+				}
+				await vi.advanceTimersByTimeAsync(killAt > shortenAt ? 1 : 0)
+				expect(signals.mock.calls.map(c => c[1])).toEqual([
+					"SIGTERM",
+					"SIGKILL",
+				])
+				child.emit("exit", null, "SIGKILL")
+				await stopped
+				expect(decoder.stopKillAfterMs).toBe(1_000)
+				resetDecoderStopKill(decoder)
+				expect(decoder.stopKillAfterMs).toBe(5_000)
+			} finally {
+				vi.useRealTimers()
+			}
+		},
+	)
+})

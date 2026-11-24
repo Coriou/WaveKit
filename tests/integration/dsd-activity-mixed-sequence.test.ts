@@ -340,7 +340,7 @@ function build() {
 
 describe("mixed-channel activity sequence", () => {
 	// Three simulated minutes of production paths can exceed 5 s on a loaded host.
-	it("finds bursty DMR, rejects a decoded pager and preserves paging moves over three minutes", async () => {
+	it("finds bursty DMR, rejects a decoded pager and preserves paging moves over seven minutes", async () => {
 		vi.useFakeTimers({
 			toFake: [
 				"Date",
@@ -392,7 +392,12 @@ describe("mixed-channel activity sequence", () => {
 		let pagerDecodes = 0
 		// Deliberately off both 50 ms spectrum integration and 3 s burst boundaries.
 		await vi.advanceTimersByTimeAsync(137.3)
-		for (let step = 0; step < 1800; step++) {
+		// 7 min: an unknown channel enters an occupied dsd-fme slot at most once
+		// per 300 s (the trial token, docs/DECODER-GUIDE.md item 8), and the
+		// first token may go to one of the always-on unknown voices, so the
+		// bursty DMR channel may wait one token gap: 20 s dwell + 300 s + the
+		// 10 s rule, inside 420 s.
+		for (let step = 0; step < 4200; step++) {
 			const elapsed = step * 100
 			const active = [
 				PAGER,

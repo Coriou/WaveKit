@@ -289,9 +289,7 @@ async function runScenario(v: Variant): Promise<ScenarioMetrics> {
 							at: t,
 							fromHz: m.fromHz,
 							toHz: m.toHz,
-							...((m as { analogRetry?: boolean }).analogRetry
-								? { analogRetry: true }
-								: {}),
+							...(m.kind === "analog-try" ? { analogRetry: true } : {}),
 						})
 					if (
 						unknownConfirmedMs === null &&
@@ -625,6 +623,11 @@ function expectCoverage(m: ScenarioMetrics) {
 const DWELL_MS = 20_000
 const COOLDOWN_BASE_MS = 120_000
 const COOLDOWN_CAP_MS = 1_920_000
+/**
+ * The former 15 min no-sync forget. Failures are now kept 6 h after the
+ * last try, so k never resets; the bounds below still allow the reset and
+ * are therefore looser than the code, never tighter.
+ */
 const FORGET_MS = 900_000
 
 /**
@@ -712,6 +715,18 @@ function expectUnclassifiedWindows(m: ScenarioMetrics) {
 		for (const n of windows) expect(n).toBeLessThanOrEqual(bound)
 }
 
+/**
+ * Intended change (trial token, docs/DECODER-GUIDE.md item 8): an unknown
+ * channel enters an occupied slot at most once per 300 s per source and
+ * decoder in the fresh lane (never tried). Channels that failed before (the
+ * unclassified voices after their first failed run) use the retry lane, so
+ * they never hold the unknown's token. At its confirmation the fresh lane
+ * is either free or was taken < 300 s before; the pass that follows its
+ * reopening moves it within one move window: 300 + 60 = 360 s, not within
+ * 60 s as before the token.
+ */
+const UNKNOWN_ENTRY_MS = 300_000 + 60_000
+
 /** Shared PASS criteria (fixed before the change; behaviour in docs/DECODER-GUIDE.md, dsd-fme evidence ranking). */
 function expectTierPass(m: ScenarioMetrics, durationMs: number) {
 	const hours = durationMs / HOUR_MS
@@ -730,10 +745,13 @@ function expectTierPass(m: ScenarioMetrics, durationMs: number) {
 	expect(m.steadyMovesPerHour).toBeLessThanOrEqual(12)
 	if (hours >= 4) expect(m.movesPerHour).toBeLessThanOrEqual(12)
 	expectAnalogBounds(m, durationMs)
-	// Unknown placement: the unknown is placed within one move window of its confirmation, still hot or warm.
+	// Unknown placement: still hot or warm, within UNKNOWN_ENTRY_MS of its
+	// confirmation (the trial token, see UNKNOWN_ENTRY_MS).
 	expect(m.unknownConfirmedMs).not.toBeNull()
 	expect(m.unknownPlacedMs).not.toBeNull()
-	expect(m.unknownPlacedMs! - m.unknownConfirmedMs!).toBeLessThanOrEqual(60_000)
+	expect(m.unknownPlacedMs! - m.unknownConfirmedMs!).toBeLessThanOrEqual(
+		UNKNOWN_ENTRY_MS,
+	)
 	expect(["hot", "warm"]).toContain(m.unknownPlacedState)
 	// Reasons on every sampled minute.
 	expect(m.reasonViolations).toEqual([])
@@ -786,7 +804,7 @@ describe("dsd-fme evidence tiers, production composition (modelled traffic)", ()
 		expect(m.unknownConfirmedMs).not.toBeNull()
 		expect(m.unknownConfirmedMs!).toBeGreaterThanOrEqual(1.2 * HOUR_MS)
 		expect(m.unknownPlacedMs! - m.unknownConfirmedMs!).toBeLessThanOrEqual(
-			60_000,
+			UNKNOWN_ENTRY_MS,
 		)
 		expect(["hot", "warm"]).toContain(m.unknownPlacedState)
 	}, 300_000)
