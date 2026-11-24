@@ -17,7 +17,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { DV_SCENES } from "../../../scripts/fixtures/dv-plan.mjs"
 import type { DvScene } from "../../../scripts/fixtures/dv-plan.mjs"
 import {
@@ -233,16 +233,42 @@ const SCENE: DvScene = {
 	],
 }
 
+/**
+ * The feeder's clock (performance.now and setTimeout) on fake timers: the runners here are
+ * in-process, so every time a line is stamped with is set by the schedule alone, never by
+ * how busy the host is.
+ */
+function fakeClock() {
+	beforeEach(() => {
+		vi.useFakeTimers({
+			toFake: ["setTimeout", "clearTimeout", "performance"],
+		})
+	})
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+}
+
+/** Runs `feed` to completion, firing every timer it schedules. */
+async function onFakeClock<T>(feed: Promise<T>): Promise<T> {
+	await vi.runAllTimersAsync()
+	return feed
+}
+
 describe("feedRealTime", () => {
+	fakeClock()
+
 	it("stamps each line with the audio time it arrived at", async () => {
 		// 1 s of silence, 0.5 s keyed, 0.5 s silence.
 		const pcm = Buffer.alloc(2 * AUDIO_RATE_HZ * 2)
 		for (let k = AUDIO_RATE_HZ; k < 1.5 * AUDIO_RATE_HZ; k++)
 			pcm.writeInt16LE(5000, 2 * k)
-		const { lines } = await feedRealTime("ignored", pcm, {
-			run: decoderDouble,
-			speed: 10,
-		})
+		const { lines } = await onFakeClock(
+			feedRealTime("ignored", pcm, {
+				run: decoderDouble,
+				speed: 10,
+			}),
+		)
 		expect(lines.map(l => l.text.trim().slice(-3))).toEqual([
 			"VC*",
 			"all",
@@ -262,13 +288,16 @@ describe("feedRealTime", () => {
 		const stamp: DvRunner = async (_command, input, onLine) => {
 			for await (const _chunk of input) onLine(String(k++))
 		}
-		const { lines } = await feedRealTime("ignored", pcm, { run: stamp })
+		const { lines } = await onFakeClock(
+			feedRealTime("ignored", pcm, { run: stamp }),
+		)
 		const due = [20, 40, 60, 80, 100, 110]
 		expect(lines.map(l => l.text)).toEqual(["0", "1", "2", "3", "4", "5"])
 		lines.forEach((l, i) => {
-			// Never before its end (the feeder waits on performance.now), soon after it.
+			// Never before its end (the feeder waits on performance.now), and on the fake
+			// clock at it (within the 1 ms a timer's whole-ms rounding adds).
 			expect(l.atMs).toBeGreaterThanOrEqual(due[i]!)
-			expect(l.atMs).toBeLessThan(due[i]! + 15)
+			expect(l.atMs).toBeLessThanOrEqual(due[i]! + 1)
 		})
 	})
 })
@@ -287,11 +316,21 @@ describe("the ready handshake", () => {
 				break
 			}
 		}
-		const { lines } = await feedRealTime("ignored", pcm, { run: slow })
-		expect(lines.map(l => l.text)).toEqual(["first"])
-		expect(lines[0]!.atMs).toBeGreaterThanOrEqual(0)
-		expect(lines[0]!.atMs).toBeLessThan(200)
-	}, 10_000)
+		vi.useFakeTimers({
+			toFake: ["setTimeout", "clearTimeout", "performance"],
+		})
+		try {
+			const { lines } = await onFakeClock(
+				feedRealTime("ignored", pcm, { run: slow }),
+			)
+			expect(lines.map(l => l.text)).toEqual(["first"])
+			// The first chunk is due 20 ms after the pull, on the fake clock exactly.
+			expect(lines[0]!.atMs).toBeGreaterThanOrEqual(CHUNK_MS)
+			expect(lines[0]!.atMs).toBeLessThanOrEqual(CHUNK_MS + 1)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
 
 	/** /bin/sh, after `delay` seconds; records the child. */
 	const delayed = (delay: number, kids: { exitCode: number | null }[] = []) =>
@@ -305,15 +344,19 @@ describe("the ready handshake", () => {
 
 	it("holds the input until the script's marker and drops the marker", async () => {
 		const run = createShellRunner({ spawnChild: delayed(1.5) })
+		const started = performance.now()
 		const { lines } = await feedRealTime(
 			"sh -c 'head -c 1 >/dev/null; echo first; cat >/dev/null'",
 			pcm,
 			{ run },
 		)
+		const elapsed = performance.now() - started
 		expect(lines.map(l => l.text)).toEqual(["first"])
+		expect(lines[0]!.atMs).toBeGreaterThanOrEqual(0)
 		expect(lines.some(l => l.text.includes(DVCAP_READY))).toBe(false)
-		// About 0, not the 1 500 ms the container start took.
-		expect(lines[0]!.atMs).toBeLessThan(500)
+		// The clock started after the 1 500 ms container start, however slow the host: a
+		// clock started at the spawn would stamp the line after the whole wait instead.
+		expect(lines[0]!.atMs).toBeLessThanOrEqual(elapsed - 1500)
 	}, 10_000)
 
 	it("fails a marker later than its wait, and kills the child", async () => {

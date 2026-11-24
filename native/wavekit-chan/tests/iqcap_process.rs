@@ -135,6 +135,52 @@ impl Proc {
         );
     }
 
+    /// Waits until the tool has consumed at least `n` stdin samples. `sync` cannot prove it:
+    /// stdin and control are read by separate threads, so a control line can overtake IQ
+    /// already written. A capture from sample `n` is refused `out-of-range` until the count
+    /// reaches `n`, so a probe capture (ended at once) is the observable progress signal.
+    /// Needs one free capture slot.
+    fn consumed(&mut self, n: u64) {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let probe = format!(
+                "00000000-0000-4000-8000-{:012x}",
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            self.capture(&probe, n, 1);
+            self.send(r#"{"type":"sync"}"#);
+            let mut refused = false;
+            loop {
+                let e = self.next();
+                if e["code"] == "unknown-command" {
+                    break;
+                }
+                assert_eq!(
+                    (e["code"].as_str(), e["id"].as_str()),
+                    (Some("out-of-range"), Some(probe.as_str())),
+                    "{e}"
+                );
+                refused = true;
+            }
+            if !refused {
+                self.send(&format!(r#"{{"type":"end","id":"{probe}"}}"#));
+                let e = self.next();
+                assert_eq!(
+                    (e["type"].as_str(), e["id"].as_str()),
+                    (Some("captured"), Some(probe.as_str())),
+                    "{e}"
+                );
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the tool never consumed {n} samples"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn capture(&mut self, id: &str, from: u64, max_ms: u64) {
         self.send(&format!(
             r#"{{"type":"capture","id":"{id}","offsetHz":10000,"fromSample":{from},"maxMs":{max_ms}}}"#
@@ -379,13 +425,14 @@ fn gap_is_counted_never_filled() {
     let mut p = Proc::spawn(1000);
     p.feed(24_000);
     p.capture(ID1, 0, 1000);
-    p.sync();
+    p.consumed(24_000);
     p.send(r#"{"type":"gap","samples":24000}"#);
     // Pre-gap samples left the ring.
     p.capture(ID2, 0, 100);
     assert_eq!(p.next()["code"], "out-of-range");
     p.feed(24_000);
-    p.sync();
+    // Gap counted: 24 000 fed + 24 000 skipped + 24 000 fed.
+    p.consumed(72_000);
     p.send(&format!(r#"{{"type":"end","id":"{ID1}"}}"#));
     let e = p.next();
     assert_eq!(e["type"], "captured");
