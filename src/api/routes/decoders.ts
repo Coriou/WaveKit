@@ -293,7 +293,7 @@ function notPatchableExpected(type: string | undefined, key: string): string {
 	const keys = patchableKeys(type)
 	const alternative =
 		PLACEMENT_KEYS.has(key) && keys.includes("channelsHz")
-			? "; to move this decoder's channel set channelsHz (absolute channel centres in Hz) instead"
+			? "; to move the channel of a decoder with useChannelizer: true in the config (or a catalogue decoder) set channelsHz (absolute channel centres in Hz) instead; otherwise change it in the config file"
 			: ""
 	return keys.length > 0
 		? `not changeable at runtime (set it in the config file)${alternative}; runtime-changeable options of this decoder: ${keys.join(", ")}`
@@ -353,9 +353,10 @@ function settingsErrorBody(error: DecoderSettingsError, type?: string): object {
 }
 
 /**
- * The patch names channels: a `channelsHz` array with a positive Hz entry, for a type that
- * documents the option. A revert (null), an empty list and a malformed value fall through to the settings service, which
- * validates them; a type without the option gets the normal patch-policy answer.
+ * The patch names channels: a non-empty `channelsHz` array of positive Hz values, for a type
+ * that documents the option. A revert (null), an empty list and a malformed value fall through
+ * to the settings service, which validates them; a type without the option gets the normal
+ * patch-policy answer.
  */
 function setsChannelList(body: unknown, type: string | undefined): boolean {
 	if (type === undefined) return false
@@ -368,7 +369,8 @@ function setsChannelList(body: unknown, type: string | undefined): boolean {
 	const channels: unknown = Reflect.get(options, "channelsHz")
 	return (
 		Array.isArray(channels) &&
-		channels.some(
+		channels.length > 0 &&
+		channels.every(
 			(hz: unknown) => typeof hz === "number" && Number.isFinite(hz) && hz > 0,
 		)
 	)
@@ -1428,10 +1430,11 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					)
 				}
 				const type = settings.view(id)?.type
-				// A channel list this core could not place would be stored and silently decode
-				// the capture centre instead: refuse it and say why. A stale If-Match is answered
-				// first (412, as the settings service would), so the client re-reads before fixing
-				// anything else; the service checks the revision again under its write lock.
+				// A channel list on a decoder without channel placements would be stored and the
+				// decoder would keep decoding the capture centre: refuse it and name the supported
+				// ways. A stale If-Match is answered first (412, as the settings service would), so
+				// the client re-reads before fixing anything else; the service checks the revision
+				// again under its write lock.
 				const refusal = setsChannelList(body, type)
 					? decoderManager.channelListRefusal(id)
 					: null
@@ -1449,7 +1452,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				if (refusal) {
 					const err = new DecoderSettingsError(
 						"DECODER_OPTION_NOT_PATCHABLE",
-						`channelsHz cannot place channels here: ${refusal}`,
+						`channelsHz cannot be set at runtime here: ${refusal}`,
 						{ keys: ["channelsHz"], unknownKeys: 0 },
 					)
 					return sendJson(reply, err.statusCode, {
@@ -1457,7 +1460,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 						fields: [
 							{
 								field: "options.channelsHz",
-								expected: `${refusal}; without channel placements set channelHz or offsetHz in the config file (one channel, raw input)`,
+								expected: `${refusal}; to decode a channel list set useChannelizer: true with channelsHz on this decoder in the YAML config, or use the activity slots`,
 							},
 						],
 					})

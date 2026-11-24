@@ -1496,9 +1496,7 @@ export class DecoderManager extends EventEmitter {
 	 * admitted without a gate verdict and never suspended by probation; their
 	 * declared cost still counts in the budget and the efficiency view.
 	 * Exception (3.18): generated secondary paging channels (`gated`) are
-	 * admitted and probated like catalogue placements, and so is every channel
-	 * after the first of a list that alone opted the decoder in
-	 * (`gateListedChannels`: `channelsHz` without the catalogue or useChannelizer).
+	 * admitted and probated like catalogue placements.
 	 */
 	private gateExempt(state: DecoderState): boolean {
 		const enablement = this.config.enablement
@@ -2305,47 +2303,22 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
-	 * Why an explicit `channelsHz` list could not place channels for this decoder on this core,
-	 * or null when it can (or the decoder is unknown). Channel placements need the decoder
-	 * enablement planner and the channelizer; without them the list would be stored and the
-	 * decoder would keep reading the raw capture at its centre.
+	 * Why a runtime `channelsHz` list would not place channels for this decoder, or null when
+	 * it would (or the decoder is unknown). Only catalogue decoders and YAML decoders with
+	 * `useChannelizer: true` get channel placements; any other decoder keeps one raw placement
+	 * at the capture centre, so a list patched onto it would be stored and never decoded.
 	 */
 	channelListRefusal(id: string): string | null {
 		const state = this.decoders.get(id)
 		if (!state) return null
-		if (!(VFO_CHANNEL_TYPES as readonly string[]).includes(state.config.type))
-			return `a ${state.config.type} decoder takes no channel list`
-		if (!this.config.enablement)
-			return "this core runs without decoder placements"
-		if (!this.channelizer)
-			return "the channelizer is off (channelizer.enabled: false)"
-		// The planner reads availability per source: a source the channelizer cannot serve
-		// places the decoder raw at that source's centre.
-		const sourceId = this.selectedSourceId(state)
-		if (sourceId !== undefined && !this.channelizerAvailableFor(sourceId))
-			return `the channelizer cannot serve source ${sourceId}`
-		return null
-	}
-
-	/**
-	 * Whether the channelizer can serve channels of `sourceId` (the planner's per-source
-	 * `channelizerAvailable`). A seam: today one channelizer serves every source, so this is true
-	 * whenever a channelizer is attached; a per-source answer belongs here.
-	 */
-	private channelizerAvailableFor(_sourceId: string): boolean {
-		return this.channelizer !== null
-	}
-
-	/** An explicit, non-empty `channelsHz` list: the operator named channels to decode. */
-	private namesChannelList(config: DecoderConfig): boolean {
-		const channels = config.options["channelsHz"]
-		return (
-			(VFO_CHANNEL_TYPES as readonly string[]).includes(config.type) &&
-			Array.isArray(channels) &&
-			channels.some(
-				hz => typeof hz === "number" && Number.isFinite(hz) && hz > 0,
-			)
-		)
+		const config = state.effectiveConfig ?? state.originalConfig ?? state.config
+		const catalogue =
+			this.config.enablement?.isCatalogue(config) === true ||
+			this.config.enablement?.isCatalogue(
+				state.originalConfig ?? state.config,
+			) === true
+		if (catalogue || config.useChannelizer === true) return null
+		return "this decoder does not use channel placements (useChannelizer is not true)"
 	}
 
 	private configuredChannels(
@@ -2527,19 +2500,7 @@ export class DecoderManager extends EventEmitter {
 									config.type as keyof typeof DECODER_PROTOCOLS
 								] ?? [])
 							: [],
-						// Naming channels (channelsHz) opts a YAML decoder in, as useChannelizer does:
-						// without it the list fell through to one raw placement at the capture centre.
-						channelPlacements:
-							catalogue ||
-							config.useChannelizer === true ||
-							this.namesChannelList(config),
-						// The list alone (no catalogue, no useChannelizer) opted in: only its first
-						// channel is admitted ungated; the rest pass the gate and the CPU budget.
-						...(!catalogue &&
-						config.useChannelizer !== true &&
-						this.namesChannelList(config)
-							? { gateListedChannels: true }
-							: {}),
+						channelPlacements: catalogue || config.useChannelizer === true,
 						unavailable: this.isUnavailable(state),
 						ownDevice:
 							state.decoder.getBandDeclaration?.().ownSource === true ||
@@ -2583,7 +2544,7 @@ export class DecoderManager extends EventEmitter {
 						dedicatedScanner: config?.scanner?.role === "dedicated",
 						held: this.isSourceHeld(source.id),
 						reservedBy: exclusive?.decoderId ?? null,
-						channelizerAvailable: this.channelizerAvailableFor(source.id),
+						channelizerAvailable: this.channelizer !== null,
 						order,
 					}
 				},

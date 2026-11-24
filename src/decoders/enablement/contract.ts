@@ -253,14 +253,6 @@ export interface PlannerDecoder {
 	channelTransitionHz: number
 	protocols: readonly string[]
 	channelPlacements: boolean // catalogue: true; YAML: useChannelizer === true (A1)
-	/**
-	 * A YAML decoder that only a `channelsHz` list opted into channel placements
-	 * (not the catalogue, not `useChannelizer`): its first placed channel is the
-	 * ungated primary and every other channel is a gated secondary (3.18), so a
-	 * list of up to 16 entries (the `.max(16)` of each type's options schema) passes the efficiency gate
-	 * and the CPU budget instead of starting unchecked. Absent: today's rules.
-	 */
-	gateListedChannels?: boolean
 	unavailable: boolean
 	ownDevice: boolean
 	centreSlotHz: { minHz: number; maxHz: number } | null

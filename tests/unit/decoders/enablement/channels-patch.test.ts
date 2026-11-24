@@ -1,7 +1,9 @@
 /**
- * A patched `channelsHz` list decodes the listed channels (PATCH /api/decoders/:id through the real
- * route, settings service and DecoderManager with the real planner), a core that cannot place
- * channels refuses it, and a refused placement key names the patchable alternative.
+ * `channelsHz` at runtime (PATCH /api/decoders/:id through the real route, settings service and
+ * DecoderManager with the real planner): a YAML decoder without `useChannelizer: true` refuses a
+ * channel list and names the supported ways; a decoder with `useChannelizer: true` and channelsHz
+ * in its config places the listed channels; and a YAML list without `useChannelizer` keeps the base
+ * placement (one raw placement at the capture centre) across a retune.
  */
 import { EventEmitter } from "node:events"
 import fs from "node:fs/promises"
@@ -37,7 +39,13 @@ async function setup({
 	channelizer = true,
 	enablement = true,
 	type = "dsd-fme",
-}: { channelizer?: boolean; enablement?: boolean; type?: string } = {}) {
+	voice = {},
+}: {
+	channelizer?: boolean
+	enablement?: boolean
+	type?: string
+	voice?: Partial<DecoderConfig>
+} = {}) {
 	const sources = new FakeSources()
 	sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: CENTRE })
 	const registry = new DecoderRegistry()
@@ -113,13 +121,14 @@ async function setup({
 	})
 	if (channelizer)
 		manager.setChannelizer(provider as unknown as ChannelProvider)
-	// A YAML decoder (dsd-fme by default): no useChannelizer, no explicit channel.
+	// A YAML decoder (dsd-fme by default): no useChannelizer, no explicit channel, unless `voice` says so.
 	const config: DecoderConfig = {
 		id: "voice",
 		type,
 		enabled: true,
 		sourceId: "rtl",
 		options: {},
+		...voice,
 	}
 	manager.createDecoder(config)
 	const root = await fs.mkdtemp(join(tmpdir(), "wavekit-channels-patch-"))
@@ -149,7 +158,7 @@ async function setup({
 			payload: { options },
 			headers,
 		})
-	return { manager, provider, patch, settings }
+	return { manager, provider, patch, settings, sources }
 }
 
 interface Field {
@@ -157,58 +166,92 @@ interface Field {
 	expected: string
 }
 
-it("a patched channelsHz list decodes the listed channels, not the capture centre", async () => {
+type Fixture = Awaited<ReturnType<typeof setup>>
+
+const placementSet = (f: Fixture) =>
+	(f.manager.getStatus("voice")?.placements ?? []).map(p => ({
+		sourceId: p.sourceId,
+		reach: p.reach,
+		origin: p.origin,
+		primary: p.primary,
+		channelHz: p.channelHz,
+	}))
+
+it("a YAML decoder without useChannelizer refuses a channelsHz list and names the supported ways", async () => {
 	const f = await setup()
 	await f.manager.startAll()
+	const before = placementSet(f)
 	const response = await f.patch({ channelsHz: CHANNELS })
-	expect(response.statusCode).toBe(200)
-	await f.manager.restartDecoder("voice")
+	expect(response.statusCode).toBe(400)
+	const body = response.json<{
+		code: string
+		keys: string[]
+		fields: Field[]
+	}>()
+	expect(body.code).toBe("DECODER_OPTION_NOT_PATCHABLE")
+	expect(body.keys).toEqual(["channelsHz"])
+	const field = body.fields.find(x => x.field === "options.channelsHz")
+	expect(field?.expected).toContain("useChannelizer: true")
+	expect(field?.expected).toContain("YAML config")
+	expect(field?.expected).toContain("activity slots")
+	// Nothing was stored or replanned, and reverting stays allowed.
+	expect(
+		(
+			f.settings.view("voice")?.options as Record<string, unknown> | undefined
+		)?.["channelsHz"],
+	).toBeUndefined()
+	expect(placementSet(f)).toEqual(before)
+	expect((await f.patch({ channelsHz: null })).statusCode).toBe(200)
+})
+
+it("the hinted way: useChannelizer: true with channelsHz in the config places the listed channels", async () => {
+	const f = await setup({
+		voice: { useChannelizer: true, options: { channelsHz: CHANNELS } },
+	})
+	await f.manager.startAll()
 	await vi.waitFor(() =>
 		expect(f.manager.getStatus("voice")?.targetFrequenciesHz).toEqual(CHANNELS),
 	)
-	const placements = f.manager.getStatus("voice")?.placements ?? []
-	expect(
-		placements.map(p => ({
-			reach: p.reach,
-			origin: p.origin,
-			channelHz: p.channelHz,
-		})),
-	).toEqual(
-		CHANNELS.map(hz => ({
+	expect(placementSet(f)).toEqual(
+		CHANNELS.map((hz, i) => ({
+			sourceId: "rtl",
 			reach: "channel",
 			origin: "configured",
+			primary: i === 0,
 			channelHz: hz,
 		})),
 	)
 	expect(f.provider.requestChannel).toHaveBeenCalled()
+	// Such a decoder keeps the runtime patch: a new list is accepted.
+	const moved = [446_150_000]
+	expect((await f.patch({ channelsHz: moved })).statusCode).toBe(200)
 })
 
-it.each([
-	[{ channelizer: false }, "channelizer"],
-	[{ enablement: false }, "placements"],
-])(
-	"a core that cannot place channels (%j) refuses channelsHz and says why",
-	async (opts, reason) => {
-		const f = await setup(opts)
-		const response = await f.patch({ channelsHz: CHANNELS })
-		expect(response.statusCode).toBe(400)
-		const body = response.json<{
-			code: string
-			keys: string[]
-			fields: Field[]
-		}>()
-		expect(body.code).toBe("DECODER_OPTION_NOT_PATCHABLE")
-		expect(body.keys).toEqual(["channelsHz"])
-		const field = body.fields.find(x => x.field === "options.channelsHz")
-		expect(field?.expected).toContain(reason)
-		expect(field?.expected).toContain("channelHz or offsetHz")
-		// Nothing was stored: reverting stays allowed.
-		expect((await f.patch({ channelsHz: null })).statusCode).toBe(200)
-	},
-)
+it("a YAML channelsHz list without useChannelizer keeps the base placement across a retune: one raw input, no channels", async () => {
+	const f = await setup({ voice: { options: { channelsHz: CHANNELS } } })
+	await f.manager.startAll()
+	// Base (no runtime opt-in): the list does not make placements; the decoder reads the raw capture.
+	const raw = [
+		{
+			sourceId: "rtl",
+			reach: "raw",
+			origin: "configured",
+			primary: true,
+			channelHz: undefined,
+		},
+	]
+	await vi.waitFor(() => expect(placementSet(f)).toEqual(raw))
+	f.sources.setCenter("rtl", 446_500_000)
+	await f.manager.restartDecoder("voice")
+	await vi.waitFor(() =>
+		expect(f.manager.getStatus("voice")?.running).toBe(true),
+	)
+	expect(placementSet(f)).toEqual(raw)
+	expect(f.provider.requestChannel).not.toHaveBeenCalled()
+})
 
 it("a stale If-Match is a 412 before the channel-list refusal; the current revision gets the refusal", async () => {
-	const f = await setup({ channelizer: false })
+	const f = await setup()
 	const current = f.settings.revision()
 	const stale = await f.patch(
 		{ channelsHz: CHANNELS },
@@ -229,7 +272,7 @@ it("a stale If-Match is a 412 before the channel-list refusal; the current revis
 })
 
 it("offsetHz stays a config-file key and its refusal names channelsHz and the patchable keys", async () => {
-	const f = await setup()
+	const f = await setup({ voice: { useChannelizer: true } })
 	for (const key of ["offsetHz", "channelHz"]) {
 		const response = await f.patch({ [key]: 25_000 })
 		expect(response.statusCode).toBe(400)
@@ -243,46 +286,19 @@ it("offsetHz stays a config-file key and its refusal names channelsHz and the pa
 		// Never echoes the value sent.
 		expect(response.body).not.toContain("25000")
 	}
-	// The hinted fix: the same channel as an absolute channelsHz entry.
+	// The hinted fix on a useChannelizer decoder: the same channel as an absolute channelsHz entry.
 	expect((await f.patch({ channelsHz: [CENTRE + 25_000] })).statusCode).toBe(
 		200,
 	)
 })
 
-// Guards a seam: today channelizerAvailableFor answers for every source alike; the refusal must
-// still ask about the decoder's own source once it answers per source.
-it("the refusal asks the per-source seam about the decoder's own source", async () => {
-	const f = await setup()
-	const available = vi
-		.spyOn(
-			f.manager as unknown as {
-				channelizerAvailableFor: (sourceId: string) => boolean
-			},
-			"channelizerAvailableFor",
-		)
-		.mockImplementation(sourceId => sourceId !== "rtl")
-	const response = await f.patch({ channelsHz: CHANNELS })
-	expect(available).toHaveBeenCalledWith("rtl")
-	expect(response.statusCode).toBe(400)
-	const body = response.json<{
-		code: string
-		keys: string[]
-		fields: Field[]
-	}>()
-	expect(body.code).toBe("DECODER_OPTION_NOT_PATCHABLE")
-	expect(body.keys).toEqual(["channelsHz"])
-	expect(
-		body.fields.find(x => x.field === "options.channelsHz")?.expected,
-	).toContain("cannot serve source rtl")
-})
-
 it("an empty or malformed channelsHz is no channel list: the settings service answers, not the refusal", async () => {
-	const f = await setup({ channelizer: false })
+	const f = await setup()
 	const empty = await f.patch({ channelsHz: [] })
 	expect(empty.json<{ code?: string }>().code).not.toBe(
 		"DECODER_OPTION_NOT_PATCHABLE",
 	)
-	for (const value of ["abc", ["abc"]]) {
+	for (const value of ["abc", ["abc"], [CENTRE, "abc"]]) {
 		const response = await f.patch({ channelsHz: value })
 		expect(response.statusCode).toBe(400)
 		expect(response.json<{ code: string }>().code).toBe(
@@ -307,6 +323,6 @@ it.each(["acarsdec", "readsb"])(
 		expect(body.keys ?? []).not.toContain("channelsHz")
 		expect(body.unknownKeys).toBe(1)
 		expect(body.fields.map(x => x.field)).not.toContain("options.channelsHz")
-		expect(response.body).not.toContain("cannot place channels")
+		expect(response.body).not.toContain("cannot be set at runtime")
 	},
 )
