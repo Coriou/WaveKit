@@ -99,6 +99,49 @@ describe("live demodulator transmission ids", () => {
 		])
 	})
 
+	it("an unannounced held part claims at its close and a tone split still claims fresh, split from it", () => {
+		const registry = new TransmissionRegistry()
+		const h = txHarness(registry)
+		// A scanner observation on the channel keeps its entry open past the held part's end.
+		const scanner = registry.claim({
+			origin: "scanner-observation",
+			kind: "voice-analog",
+			sourceId: "rtl0",
+			hz: CHANNEL_HZ,
+			halfWidthHz: 6_250,
+			atMs: h.now(),
+			alias: "obs:o_01JTESTOBSERVATION",
+		})!
+		h.talk(1, 2_000)
+		h.advance(300)
+		// The resumed segment's first two chunks: the held part is announced at the resume.
+		h.talk(2, 500, false)
+		// Before the chunk that confirms the new tone (the split comes before any announcement
+		// there), force the held part back to unannounced with no claim.
+		const internal = h.tracker as unknown as {
+			transmission: {
+				announced: boolean
+				tx: { claimant: number } | null
+			} | null
+		}
+		const open = internal.transmission!
+		registry.end(open.tx!.claimant, h.now(), "ended")
+		open.tx = null
+		open.announced = false
+		h.talk(2, 3_000)
+		h.advance(5_000)
+		h.tracker.stop()
+		expect(h.rows).toHaveLength(2)
+		const [a, b] = h.rows.map(r => r.txId)
+		expect(a).toMatch(TX_ID)
+		expect(b).toMatch(TX_ID)
+		// The held part joined the observation's entry; the split never does.
+		expect(a).toBe(scanner.txId)
+		expect(b).not.toBe(a)
+		expect(registry.get(b!)!.groupId).toBe(registry.get(a!)!.groupId)
+		registry.end(scanner.claimant, h.now(), "ended")
+	})
+
 	it("a max-duration continuation keeps the id and adds its own event alias", () => {
 		const registry = new TransmissionRegistry()
 		const h = txHarness(registry, 2_000)

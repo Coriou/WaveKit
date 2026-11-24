@@ -114,7 +114,10 @@ function toneOf(
 		return {
 			state: "heard",
 			ctcssHz: reading.ctcssHz,
-			dcs: reading.dcs === null ? null : { code: reading.dcs, polarity: null },
+			dcs:
+				reading.dcs === null
+					? null
+					: { code: reading.dcs, polarity: reading.dcsPolarity },
 			dcsChecked: reading.dcsChecked,
 			from: reading.source,
 			why: null,
@@ -226,6 +229,15 @@ export function buildTransmissionDto(
 				: []
 			: served
 	const artefacts = audio.map(artefactOf)
+	// The raw item follows the same rule: a digital call shows only a file the decoder linked.
+	const rawRecording =
+		kind !== "voice-digital"
+			? (item ?? null)
+			: privacy === "clear"
+				? (src.items.find(i =>
+						src.linkedRecordingKeys.includes(i.key ?? i.id),
+					) ?? null)
+				: null
 
 	const recordingKeys: string[] = []
 	for (const k of src.recordingKeys) pushUnique(recordingKeys, k)
@@ -387,7 +399,7 @@ export function buildTransmissionDto(
 		channelSummary: null,
 		gone,
 		raw: {
-			recording: item ?? null,
+			recording: rawRecording,
 			activity: change ?? analog ?? call ?? null,
 			facts,
 			observation: null,

@@ -241,6 +241,33 @@ it("without a registry nothing carries a txId", async () => {
 	}
 })
 
+it("a throwing registry claim never reaches the track handler: the observation goes out without an id", async () => {
+	class ThrowingRegistry extends TransmissionRegistry {
+		override claim(): never {
+			throw new RangeError("invalid time")
+		}
+	}
+	const { h, internal, done } = await setup(new ThrowingRegistry())
+	const activity: { observationId: string; txId?: string; active: boolean }[] =
+		[]
+	h.service.on("activity", (a: (typeof activity)[number]) => activity.push(a))
+	try {
+		const track = passed("t")
+		expect(() => {
+			internal.onTrack("rtl", { kind: "track-open", track })
+		}).not.toThrow()
+		const obs = observationOf(internal, track.trackId)
+		internal.onTrack("rtl", { kind: "track-close", track, endReason: "quiet" })
+		expect(activity.map(a => a.active)).toEqual([true, false])
+		for (const a of activity) {
+			expect(a.observationId).toBe(obs)
+			expect(a).not.toHaveProperty("txId")
+		}
+	} finally {
+		await done()
+	}
+})
+
 it("a gap end is a lost source, never a complete over", async () => {
 	expect(txEndReasonOf("gap")).toBe("source-lost")
 	expect(txEndReasonOf("quiet")).toBe("ended")

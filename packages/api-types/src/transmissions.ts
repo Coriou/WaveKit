@@ -32,7 +32,7 @@ export interface TransmissionTone {
 	state: "heard" | "none" | "not-measured"
 	ctcssHz: number | null
 	dcs: { code: string; polarity: "normal" | "inverted" | null } | null
-	/** The live demodulator looked for DCS (the scanner recorder never does). */
+	/** DCS was looked for: the live demodulator reported, or a recorder fact is a code or none. */
 	dcsChecked: boolean
 	from: "recorder" | "live-demod" | null
 	why:

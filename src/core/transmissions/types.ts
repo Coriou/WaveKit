@@ -95,11 +95,13 @@ export interface TxToneReading {
 	state: "heard" | "none" | "not-measured"
 	ctcssHz: number | null
 	dcs: string | null
+	/** The heard DCS code's polarity; null with no code or when its reader stored none. */
+	dcsPolarity: "normal" | "inverted" | null
 	/** Who measured the value read: the recorder's file or the live demodulator. */
 	source: "recorder" | "live-demod" | null
 	/** Two different tones were heard: the recorder's is read. */
 	ambiguous: boolean
-	/** The live demodulator reported (it alone measures DCS). */
+	/** DCS was looked for: the live demodulator reported, or a recorder fact is a code or none. */
 	dcsChecked: boolean
 }
 

@@ -1329,7 +1329,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			transmissionId: this.newId(),
 			// A fresh claim at its announcement, never the held part's (which ends first).
 			tx: null,
-			txSplitFrom: open.tx?.txId ?? null,
+			// Set once the held part is final: an unannounced one claims inside finalise.
+			txSplitFrom: null,
 			startedAtMs: open.segmentStartMs,
 			startedAt: new Date(open.segmentStartMs).toISOString(),
 			peak: split.peak,
@@ -1351,6 +1352,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		}
 		this.transmission = next
 		this.finalise(held, "squelch", split.heldGapEndMs, heldTone)
+		next.txSplitFrom = held.tx?.txId ?? null
 		if (this.transmission === next) this.announceIfQualified(next, now)
 	}
 

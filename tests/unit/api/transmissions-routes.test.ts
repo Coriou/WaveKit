@@ -141,6 +141,64 @@ describe("GET /api/transmissions/:ref", () => {
 		expect(res2.json<TransmissionDto>().artefacts).toEqual([])
 	})
 
+	it("the recorder's DCS code reads with its polarity; a DCS code or a recorder none says DCS was looked for", async () => {
+		h = await harness(at)
+		const claimAt = (i: number) => {
+			const claim = h!.registry.claim({
+				origin: "scanner-observation",
+				kind: "voice-analog",
+				sourceId: "source-1",
+				hz: 100_000_000 + i * 100_000,
+				halfWidthHz: 6_000,
+				epoch: 1,
+				stream: 0,
+				sample: 0,
+				atMs: at - 5_000,
+				alias: `obs:o_01JTESTOBSERVATIO${i}`,
+			})!
+			return claim.txId
+		}
+		const toneOf = async (
+			i: number,
+			tone: Parameters<typeof analogItem>[1]["tone"],
+		) => {
+			const txId = claimAt(i)
+			const key = keyOf(10 + i)
+			h!.registry.attach(txId, `rec:${key}`)
+			h!.items.set(
+				key,
+				analogItem(key, { txId, ...(tone !== undefined ? { tone } : {}) }),
+			)
+			return (await get(txId)).json<TransmissionDto>().tone
+		}
+		expect(
+			await toneOf(1, { kind: "dcs", code: "023", polarity: "inverted" }),
+		).toEqual({
+			state: "heard",
+			ctcssHz: null,
+			dcs: { code: "023", polarity: "inverted" },
+			dcsChecked: true,
+			from: "recorder",
+			why: null,
+		})
+		// A sidecar that stored no polarity reads it as unknown.
+		expect(await toneOf(2, { kind: "dcs", code: "754" })).toMatchObject({
+			dcs: { code: "754", polarity: null },
+			dcsChecked: true,
+		})
+		// "No tone heard" needs the DCS decoder's analysis too.
+		expect(await toneOf(3, null)).toMatchObject({
+			state: "none",
+			dcsChecked: true,
+			from: "recorder",
+		})
+		// A CTCSS fact may predate the recorder's DCS decoder: not proof DCS was looked for.
+		expect(await toneOf(4, { kind: "ctcss", hz: 88.5 })).toMatchObject({
+			state: "heard",
+			dcsChecked: false,
+		})
+	})
+
 	it("an id the registry no longer holds: Activity rows by txId and the catalogue index; times from record_json", async () => {
 		h = await harness(at)
 		const key = keyOf(2)
@@ -305,6 +363,8 @@ describe("GET /api/transmissions/:ref", () => {
 					privacy: "unproven",
 					artefacts: [],
 				})
+				// The raw block never shows the file an unproven call lists none of.
+				expect(dto.raw.recording).toBeNull()
 			}
 			h.runtime.recordingLinks?.()?.link({
 				type: "link-call",
@@ -330,6 +390,7 @@ describe("GET /api/transmissions/:ref", () => {
 					privacy: "clear",
 					artefacts: [{ id: key }],
 				})
+				expect(dto.raw.recording).toMatchObject({ key })
 			}
 			// Without the recordings route the linked call lists no audio.
 			const bare = await h.app({ inventory: undefined as never })
@@ -349,6 +410,22 @@ describe("GET /api/transmissions/:ref", () => {
 			expect(unproven.privacy).toBe("unproven")
 			expect(unproven.artefacts).toEqual([])
 			h.registry.noteRefusal(claim.txId, "encrypted")
+			// An encrypted call's file reached by its recording alias: listed nowhere, raw included.
+			const key = `dsd~${DSD_NAME}`
+			h.registry.attach(claim.txId, `rec:${key}`)
+			h.items.set(key, {
+				...analogItem(key),
+				kind: "dsd-fme-call",
+				discoveryId: null,
+				facts: null,
+			})
+			const encByFile = (await get(`rec:${key}`)).json<TransmissionDto>()
+			expect(encByFile).toMatchObject({
+				id: claim.txId,
+				privacy: "encrypted",
+				artefacts: [],
+			})
+			expect(encByFile.raw.recording).toBeNull()
 			const enc = (await get(claim.txId)).json<TransmissionDto>()
 			expect(enc.privacy).toBe("encrypted")
 			expect(enc.artefacts).toEqual([])

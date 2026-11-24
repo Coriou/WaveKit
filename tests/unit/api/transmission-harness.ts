@@ -15,6 +15,7 @@ import type {
 	AnalogTransmissionPayload,
 	RecordingChangePayload,
 	RecordingInventoryItem,
+	RecordingTone,
 } from "@wavekit/api-types"
 import { transmissionRoutes } from "../../../src/api/routes/transmissions.js"
 import type { TransmissionRoutesOptions } from "../../../src/api/routes/transmissions.js"
@@ -177,7 +178,7 @@ export function analogItem(
 	patch: {
 		txId?: string
 		moreTxIds?: string[]
-		tone?: { kind: "ctcss"; hz: number } | null
+		tone?: RecordingTone | null
 		part?: number
 		parts?: number
 	} = {},

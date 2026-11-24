@@ -1427,6 +1427,8 @@ export class ScannerService extends EventEmitter {
 	private readonly rolloverTx = new Map<string, Remembered>()
 	/** A rollover successor's trackId → its predecessor's (same bounds). */
 	private readonly rolloverOf = new Map<string, Remembered>()
+	/** Registry calls that threw (claim, end, attach): the observation goes on without an id. */
+	private txPortFailures = 0
 	private passiveChain: Promise<void> = Promise.resolve()
 	/** Maintenance and passive-cost checks started by the tick (finding 5). */
 	private readonly background = new Set<Promise<void>>()
@@ -4253,20 +4255,34 @@ export class ScannerService extends EventEmitter {
 		const pred = this.consume(this.rolloverOf, track.trackId, now)
 		const continues =
 			pred === undefined ? undefined : this.consume(this.rolloverTx, pred, now)
-		const res = port.claim({
-			origin: "scanner-observation",
-			kind: "voice-analog",
-			sourceId: live.sourceId,
-			hz: track.centreHz,
-			halfWidthHz: track.obwHz / 2,
-			epoch: track.epoch,
-			stream: track.stream,
-			sample: track.startSample,
-			...(continues !== undefined ? { continues } : {}),
-			atMs: live.startedAt,
-			alias: `obs:${live.observationId}`,
-		})
-		if (res !== null) this.liveTx.set(live.observationId, res)
+		try {
+			const res = port.claim({
+				origin: "scanner-observation",
+				kind: "voice-analog",
+				sourceId: live.sourceId,
+				hz: track.centreHz,
+				halfWidthHz: track.obwHz / 2,
+				epoch: track.epoch,
+				stream: track.stream,
+				sample: track.startSample,
+				...(continues !== undefined ? { continues } : {}),
+				atMs: live.startedAt,
+				alias: `obs:${live.observationId}`,
+			})
+			if (res !== null) this.liveTx.set(live.observationId, res)
+		} catch {
+			// The registry never blocks the track handler: the observation goes out without an id.
+			this.noteTxPortFailure("claim")
+		}
+	}
+
+	/** A registry call threw: counted and logged with the call name and count only. */
+	private noteTxPortFailure(call: "claim" | "end" | "attach"): void {
+		this.txPortFailures += 1
+		this.log.debug(
+			{ call, failures: this.txPortFailures },
+			"Transmission registry call failed",
+		)
 	}
 
 	/** The observation's claim ends with it; a max-duration close is remembered for its successor. */
@@ -4280,7 +4296,11 @@ export class ScannerService extends EventEmitter {
 		if (tx === undefined) return
 		this.liveTx.delete(live.observationId)
 		const reason = txEndReasonOf(endReason)
-		this.deps.transmissions?.end(tx.claimant, now, reason)
+		try {
+			this.deps.transmissions?.end(tx.claimant, now, reason)
+		} catch {
+			this.noteTxPortFailure("end")
+		}
 		if (reason === "max-duration")
 			this.remember(this.rolloverTx, track.trackId, tx.txId, now)
 	}
@@ -5251,7 +5271,11 @@ export class ScannerService extends EventEmitter {
 		// The kept file is an artefact of every transmission it spans (alias index only).
 		if (this.deps.transmissions)
 			for (const id of extra?.txIds ?? [])
-				this.deps.transmissions.attach(id, `rec:scan:${m.alias}`)
+				try {
+					this.deps.transmissions.attach(id, `rec:scan:${m.alias}`)
+				} catch {
+					this.noteTxPortFailure("attach")
+				}
 		const kept: ScannerRecordingKept = {
 			recordingId: m.alias,
 			discoveryId: m.discoveryId,
