@@ -7,6 +7,7 @@
  */
 import type {
 	ActivityRecord,
+	JsonValue,
 	RecordingInventoryItem,
 	RecordingTone,
 	TransmissionArtefact,
@@ -246,7 +247,7 @@ function rawActivityOf(
 		decodedData !== null &&
 		!Array.isArray(decodedData)
 	) {
-		const rest: { [key: string]: (typeof decodedData)[string] } = {}
+		const rest: { [key: string]: JsonValue } = {}
 		for (const [field, value] of Object.entries(decodedData)) {
 			if (field === "wavFile") {
 				if (typeof value === "string" && keep(dsdKeyOf(value)))
