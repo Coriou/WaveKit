@@ -70,6 +70,11 @@ export class NfmSource {
 		this.o.ctcssHz = hz
 	}
 
+	/** The CTCSS sub-tone's peak deviation in Hz from the next sample. */
+	setCtcssDeviation(hz: number): void {
+		this.o.ctcssDeviationHz = hz
+	}
+
 	/** Extra deviation (Hz at time t in s) from the next sample, beside the voice and CTCSS. */
 	setSubAudible(deviation: ((t: number) => number) | null): void {
 		this.subAudible = deviation
@@ -230,4 +235,72 @@ export function wavDurationMs(file: Buffer): number {
 	const rate = file.readUInt32LE(24)
 	const dataBytes = file.readUInt32LE(40)
 	return (dataBytes / 2 / rate) * 1000
+}
+
+/**
+ * Modelled DCS code as NfmSource.setSubAudible deviation (Hz at t s): the code's Golay word
+ * repeated at 134.4 bit/s NRZ, LSB first as on air (dcs.ts), ±`deviationHz` (a radio's DCS
+ * deviation is about 500-750 Hz); `inverted` sends the complement. Positive deviation is a 1 bit.
+ */
+export function dcsDeviation(
+	code: string,
+	inverted = false,
+	deviationHz = 600,
+): (t: number) => number {
+	const data = (Number.parseInt(code, 8) & 0x1ff) | (0b100 << 9)
+	let r = data << 11
+	for (let i = 22; i >= 11; i--) if (r & (1 << i)) r ^= 0xc75 << (i - 11)
+	const word = ((data << 11) | r) & 0x7fffff
+	const bits: number[] = []
+	for (let i = 0; i < 23; i++) bits.push((word >>> ((11 + i) % 23)) & 1)
+	return t => {
+		const bit = bits[Math.floor(t * 134.4) % 23]! ^ (inverted ? 1 : 0)
+		return bit === 1 ? deviationHz : -deviationHz
+	}
+}
+
+/**
+ * Modelled DCS code too broken to chain: `dcsDeviation` with one bit flipped at a random place
+ * (seeded) in every `every` bits (20: 5% bit errors). No 46 bits in a row are ever clean, so no
+ * two consecutive words match, yet many 23-bit windows still are.
+ */
+export function brokenDcsDeviation(
+	code: string,
+	seed: number,
+	deviationHz = 600,
+	every = 20,
+): (t: number) => number {
+	const clean = dcsDeviation(code, false, deviationHz)
+	const rand = mulberry32(seed)
+	const flips: number[] = []
+	return t => {
+		const bit = Math.floor(t * 134.4)
+		const block = Math.floor(bit / every)
+		while (flips.length <= block)
+			flips.push(flips.length * every + Math.floor(rand() * every))
+		const level = clean((bit + 0.5) / 134.4)
+		return flips[block] === bit ? -level : level
+	}
+}
+
+/**
+ * Modelled untoned voice pitch as NfmSource.setSubAudible deviation (Hz at t s): a fundamental
+ * gliding 110-170 Hz (140 Hz ± 30 Hz at 1.3 Hz, a speaker's intonation) with its second harmonic
+ * at half its level and a 4 Hz syllabic raised-cosine envelope: the energy a voice puts in the
+ * 85-300 Hz band, where no one CTCSS tone holds it for a 500 ms block. `offsetS` starts the
+ * intonation and syllables that many seconds in (a different speaker's timing).
+ */
+export function voicePitchDeviation(
+	deviationHz = 400,
+	offsetS = 0,
+): (t: number) => number {
+	const glide = 30 / (TWO_PI * 1.3)
+	return at => {
+		const t = at + offsetS
+		const phase = TWO_PI * (140 * t - glide * Math.cos(TWO_PI * 1.3 * t))
+		const envelope = 0.5 - 0.5 * Math.cos(TWO_PI * 4 * t)
+		return (
+			deviationHz * envelope * (Math.sin(phase) + 0.5 * Math.sin(2 * phase))
+		)
+	}
 }
