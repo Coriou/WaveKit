@@ -193,6 +193,11 @@ export interface RecordingInventoryItem {
 	 * malformed sidecar) and for other kinds. Absent from older cores.
 	 */
 	facts?: RecordingFacts | null
+	/**
+	 * Scanner analog recordings only: the transmission open at the file's first sample (its
+	 * facts' `txId`); null when unknown. Absent for other kinds and from older cores.
+	 */
+	txId?: string | null
 }
 
 /**
@@ -260,12 +265,16 @@ export interface RecordingFacts {
 	/** Null when the recorder passed no admission numbers. */
 	admission: RecordingAdmissionFacts | null
 	/**
-	 * The tone the file was sent with; null: at least 1 s was measured, no part held a CTCSS tone
-	 * and the sub-audible band was empty (rare: voice and receiver noise fill it). Absent when the
-	 * recorder cannot tell (too little audio, an unsettled tone, sub-audible energy no CTCSS tone
-	 * won such as a DCS code, which is not measured, a broken-up tone or untoned voice; older files).
+	 * The tone the file was sent with: a settled CTCSS tone, or a settled DCS code with its
+	 * polarity (the recorder decodes DCS too). Null: no tone heard after a measured CTCSS and DCS
+	 * look (at least 1 s of audio). Absent: not measured (too little audio, an unsettled or
+	 * broken-up tone, older files written before the look).
 	 */
 	tone?: RecordingTone | null | undefined
+	/** The transmission open at the file's first sample; absent on files kept before it. */
+	txId?: string | undefined
+	/** The other transmissions open while the file was (at most 7); absent when none. */
+	moreTxIds?: string[] | undefined
 }
 
 /**

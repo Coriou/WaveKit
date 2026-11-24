@@ -113,6 +113,10 @@ describe("frame track identity across the max-duration rollover (tracker level)"
 				expect(e.track.blocks).toBe(1) // successor stats restart for the scanner
 				expect(e.track.flags.spur).toBe(false)
 			}
+		// each successor names its predecessor (transmission identity continues across it)
+		expect(
+			opens.map(e => (e.kind === "track-open" ? e.rolloverFrom : "")),
+		).toEqual([undefined, "s-0-1", "s-0-2"])
 		// the frame's view: one chain
 		for (const [i, { bt }] of out.entries()) {
 			expect(bt.trackId).toBe("s-0-1")

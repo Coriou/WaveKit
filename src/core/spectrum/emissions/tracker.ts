@@ -1040,7 +1040,11 @@ export class Tracker {
 				if (this.planActive) nt.rolloverFrom = t
 				// the segment now belongs to the successor (same block, fresh id)
 				if (this.assoc.get(seg) === t) this.assoc.set(seg, nt)
-				events.push({ kind: "track-open", track: this.snapshot(nt, n) })
+				events.push({
+					kind: "track-open",
+					track: this.snapshot(nt, n),
+					rolloverFrom: t.id,
+				})
 				continue
 			}
 			if (

@@ -120,7 +120,7 @@ export function hygieneHarness(
 	hygiene?: Partial<AnalogTransmissionHygiene>,
 	extra?: Pick<
 		AnalogTransmissionTrackerOptions,
-		"createToneDetector" | "maxDurationMs"
+		"createToneDetector" | "maxDurationMs" | "transmissions"
 	>,
 ) {
 	const source = new HygieneSource()

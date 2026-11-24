@@ -63,6 +63,7 @@ import { registerSourceFeedMock, withSourcePaused } from "./source-feed.ts"
 import type { SourceFeedMock } from "./source-feed.ts"
 import type { ReceiverMockControls } from "./receiver.ts"
 import { registerScannerMock } from "./scanner.ts"
+import { registerTransmissionsMock } from "./transmissions.ts"
 import {
 	type Activity429Mode,
 	activity429RetryAfter,
@@ -2924,6 +2925,17 @@ export async function buildMockServer(
 			return recordOf(item, decodedById.get(item.eventId))
 		},
 	)
+
+	// GET /api/transmissions/:ref (./transmissions.ts): `rec:` and `evt:` from these rows and files.
+	registerTransmissionsMock(app, {
+		recordings: () => [...recordingsState.recs.values()].map(r => r.item),
+		activity: eventId => {
+			const summary = activity.find(i => i.eventId === eventId)
+			return summary
+				? { summary, record: recordOf(summary, decodedById.get(eventId)) }
+				: null
+		},
+	})
 
 	function strongestIn(startHz: number, endHz: number): MockSignal | null {
 		let best: MockSignal | null = null

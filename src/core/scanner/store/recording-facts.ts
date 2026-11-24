@@ -27,6 +27,9 @@
  * `}` take 30 B and the bounded hz at most 18 (a double in 67..254.1 prints in at most 18
  * characters, e.g. 254.09999999999997): 48 B; the DCS form
  * `,"tone":{"kind":"dcs","code":"754","polarity":"inverted"}` takes 57 B. About 1 478 B in all.
+ * The transmission members add at most 269 B: `,"txId":"tx_` + 26 + `"` takes 37 B,
+ * `,"moreTxIds":[` + `]` 15 B and 7 quoted ids with commas 7 × 31 B = 217 B (232 B): about
+ * 1 747 B.
  * RECORDING_FACTS_MAX_BYTES (2 048 B) holds that with room, and a writer refuses anything
  * larger.
  *
@@ -63,11 +66,14 @@ import type { CtcssQuietCeilings } from "../../audio-tones/ctcss.js"
 import { ANALOG_AUDIO_RATE_HZ } from "../channel/fm-audio.js"
 import { NoiseQuarantineFactsSchema } from "./noise-quarantine.js"
 import { MAX_OPERATION_METADATA_BYTES } from "./recording-operation.js"
+import { TX_ID } from "../../transmissions/types.js"
 
 export const RECORDING_FACTS_FILE = "facts.json"
 export const RECORDING_FACTS_TEMP = "facts.tmp"
 /** See the module comment for the arithmetic. */
 export const RECORDING_FACTS_MAX_BYTES = 2048
+/** A file names at most 8 transmissions: `txId` + 7 `moreTxIds`. */
+export const RECORDING_FACTS_MORE_TX_MAX = 7
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const IDENTITY = /^[A-Za-z0-9_-]{1,128}$/
@@ -423,6 +429,14 @@ export const RecordingFactsSchema = z
 		admission: NoiseQuarantineFactsSchema.nullable(),
 		/** The tone heard over the file; null: both detectors analysed enough and heard none; absent: not determined. */
 		tone: RecordingToneSchema.nullable().optional(),
+		/** The transmission open at the file's first sample; absent on files kept before it. */
+		txId: z.string().regex(TX_ID).optional(),
+		/** The other transmissions open while the file was (at most 7); absent when none. */
+		moreTxIds: z
+			.array(z.string().regex(TX_ID))
+			.min(1)
+			.max(RECORDING_FACTS_MORE_TX_MAX)
+			.optional(),
 	})
 	.strict()
 
@@ -449,6 +463,8 @@ export interface RecordingFactsInput {
 	admission: unknown
 	/** The recorder's tone fact (toneFactOf); undefined: none, the member is left out. */
 	tone?: unknown
+	/** The file's transmissions, start id first; empty or absent: no transmission members. */
+	txIds?: readonly string[]
 }
 
 /**
@@ -493,9 +509,22 @@ export function recordingFactsBytes(input: RecordingFactsInput): Buffer | null {
 		},
 		admission: admission.success ? admission.data : null,
 		...(tone?.success === true ? { tone: tone.data } : {}),
+		...txMembersOf(input.txIds),
 	})
 	if (!parsed.success) return null
 	return withinFactsBound(Buffer.from(JSON.stringify(parsed.data)))
+}
+
+/** The `txId` / `moreTxIds` members of a file's ids: invalid ids dropped, the first one start. */
+function txMembersOf(ids: readonly string[] | undefined): {
+	txId?: string
+	moreTxIds?: string[]
+} {
+	const valid = [...new Set((ids ?? []).filter(id => TX_ID.test(id)))]
+	const [first, ...more] = valid
+	if (first === undefined) return {}
+	const rest = more.slice(0, RECORDING_FACTS_MORE_TX_MAX)
+	return rest.length > 0 ? { txId: first, moreTxIds: rest } : { txId: first }
 }
 
 /** `bytes` when at most RECORDING_FACTS_MAX_BYTES (exactly at it is within), else null. */

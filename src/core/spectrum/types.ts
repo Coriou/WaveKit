@@ -317,7 +317,8 @@ export type PipelineEvent =
 	/** `proofSlackSamples`: a marker start's slack as applied (PendingEpoch.proofSlackSamples, or a later proof-slack). */
 	| { kind: "epoch-started"; epoch: number; startSample: number; settleMode: SettleMode; markerRunSamples?: number; proofSlackSamples?: number }
 	| { kind: "stale-discard"; epoch: number; blocks: number }
-	| { kind: "track-open"; track: TrackSnapshot }
+	/** `rolloverFrom`: the predecessor's trackId when this track re-opened a max-duration close. */
+	| { kind: "track-open"; track: TrackSnapshot; rolloverFrom?: string }
 	| { kind: "track-update"; track: TrackSnapshot }
 	| { kind: "track-close"; track: TrackSnapshot; endReason: ObservationEndReason }
 	| { kind: "transient"; centreHz: number; epoch: number; sample: number }

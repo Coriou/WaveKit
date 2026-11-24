@@ -473,6 +473,11 @@ export interface AnalogTransmissionFrequency {
  */
 export interface AnalogTransmissionEventData {
 	transmissionId: string
+	/**
+	 * The transmission identity (`tx_<ULID>`) this event belongs to: a max-duration
+	 * continuation keeps it, a tone split gets a new one. Absent without a registry.
+	 */
+	txId?: string
 	sourceId: string
 	state: "open" | "closed"
 	startedAt: string

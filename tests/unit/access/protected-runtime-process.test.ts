@@ -146,7 +146,9 @@ export class ScannerService extends EventEmitter {
 	constructor(options) {
 		super()
 		this.options = options
-		this.owner = options.construction ?? options.channelOwnership?.construction ?? new ScannerLifecycleOwner()
+		// The core binds the transmission registry to the spectrum's pipeline events.
+		this.spectrum = new EventEmitter()
+		this.owner =options.construction ?? options.channelOwnership?.construction ?? new ScannerLifecycleOwner()
 		this.owner.ownCleanup("service", async () => {
 			process.stdout.write("scanner-stop-real\\n")
 			process.stdout.write("close-lost-ownership " + options.lostOwnership() + " " + options.tuner.config.lostOwnership() + "\\n")

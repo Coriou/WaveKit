@@ -7413,6 +7413,7 @@ export class DiscoveryStore
 		if (t.acf30 !== undefined) record.acf30 = t.acf30
 		if (t.acf60 !== undefined) record.acf60 = t.acf60
 		if (obs.hopIndex !== undefined) record.hopIndex = obs.hopIndex
+		if (obs.txId !== undefined) record.txId = obs.txId
 		return record
 	}
 

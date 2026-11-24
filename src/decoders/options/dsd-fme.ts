@@ -9,6 +9,16 @@
 import { z } from "zod"
 import type { DecoderOptionDescriptor } from "@wavekit/api-types"
 import { INTEGER_TEXT, numberOrText } from "./common.js"
+import type { TxDvPort } from "../../core/transmissions/types.js"
+
+/**
+ * Non-serialisable runtime options of the dsd-fme decoder, given by the core at construction
+ * (createDsdFmeDecoder), never read from config and never in dsdFmeOptionsSchema.
+ */
+export interface DsdFmeRuntimeOptions {
+	/** Transmission identity: each published call claims a txId per lane and run. */
+	transmissions?: TxDvPort
+}
 
 const DSD_FME_MODE_VALUES = [
 	"auto",

@@ -24,6 +24,8 @@ export interface DigitalVoiceConfig {
 export interface DigitalVoiceCall {
 	decoderId: string
 	callId: string
+	/** The call's transmission id (`tx_<ULID>`), from its call_start on; absent without one. */
+	txId?: string
 	/** dsd-fme protocol, e.g. "dmr", "p25p1", "ysf", "dstar", "nxdn96". */
 	protocol: string | null
 	talkgroup: number | null

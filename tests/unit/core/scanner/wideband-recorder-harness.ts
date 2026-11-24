@@ -11,6 +11,7 @@
  *   WAVEKIT_RECORDER_DSP_WASM=$PWD/dist/wideband-nfm.wasm WAVEKIT_REQUIRE_NFM_WASM=1 \
  *     pnpm exec vitest run --maxWorkers=1 tests/unit/core/scanner
  */
+import type { TxRefusalCode } from "../../../../src/core/transmissions/types.js"
 import "./recorder-dsp-required.js"
 import pino from "pino"
 import type { Logger } from "../../../../src/utils/logger.js"
@@ -112,6 +113,8 @@ export interface FakeOp {
 	denied: boolean
 	/** Gaps reported through addGap. */
 	gaps: number
+	/** The finish's AnalogFinishFacts.txIds; absent when it gave none. */
+	txIds?: readonly string[]
 }
 
 export const microtasks = async (n: number): Promise<void> => {
@@ -195,6 +198,7 @@ export function fakeOps(
 			finish: async (cut = "completed", facts) => {
 				op.cut = cut
 				if (facts?.cutActive !== undefined) op.cutActive = facts.cutActive
+				if (facts?.txIds !== undefined) op.txIds = facts.txIds
 				if (facts !== undefined)
 					op.verdict = {
 						...(facts.keptBy === undefined ? {} : { keptBy: facts.keptBy }),
@@ -266,6 +270,10 @@ export function harness(
 		admission?: boolean
 		/** The recorder's logger; default silent. */
 		logger?: Logger
+		/** The observation's open transmission (WidebandAnalogDeps.txOf); default absent. */
+		txOf?: (observationId: string) => string | null
+		/** The recorder's transmission refusals (WidebandAnalogDeps.txRefusal); default absent. */
+		txRefusal?: (observationId: string, code: TxRefusalCode) => void
 		/** Wraps the fake store's beginAnalog (failure injection: a throw, a rejected push). */
 		beginWrap?: (
 			begin: (input: AnalogInput) => AnalogHandle,
@@ -324,6 +332,8 @@ export function harness(
 		...(opts.tuningRefused ? { tuningRefused: opts.tuningRefused } : {}),
 		...(decodedLabel ? { decodedLabel } : {}),
 		...(opts.voicePrior ? { voicePrior: opts.voicePrior } : {}),
+		...(opts.txOf ? { txOf: opts.txOf } : {}),
+		...(opts.txRefusal ? { txRefusal: opts.txRefusal } : {}),
 		timer: (ms, run) => {
 			const t = { ms, run, live: true }
 			timers.push(t)

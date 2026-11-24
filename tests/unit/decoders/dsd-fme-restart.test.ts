@@ -7,9 +7,22 @@ import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
 import type * as ChildProcess from "node:child_process"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { DsdFmeVoiceCallState } from "../../../src/decoders/builtin/dsd-fme.js"
+import pino from "pino"
+import {
+	DsdFmeDecoder,
+	type DsdFmeVoiceCallState,
+} from "../../../src/decoders/builtin/dsd-fme.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
-import { createDecoder, LC, T0 } from "./dsd-fme-call-first-helpers.js"
+import {
+	TX_ID,
+	TransmissionRegistry,
+} from "../../../src/core/transmissions/index.js"
+import {
+	createDecoder,
+	DATE_CLOCK,
+	LC,
+	T0,
+} from "./dsd-fme-call-first-helpers.js"
 
 vi.mock("node:child_process", async importOriginal => {
 	const actual = await importOriginal<typeof ChildProcess>()
@@ -33,6 +46,7 @@ vi.mock("node:child_process", async importOriginal => {
 
 type Internals = {
 	handleOutputLine(line: string): void
+	txRun(): string
 	process: unknown
 	callTimeoutTimer: unknown
 }
@@ -147,6 +161,144 @@ describe("dsd-fme crash restart", () => {
 			encryptionKnown: false,
 			flags: { restart: true },
 		})
+		internals.process = null
+		await decoder.stop()
+	})
+	it("a rebuilt instance with the same id never reuses a run the old instance retired", async () => {
+		const registry = new TransmissionRegistry({ now: () => Date.now() })
+		const make = () =>
+			new DsdFmeDecoder(
+				{
+					id: "dsd-fme",
+					type: "dsd-fme",
+					enabled: true,
+					options: { mode: "auto" },
+				},
+				pino({ level: "silent" }),
+				DATE_CLOCK,
+				{ transmissions: registry },
+			)
+		const txOf = (o: DecoderOutput | undefined) =>
+			(o?.data as { txId?: string } | undefined)?.txId
+		const runCall = async (decoder: DsdFmeDecoder, atMs: number) => {
+			const internals = decoder as unknown as Internals
+			const outputs: DecoderOutput[] = []
+			decoder.on("output", (o: DecoderOutput) => outputs.push(o))
+			decoder.on("error", () => undefined)
+			const line = (offset: number, text: string) => {
+				vi.setSystemTime(T0 + atMs + offset)
+				internals.handleOutputLine(text)
+			}
+			await decoder.start()
+			const run = internals.txRun()
+			line(0, BS("VLC"))
+			line(0, LC(1, 9001, 91))
+			line(60, BS("VC1"))
+			vi.advanceTimersByTime(500)
+			const txId = txOf(outputs.find(o => o.type === "call_start"))
+			internals.process = null
+			await decoder.stop()
+			return { run, txId }
+		}
+
+		const first = await runCall(make(), 0)
+		expect(first.txId).toMatch(TX_ID)
+		const refusedAfterFirst = registry.stats().retiredRun
+
+		const second = await runCall(make(), 30_000)
+		expect(second.run).not.toBe(first.run)
+		expect(second.txId).toMatch(TX_ID)
+		expect(second.txId).not.toBe(first.txId)
+		expect(registry.stats().retiredRun).toBe(refusedAfterFirst)
+
+		// The old instance's late claim after its stop is still refused.
+		expect(
+			registry.claim({
+				origin: "dv-call",
+				kind: "voice-digital",
+				sourceId: null,
+				dvKey: "dv:dsd-fme",
+				lane: 1,
+				run: first.run,
+				atMs: Date.now(),
+				alias: "call:dsd-fme:late",
+			}),
+		).toBeNull()
+		expect(registry.stats().retiredRun).toBe(refusedAfterFirst + 1)
+	})
+	it("a crash restart through start() closes the old run's transmission and the next call claims a fresh id; the old run's claims are refused", async () => {
+		const registry = new TransmissionRegistry({ now: () => Date.now() })
+		const decoder = new DsdFmeDecoder(
+			{
+				id: "dsd-fme",
+				type: "dsd-fme",
+				enabled: true,
+				options: { mode: "auto" },
+			},
+			pino({ level: "silent" }),
+			DATE_CLOCK,
+			{ transmissions: registry },
+		)
+		const internals = decoder as unknown as Internals
+		const outputs: DecoderOutput[] = []
+		decoder.on("output", (o: DecoderOutput) => outputs.push(o))
+		decoder.on("error", () => undefined)
+		const line = (atMs: number, text: string) => {
+			vi.setSystemTime(T0 + atMs)
+			internals.handleOutputLine(text)
+		}
+		const txOf = (o: DecoderOutput | undefined) =>
+			(o?.data as { txId?: string } | undefined)?.txId
+		// The decoder's first run is the one before any start(); this start() begins the next.
+		await decoder.start()
+		const crashedRun = internals.txRun()
+		line(0, BS("VLC"))
+		line(0, LC(1, 9001, 91))
+		line(60, BS("VC1"))
+		vi.advanceTimersByTime(500)
+		const first = txOf(outputs.find(o => o.type === "call_start"))
+		expect(first).toMatch(TX_ID)
+		expect(registry.get(first!)!.state).toBe("open")
+
+		// The child crashed: start() again without stop() (a third run).
+		internals.process = null
+		await decoder.start()
+		const old = registry.get(first!)!
+		expect(old.state).toBe("closed")
+		expect(old.close).toBe("decoder-restart")
+		expect(old.complete).toBe(false)
+		const restartEnd = outputs.find(o => o.type === "call_end")
+		expect(txOf(restartEnd)).toBe(first)
+
+		// A late claim of the crashed run is refused and counted.
+		const refusedBefore = registry.stats().retiredRun
+		expect(
+			registry.claim({
+				origin: "dv-call",
+				kind: "voice-digital",
+				sourceId: null,
+				dvKey: "dv:dsd-fme",
+				lane: 1,
+				run: crashedRun,
+				atMs: Date.now(),
+				alias: "call:dsd-fme:late",
+			}),
+		).toBeNull()
+		expect(registry.stats().retiredRun).toBe(refusedBefore + 1)
+
+		// The next call of the new run claims its own id.
+		line(20_000, BS("VLC"))
+		line(20_000, LC(1, 9002, 92))
+		line(20_060, BS("VC1"))
+		vi.setSystemTime(T0 + 20_600)
+		vi.advanceTimersByTime(500)
+		const starts = outputs.filter(o => o.type === "call_start")
+		expect(starts).toHaveLength(2)
+		const second = txOf(starts[1])
+		expect(second).toMatch(TX_ID)
+		expect(second).not.toBe(first)
+		expect(registry.get(second!)!.state).toBe("open")
+
 		internals.process = null
 		await decoder.stop()
 	})

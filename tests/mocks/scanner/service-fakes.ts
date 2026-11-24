@@ -111,6 +111,8 @@ export function serviceHarness(
 		 * nothing is proven.
 		 */
 		ledger?: false
+		/** The transmissions registry port (default: none, no txId). */
+		transmissions?: ScannerServiceDeps["transmissions"]
 	} = {},
 ) {
 	const centre = opts.centreHz ?? CENTRE
@@ -200,6 +202,7 @@ export function serviceHarness(
 		engineHost: "inline",
 		tickMs: 20,
 		...(opts.now ? { now: opts.now } : {}),
+		...(opts.transmissions ? { transmissions: opts.transmissions } : {}),
 	})
 	stampLegacyGate(service, settings)
 	return {

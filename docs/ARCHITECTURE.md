@@ -538,6 +538,27 @@ backfilled on the writer thread after the open, 500 voice rows per transaction w
 chunks, resumed from `store_meta.recordingLinkBackfill`; then the writer sends the full link set
 for the index.
 
+### Transmission identity
+
+One transmission (one over on one channel, or one digital-voice call on one lane) gets one id,
+`tx_<ULID>`, from an in-memory registry (`src/core/transmissions/`). The core builds one registry
+(`composeTransmissions` in `compose.ts`, called once by `src/index.ts`) and hands each producer a
+narrowed port of it: the live demodulator claims an id when it announces a transmission, a scanner
+observation when it opens (a max-duration roll-over successor continues its predecessor's id), and
+dsd-fme when a call is published. Two claims on one source and channel at the same time share an id;
+claims on channels 6.25 kHz or more apart never do. Everything derived from the artefact copies the
+id: the live and scanner Activity rows (`txId` in the record, a `txId` ref), a call's outputs and
+voice-call state, a kept file's facts (`txId`, `moreTxIds`) and the catalogue item. intent.json and
+receipt.json carry none, so an older core still reads the operation folders.
+
+The registry is memory only and bounded: at most 528 open transmissions per source and 4,224 in
+all (a claim past either is refused and the artefact goes out without an id), 1,024 bare and 2,048
+artefact-bearing closed ones (the oldest dropped first, the latter for at most 6 h), 30 minutes per
+transmission, 16,384 aliases. A lost source closes its transmissions `source-lost`, a new spectrum
+epoch closes the older epoch's `retune`, a dsd-fme restart closes its run's `decoder-restart`, and
+shutdown stops its sweep. `GET /api/transmissions/:ref` reads it, then the stored Activity rows and
+the catalogue index for an id it no longer holds.
+
 ### Dynamic Sample Rate Handling
 
 Sample rate changes, whether made through the API (the web app) or by a TunerRelay client such

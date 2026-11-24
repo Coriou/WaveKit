@@ -200,6 +200,88 @@ describe("activity routes", () => {
 		)
 	})
 
+	it("finds a transmission's rows by refs=txId", async () => {
+		fixture = await createFixture()
+		const store = fixture
+		service = openQueryService(store)
+		const tx = `tx_01JTESTTX${"A".repeat(17)}`
+		const other = `tx_01JTESTTX${"B".repeat(17)}`
+		store.insert({
+			eventId: "evt-call",
+			kind: "decoder-reception",
+			sourceId: "src-a",
+			text: "call",
+			refs: [
+				{ type: "callId", value: "call-1" },
+				{ type: "txId", value: tx },
+			],
+		})
+		store.insert({
+			eventId: "evt-live",
+			kind: "analog-transmission",
+			sourceId: "src-a",
+			text: "over",
+			refs: [{ type: "txId", value: tx }],
+		})
+		store.insert({
+			eventId: "evt-other",
+			kind: "decoder-reception",
+			sourceId: "src-a",
+			text: "other",
+			refs: [{ type: "txId", value: other }],
+		})
+		const app = Fastify({ logger: false })
+		await app.register(activityRoutes, {
+			service,
+			enabled: true,
+			stats: () => stats,
+		})
+		const search = await app.inject({
+			method: "GET",
+			url: `/api/activity?refs=txId:${tx}&limit=10`,
+		})
+		expect(search.statusCode).toBe(200)
+		const page = search.json() as { items: { eventId: string }[] }
+		expect(page.items.map(item => item.eventId).sort()).toEqual([
+			"evt-call",
+			"evt-live",
+		])
+		await app.close()
+	})
+
+	it("refuses a txId ref that is not a transmission id (route and query)", async () => {
+		fixture = await createFixture()
+		service = openQueryService(fixture)
+		const app = Fastify({ logger: false })
+		await app.register(activityRoutes, {
+			service,
+			enabled: true,
+			stats: () => stats,
+		})
+		// Lower case, one character short, and a prefix-only value: none is a TX_ID.
+		for (const value of [
+			`tx_01jtesttx${"a".repeat(17)}`,
+			`tx_01JTESTTX${"A".repeat(16)}`,
+			"tx_",
+		]) {
+			const search = await app.inject({
+				method: "GET",
+				url: `/api/activity?refs=txId:${encodeURIComponent(value)}`,
+			})
+			expect(search.statusCode).toBe(400)
+			const facets = await app.inject({
+				method: "POST",
+				url: "/api/activity/facets",
+				payload: {
+					query: { refs: [{ type: "txId", value }] },
+					dimensions: ["kind"],
+				},
+			})
+			expect(facets.statusCode).toBe(400)
+		}
+		await app.close()
+	})
+
 	it("searches, reads detail, counts facets, and reports status", async () => {
 		fixture = await createFixture()
 		const store = fixture
