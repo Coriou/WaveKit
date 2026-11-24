@@ -10,6 +10,8 @@ import type {
 import { formatMHz, formatWidth } from "../format.ts"
 import { squelchForModulation } from "../listen/audio.ts"
 import { channelSuggestions, type ChannelSuggestion } from "./band.ts"
+import type { ClickTuning } from "../../shell/device-prefs.ts"
+import type { TuneOptions } from "../tuning.ts"
 import type { ParsedFrequency } from "./frequency.ts"
 import { modeSpec, type Modulation } from "./modes.ts"
 
@@ -63,6 +65,17 @@ export function saveInput(
 	}
 	if (group) input.group = group
 	return input
+}
+
+/** The input with "Tune as centre" set (`centre: true`) or cleared (the field left out, as core stores "off"). */
+export function withCentre(
+	input: SavedFrequencyInput,
+	centre: boolean,
+): SavedFrequencyInput {
+	const next = { ...input }
+	if (centre) next.centre = true
+	else delete next.centre
+	return next
 }
 
 /** "12.5 kHz" etc. without the trailing unit noise for RAW. */
@@ -134,6 +147,21 @@ export interface RecallPorts {
 	config(): LiveAudioConfig | null | undefined
 	setConfig(patch: Partial<LiveAudioConfig>): Promise<unknown>
 	tune(hz: number): Promise<unknown>
+}
+
+/**
+ * How a recall tunes, from Display › Click to tune: "Centre" makes every tune recentre the receiver on
+ * the frequency (as the spectrum's own recall does); "Free" moves the listening channel inside the
+ * capture and recentres only past its usable edge (DESIGN.md "Spectrum interaction"). A saved frequency
+ * marked "Tune as centre" (`centre: true`) always recentres, whatever the setting.
+ */
+export function recallTuneOptions(
+	clickTuning: ClickTuning,
+	f?: Pick<SavedFrequency, "centre">,
+): TuneOptions {
+	return clickTuning === "centre" || f?.centre === true
+		? { recentre: true }
+		: {}
 }
 
 /**

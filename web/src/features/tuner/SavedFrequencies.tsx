@@ -2,16 +2,27 @@
 // the live mode, bandwidth and tone), recall one (tune + mode), rename, remove. Stored in core, shared by every client.
 import "./saved.css"
 
-import { memo, useEffect, useRef, useState, type KeyboardEvent } from "react"
+import {
+	memo,
+	useEffect,
+	useId,
+	useRef,
+	useState,
+	type FocusEvent,
+	type KeyboardEvent,
+} from "react"
 import type { SavedFrequency } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { bandAt, channelAt, useStore } from "../../data/index.ts"
 import type { SavedFrequencyRow } from "../../data/index.ts"
+import { inputOf } from "../../data/saved-frequencies-store.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Chip } from "../../ui/Chip.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
 import { Label } from "../../ui/Label.tsx"
+import { Switch } from "../../ui/Switch.tsx"
+import { devicePrefsStore } from "../../shell/device-prefs.ts"
 import { formatMHz } from "../format.ts"
 import { useLiveStatus, useTunedHz } from "../hooks.ts"
 import { modulationOf } from "./modes.ts"
@@ -19,10 +30,12 @@ import {
 	defaultGroup,
 	defaultSaveName,
 	recallSaved,
+	recallTuneOptions,
 	SAVE_GROUPS,
 	saveInput,
 	saveSummary,
 	savedMeta,
+	withCentre,
 } from "./saved.ts"
 
 const BOOKMARK = "M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"
@@ -81,14 +94,47 @@ export function useRecall(): (f: SavedFrequency) => void {
 			{
 				config: () => data.liveAudio.get().status?.config,
 				setConfig: patch => data.liveAudio.setConfig(patch),
-				tune: hz => tuning.tune(hz),
+				tune: hz =>
+					tuning.tune(
+						hz,
+						recallTuneOptions(devicePrefsStore.getState().clickTuning, f),
+					),
 			},
 			f,
 		)
 	}
 }
 
-function SaveForm({ hz, onDone }: { hz: number; onDone: () => void }) {
+/**
+ * "Tune as centre": recalling this saved frequency always recentres the receiver on it, whatever
+ * Display › Click to tune says (a band-middle bookmark that should open the whole band around it).
+ * Pressing it keeps focus where it was (mousedown default prevented): Safari and Firefox on macOS
+ * do not focus a clicked button, so the edit group would otherwise see a blur to nowhere and save
+ * before the toggle lands. Space toggles it from the keyboard; Enter saves the edit group.
+ */
+export function CentreSwitch({
+	checked,
+	onChange,
+}: {
+	checked: boolean
+	onChange: (checked: boolean) => void
+}) {
+	const id = useId()
+	return (
+		<div className="wkf-save-centre">
+			<span id={id}>Tune as centre</span>
+			<Switch
+				aria-labelledby={id}
+				size="row"
+				checked={checked}
+				onChange={onChange}
+				onMouseDown={e => e.preventDefault()}
+			/>
+		</div>
+	)
+}
+
+export function SaveForm({ hz, onDone }: { hz: number; onDone: () => void }) {
 	const { data } = useServices()
 	const status = useLiveStatus()
 	const view = useStore(data.bandplan, s => s.view)
@@ -97,18 +143,22 @@ function SaveForm({ hz, onDone }: { hz: number; onDone: () => void }) {
 		defaultSaveName(hz, channelAt(band, hz)?.name, band?.band.name),
 	)
 	const [group, setGroup] = useState(() => defaultGroup(band?.band.group))
+	const [centre, setCentre] = useState(false)
 	const input = useRef<HTMLInputElement>(null)
 	useEffect(() => {
 		input.current?.select()
 	}, [])
-	const draft = saveInput(
-		{
-			hz,
-			config: status?.config ?? null,
-			bandMode: modulationOf(band?.band.mode),
-		},
-		name.trim(),
-		group,
+	const draft = withCentre(
+		saveInput(
+			{
+				hz,
+				config: status?.config ?? null,
+				bandMode: modulationOf(band?.band.mode),
+			},
+			name.trim(),
+			group,
+		),
+		centre,
 	)
 	const save = () => {
 		if (!name.trim()) return
@@ -150,6 +200,7 @@ function SaveForm({ hz, onDone }: { hz: number; onDone: () => void }) {
 					</Chip>
 				))}
 			</div>
+			<CentreSwitch checked={centre} onChange={setCentre} />
 			<span className="wkf-quiet wkf-xs">
 				Saves {saveSummary(draft)}. Shared with every WaveKit client.
 			</span>
@@ -170,7 +221,11 @@ function SaveForm({ hz, onDone }: { hz: number; onDone: () => void }) {
 	)
 }
 
-function RenameField({
+/**
+ * Edits a saved frequency in place: its name and "Tune as centre". Enter (also on the focused switch,
+ * whose Space toggles) or leaving the group saves; Escape cancels.
+ */
+export function EditField({
 	row,
 	onDone,
 }: {
@@ -179,36 +234,57 @@ function RenameField({
 }) {
 	const { data } = useServices()
 	const [name, setName] = useState(row.name)
+	const [centre, setCentre] = useState(row.centre === true)
 	const input = useRef<HTMLInputElement>(null)
 	useEffect(() => {
 		input.current?.select()
 	}, [])
+	// One outcome per edit: a blur that follows Enter or Escape (the row unmounting) changes nothing.
+	const settled = useRef(false)
+	const finish = () => {
+		if (settled.current) return false
+		settled.current = true
+		onDone()
+		return true
+	}
 	const commit = () => {
 		const next = name.trim()
-		onDone()
-		if (next && next !== row.name)
-			data.savedFrequencies.rename(row.id, next).catch(() => undefined)
+		if (!finish()) return
+		if (!next || (next === row.name && centre === (row.centre === true))) return
+		data.savedFrequencies
+			.replace(row.id, withCentre({ ...inputOf(row), name: next }, centre))
+			.catch(() => undefined)
 	}
 	return (
-		<input
-			ref={input}
-			className="wk-input wkf-saved-rename"
-			value={name}
-			maxLength={128}
-			aria-label={`New name for ${row.name}`}
-			onChange={e => setName(e.target.value)}
-			onBlur={commit}
-			onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+		<div
+			className="wkf-saved-editing"
+			role="group"
+			aria-label={`Edit ${row.name}`}
+			onBlur={(e: FocusEvent<HTMLDivElement>) => {
+				const to = e.relatedTarget
+				if (!(to instanceof Node) || !e.currentTarget.contains(to)) commit()
+			}}
+			onKeyDown={(e: KeyboardEvent<HTMLDivElement>) => {
 				if (e.key === "Enter") {
 					e.preventDefault()
 					commit()
 				} else if (e.key === "Escape") {
 					e.preventDefault()
 					e.stopPropagation()
-					onDone()
+					finish()
 				}
 			}}
-		/>
+		>
+			<input
+				ref={input}
+				className="wk-input wkf-saved-rename"
+				value={name}
+				maxLength={128}
+				aria-label={`New name for ${row.name}`}
+				onChange={e => setName(e.target.value)}
+			/>
+			<CentreSwitch checked={centre} onChange={setCentre} />
+		</div>
 	)
 }
 
@@ -236,7 +312,7 @@ function SavedRow({
 			data-pending={pending || undefined}
 		>
 			{renaming ? (
-				<RenameField row={row} onDone={() => onRename(null)} />
+				<EditField row={row} onDone={() => onRename(null)} />
 			) : (
 				<button
 					type="button"
@@ -255,7 +331,7 @@ function SavedRow({
 			)}
 			{editable && !renaming && (
 				<IconButton
-					label={`Rename ${row.name}`}
+					label={`Edit ${row.name}`}
 					className="wkf-saved-edit"
 					disabled={pending}
 					onClick={() => onRename(row.id)}

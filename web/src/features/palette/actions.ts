@@ -26,8 +26,10 @@ import { focusSetting } from "../settings/registry.ts"
 import { showOnMap } from "../map/focus.ts"
 import { feedControllerFor, receiverSourceId } from "../receiver/feed.ts"
 import { modeSpec } from "../tuner/modes.ts"
-import { recallSaved, saveInput } from "../tuner/saved.ts"
+import { recallSaved, recallTuneOptions, saveInput } from "../tuner/saved.ts"
+import { devicePrefsStore } from "../../shell/device-prefs.ts"
 import { modulationOf } from "../tuner/modes.ts"
+import { tuneContext } from "../tuning.ts"
 import { bandAt } from "../../data/bandplan-store.ts"
 import { promptInstall } from "../../pwa/pwa.ts"
 import type { ActivityToken, PaletteAction, Preview } from "./model.ts"
@@ -163,11 +165,22 @@ export async function runAction(
 			case "recall": {
 				const before = s.tuning.displayHz()
 				const config = s.data.liveAudio.get().status?.config
+				const how = recallTuneOptions(
+					devicePrefsStore.getState().clickTuning,
+					action.saved,
+				)
+				// A recall may move the hardware (a recentring recall, or a Free one past the usable edge): its
+				// undo puts back that centre and offset.
+				const prior = tuneContext(
+					s.data.tuner.state(),
+					s.data.liveAudio.get().status ?? null,
+				)
+				const undoHow = prior ? { centreHz: prior.centreHz } : {}
 				await recallSaved(
 					{
 						config: () => s.data.liveAudio.get().status?.config,
 						setConfig: patch => s.data.liveAudio.setConfig(patch),
-						tune: hz => s.tuning.tune(hz),
+						tune: hz => s.tuning.tune(hz, how),
 					},
 					action.saved,
 				)
@@ -185,7 +198,7 @@ export async function runAction(
 												bandwidth: config.bandwidth,
 											})
 											.catch(() => undefined)
-									void s.tuning.tune(before)
+									void s.tuning.tune(before, undoHow)
 								},
 							}
 						: {}),

@@ -3631,15 +3631,18 @@ The 2026-10-16 core adds `patchable` to a descriptor: `true` when the protected
 older core reads as not patchable. Patchable keys are receive tuning and
 decode parameters whose value is a bounded number, a boolean or a closed set:
 
-| Type              | Patchable keys                                                                                                          |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                                                          |
-| `ais-catcher`     | `gain`, `ppm`                                                                                                           |
-| `readsb`          | `ppm`                                                                                                                   |
-| `dsd-fme`         | `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc`, `receiveFilter`, `carrierCorrection` |
-| `multimon-ng`     | `fmGain`, `modes`, `verbosity`                                                                                          |
-| `rtl433`          | `analyze`, `protocols`                                                                                                  |
-| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                                                        |
+| Type              | Patchable keys                                                                                                                         |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                                                                         |
+| `ais-catcher`     | `gain`, `ppm`                                                                                                                          |
+| `readsb`          | `ppm`                                                                                                                                  |
+| `dsd-fme`         | `channelsHz`¹, `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc`, `receiveFilter`, `carrierCorrection` |
+| `multimon-ng`     | `channelsHz`¹, `fmGain`, `modes`, `verbosity`                                                                                          |
+| `direwolf`        | `channelsHz`¹                                                                                                                          |
+| `rtl433`          | `analyze`, `protocols`                                                                                                                 |
+| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                                                                       |
+
+¹ Only on a catalogue decoder or one with `useChannelizer: true`; see below.
 
 Never patchable, by meaning: `extraArgs`; secrets; free-text `string` and
 `object` options; a `string-list` without a closed set; anything naming a path,
@@ -3649,7 +3652,20 @@ file, directory, host, address, port, device, serial, URL or station identity
 rate-plan inputs (`inputSampleRate`, `targetSampleRate`, `inputCenterFreq`,
 `followCenter`, `sampleRate`, `channelHz`, `offsetHz`, lora `oversampling`);
 and any key the digital-voice preparation reads or rewrites (dsd-fme `mode`,
-`output`, `udpHost`, `udpPort`, `voiceSlot`). A string `gain` (readsb,
+`output`, `udpHost`, `udpPort`, `voiceSlot`). For the channel decoders
+(dsd-fme, multimon-ng, direwolf) `channelHz` and `offsetHz` stay config-file keys
+because they set the raw input's rate plan; `channelsHz`, the absolute channel
+centres in Hz, is runtime-patchable only on a decoder that uses channel placements:
+a catalogue decoder or a YAML decoder with `useChannelizer: true`. There a new list
+takes effect after the decoder's next start. On any other decoder a non-empty
+`channelsHz` list would be stored and never decoded (it keeps reading the raw
+capture at its centre), so the PATCH is refused with `DECODER_OPTION_NOT_PATCHABLE`
+(`keys: ["channelsHz"]`) and a `fields` entry for `options.channelsHz` naming the
+supported ways: set `useChannelizer: true` with `channelsHz` in the YAML config, or
+use the activity slots. A `null` or empty list (a revert) is not refused, a
+malformed value is `DECODER_OPTIONS_INVALID`, and a stale `If-Match` is answered
+412 `DECODER_SETTINGS_REVISION_MISMATCH` first. A type without the `channelsHz`
+option (acarsdec, readsb) gets the usual answer for an undocumented key. A string `gain` (readsb,
 dumpvdl2) and options an adapter does not use (acarsdec `gain`, dumpvdl2 `ppm`)
 stay false. The core re-checks these rules at runtime, not only through the
 descriptors.
@@ -4058,15 +4074,15 @@ configured keys the patch does not touch never fails the patch. A refused
 patch changes nothing. Error bodies `{ error, code, message, issues?, keys?,
 unknownKeys? }` never carry a submitted value:
 
-| Status | Code                                 | When                                                                                                 |
-| ------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| 400    | `DECODER_OPTIONS_INVALID`            | bad body shape or value (`issues`: documented key, fixed rule text), malformed `If-Match`, empty id  |
-| 400    | `DECODER_OPTION_NOT_PATCHABLE`       | a documented non-patchable key (`keys`) or undocumented keys (counted in `unknownKeys`, never named) |
-| 404    | `DECODER_NOT_FOUND`                  | unknown decoder                                                                                      |
-| 409    | `DECODER_OWNED_BY_SCANNER`           | a scanner probe                                                                                      |
-| 412    | `DECODER_SETTINGS_REVISION_MISMATCH` | `If-Match` differs from the store revision                                                           |
-| 413    | `DECODER_SETTINGS_LIMIT`             | body over 16 KiB, or the store would pass its bounds                                                 |
-| 503    | `DECODER_SETTINGS_STORE_UNAVAILABLE` | the file cannot be written (the in-memory layer is unchanged)                                        |
+| Status | Code                                 | When                                                                                                                                                                                        |
+| ------ | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | `DECODER_OPTIONS_INVALID`            | bad body shape or value (`issues`: documented key, fixed rule text), malformed `If-Match`, empty id                                                                                         |
+| 400    | `DECODER_OPTION_NOT_PATCHABLE`       | a documented non-patchable key (`keys`, each in `fields` with what to set instead), undocumented keys (`unknownKeys`, never named), or `channelsHz` on a decoder without channel placements |
+| 404    | `DECODER_NOT_FOUND`                  | unknown decoder                                                                                                                                                                             |
+| 409    | `DECODER_OWNED_BY_SCANNER`           | a scanner probe                                                                                                                                                                             |
+| 412    | `DECODER_SETTINGS_REVISION_MISMATCH` | `If-Match` differs from the store revision                                                                                                                                                  |
+| 413    | `DECODER_SETTINGS_LIMIT`             | body over 16 KiB, or the store would pass its bounds                                                                                                                                        |
+| 503    | `DECODER_SETTINGS_STORE_UNAVAILABLE` | the file cannot be written (the in-memory layer is unchanged)                                                                                                                               |
 
 A denial answers before the body is parsed, with the access code-only body.
 
@@ -6919,7 +6935,12 @@ usage that every paired browser shares, stored in the state directory.
 
 - `GET /api/operator-data`: the whole store.
 - `POST /api/operator-data/saved-frequencies`, `PUT` and `DELETE
-/api/operator-data/saved-frequencies/:id`: manage saved frequencies.
+/api/operator-data/saved-frequencies/:id`: manage saved frequencies. A saved frequency is
+  `{ name, frequencyHz, mode, bandwidthHz, tone, group?, centre? }`; `centre: true` ("Tune as
+  centre") asks clients to recentre the receiver on it when recalled, whatever their Click to tune
+  setting. Leave it out for no preference (`false` is stored as sent); changing it is a change
+  like any other field and moves the revision. Downgrade note: the store schema is strict and has
+  no version bump for `centre`, so an older core refuses a store that holds it.
 - `PATCH /api/operator-data/preferences`: change preferences.
 - `POST` and `DELETE /api/operator-data/command-usage`: record or reset command-palette
   usage.
@@ -6929,6 +6950,16 @@ Writes take the normal protected mutation admission (session, CSRF, Origin). The
 `operator-data:updated` after each change. The DTOs are in
 `packages/api-types/src/operator-data.ts`; the design is in the
 [operator data specification](specs/operator-data/design.md).
+
+Every write sends `expected`, the token of the snapshot it is based on:
+`{ "storeId": snapshot.storeId, "revision": snapshot.revision }` from
+`GET /api/operator-data`. Error bodies are `{ error: "OperatorDataError", code,
+message, details?, fields? }`, all in the strict `operatorDataErrorDtoSchema`. A 400
+`OPERATOR_DATA_INVALID` and a 428 `OPERATOR_DATA_PRECONDITION_REQUIRED` (no `expected`) carry
+`fields: [{ field, expected }]` (1 to 8 entries; no other code has `fields`), the same shape as every other route's 400: the field that failed
+(`expected`, `frequency`, `frequency.bandwidthHz`, `set.units`, the path `id`,
+or `body` for the body as a whole) and what it accepts, never a submitted value.
+A 409 `OPERATOR_DATA_CONFLICT` carries `details.current`, the token to retry with.
 
 After an unclean stop the store's writer lock is reclaimed automatically; a lock
 held by another live core is never taken and the store answers unavailable. See

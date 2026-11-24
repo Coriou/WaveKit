@@ -9,7 +9,13 @@ import type { SavedFrequency } from "@wavekit/api-types"
 
 import type { DataLayer } from "../data/index.ts"
 import { isPendingId, useStore } from "../data/index.ts"
-import { recallSaved, savedMeta } from "../features/tuner/saved.ts"
+import {
+	recallSaved,
+	recallTuneOptions,
+	savedMeta,
+} from "../features/tuner/saved.ts"
+import { useServices } from "../app/context.ts"
+import type { TuningController } from "../features/tuning.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import { formatMHz } from "./maths.ts"
 import type { PlotController } from "./plot-store.ts"
@@ -21,6 +27,25 @@ export interface SavedTagsProps {
 	view: SpectrumViewSpan
 	widthPx: number
 	tunedHz: number | null
+}
+
+/**
+ * How a tag tunes. A "Tune as centre" tag recentres whatever Click to tune says, through the Tuner's
+ * coalescing queue (the Saved list's path), so a refusal (tuner owned, scanner held) lands in that
+ * queue's error and the Tuner shows it, as for a recall from the list. Any other tag tunes as a
+ * click on the plot does.
+ */
+export function savedTagTune(
+	f: Pick<SavedFrequency, "centre">,
+	ports: {
+		tuning: Pick<TuningController, "tune">
+		controller: Pick<PlotController, "tuneTo">
+	},
+): (hz: number) => Promise<unknown> {
+	return hz =>
+		f.centre === true
+			? ports.tuning.tune(hz, recallTuneOptions("free", f))
+			: ports.controller.tuneTo(hz)
 }
 
 const BOOKMARK = "M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"
@@ -39,12 +64,13 @@ export const SavedTags = memo(function SavedTags({
 		() => placeSavedTags(items, view, { widthPx, showLabels, tunedHz }),
 		[items, view.startHz, view.endHz, widthPx, showLabels, tunedHz],
 	)
+	const { tuning } = useServices()
 	const recall = (f: SavedFrequency) =>
 		void recallSaved(
 			{
 				config: () => data.liveAudio.get().status?.config,
 				setConfig: patch => data.liveAudio.setConfig(patch),
-				tune: hz => controller.tuneTo(hz),
+				tune: savedTagTune(f, { tuning, controller }),
 			},
 			f,
 		)

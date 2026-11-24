@@ -45,12 +45,16 @@ const source = (host = "127.0.0.1"): SourceConfig =>
 		},
 	}) as SourceConfig
 
+// Assigned by every test that makes a hub; a pure property (the front position map) makes
+// none, so the hook cleans up only a hub this test made.
 let fake: FakeHub
 let manager: SourceManager | undefined
 afterEach(async () => {
 	await manager?.disconnectAll()
 	manager = undefined
-	await fake.cleanup()
+	const made = fake as FakeHub | undefined
+	fake = undefined as unknown as FakeHub
+	await made?.cleanup()
 	vi.restoreAllMocks()
 })
 
@@ -418,13 +422,18 @@ describe("byte invariants through the injected intake", () => {
 						for (let i = 0; i < segment.drop * 2; i++) map.set(pos++, sinkByte)
 					}
 					for (let i = 0; i < 6; i++) map.set(pos++, sinkByte++)
+					// One assertion per run, not two per position (up to 2 000 positions a
+					// run): the expect calls were most of the property's CPU time.
+					const wrong: string[] = []
 					let previous = -1
 					for (const [at, expected] of map) {
 						const got = accounting.sinkByteOf(at)
-						expect(got).toBe(expected)
-						expect(got as number).toBeGreaterThanOrEqual(previous)
-						previous = got as number
+						if (got !== expected) wrong.push(`${at}: ${got} not ${expected}`)
+						else if (got < previous)
+							wrong.push(`${at}: ${got} below ${previous}`)
+						if (got !== null) previous = got
 					}
+					expect(wrong).toEqual([])
 					expect(accounting.sinkByteOf(start - 1)).toBeNull()
 				},
 			),

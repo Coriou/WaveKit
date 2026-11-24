@@ -37,16 +37,35 @@ export interface MockOperatorDataOptions {
 	now?: () => number
 }
 
+interface MockField {
+	field: string
+	expected: string
+}
+
+/** Core's `expected` hint (src/operator-data/schema.ts EXPECTED_TOKEN_TEXT; a parity test keeps them equal). */
+export const EXPECTED_TOKEN_TEXT =
+	"object with fields storeId, revision: the snapshot.storeId and snapshot.revision of GET /api/operator-data"
+
+/** Core's fallback when a 400 has no field of its own (src/operator-data/transport.ts; parity-tested). */
+export const INVALID_FALLBACK: Readonly<MockField> = {
+	field: "body",
+	expected:
+		"a valid operator-data request: see docs/API.md, operator data, for each route's body",
+}
+
 class OperatorFailure extends Error {
 	readonly code: OperatorDataErrorCode
 	readonly current: { storeId: string; revision: number } | undefined
+	readonly fields: MockField[]
 	constructor(
 		code: OperatorDataErrorCode,
 		current?: { storeId: string; revision: number },
+		fields: MockField[] = [],
 	) {
 		super(OPERATOR_DATA_ERROR_DEFINITIONS[code][1])
 		this.code = code
 		this.current = current
+		this.fields = fields
 	}
 }
 
@@ -62,7 +81,125 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+/** A Zod schema node as the field walk reads it (by `_def.typeName`, so any Zod copy works). */
+interface ZodNode {
+	_def: {
+		typeName?: string
+		innerType?: ZodNode
+		schema?: ZodNode
+		in?: ZodNode
+		type?: ZodNode
+		valueType?: ZodNode
+		catchall?: ZodNode
+		items?: readonly ZodNode[]
+		options?: readonly ZodNode[] | Map<unknown, ZodNode>
+		left?: ZodNode
+		right?: ZodNode
+		getter?: () => ZodNode
+		shape?: () => Record<string, ZodNode>
+	}
+}
+
+const WRAPPERS = new Set([
+	"ZodOptional",
+	"ZodNullable",
+	"ZodDefault",
+	"ZodCatch",
+	"ZodReadonly",
+	"ZodBranded",
+])
+
+function unwrap(node: ZodNode): ZodNode {
+	let current = node
+	for (let i = 0; i < 16; i++) {
+		const def = current._def
+		const next =
+			def.typeName !== undefined && WRAPPERS.has(def.typeName)
+				? (def.innerType ?? def.type)
+				: def.typeName === "ZodEffects"
+					? def.schema
+					: def.typeName === "ZodPipeline"
+						? def.in
+						: def.typeName === "ZodLazy"
+							? def.getter?.()
+							: undefined
+		if (next === undefined) return current
+		current = next
+	}
+	return current
+}
+
+function options(node: ZodNode): ZodNode[] {
+	const def = node._def
+	if (def.typeName === "ZodUnion" || def.typeName === "ZodDiscriminatedUnion")
+		return def.options instanceof Map
+			? [...def.options.values()]
+			: [...(def.options ?? [])]
+	if (def.typeName === "ZodIntersection")
+		return [def.left, def.right].filter((n): n is ZodNode => n !== undefined)
+	return []
+}
+
+function child(
+	node: ZodNode,
+	segment: string | number,
+	depth = 0,
+): { node: ZodNode | undefined; named: boolean } {
+	const inner = unwrap(node)
+	const def = inner._def
+	if (def.typeName === "ZodObject") {
+		const shape = def.shape?.() ?? {}
+		if (typeof segment === "string" && Object.hasOwn(shape, segment))
+			return { node: shape[segment], named: true }
+		return def.catchall === undefined ||
+			def.catchall._def.typeName === "ZodNever"
+			? { node: undefined, named: false }
+			: { node: def.catchall, named: false }
+	}
+	if (def.typeName === "ZodArray" && typeof segment === "number")
+		return { node: def.type, named: true }
+	if (def.typeName === "ZodTuple" && typeof segment === "number")
+		return { node: def.items?.[segment], named: true }
+	if (def.typeName === "ZodRecord") return { node: def.valueType, named: false }
+	if (depth < 4)
+		for (const option of options(inner)) {
+			const found = child(option, segment, depth + 1)
+			if (found.named) return found
+		}
+	return { node: undefined, named: false }
+}
+
+/**
+ * The core's field path for a Zod issue (src/api/validation-errors.ts walkZod): schema-named
+ * segments as sent, a client-chosen key (record or catchall) as "*", and the walk stops where the
+ * schema names nothing, so a client key is never echoed. "body" for the request body itself.
+ */
+export function mockIssueField(
+	schema: unknown,
+	segments: readonly (string | number)[],
+): string {
+	const path: string[] = []
+	let node = schema as ZodNode | undefined
+	for (const segment of segments) {
+		if (node === undefined) break
+		const next = child(node, segment)
+		if (!next.named && next.node === undefined) break
+		path.push(next.named ? String(segment) : "*")
+		node = next.node
+	}
+	return path.length > 0 ? path.join(".") : "body"
+}
+
 function sendFailure(reply: FastifyReply, failure: OperatorFailure) {
+	// Core names the failing fields on a 400 and a 428 (static text, never a value).
+	const fields =
+		failure.code === "OPERATOR_DATA_INVALID"
+			? failure.fields.length > 0
+				? failure.fields
+				: [INVALID_FALLBACK]
+			: failure.code === "OPERATOR_DATA_PRECONDITION_REQUIRED"
+				? [{ field: "expected", expected: `required; ${EXPECTED_TOKEN_TEXT}` }]
+				: []
 	const body: OperatorDataErrorDto = {
 		error: "OperatorDataError",
 		code: failure.code,
@@ -70,6 +207,7 @@ function sendFailure(reply: FastifyReply, failure: OperatorFailure) {
 		...(failure.code === "OPERATOR_DATA_CONFLICT" && failure.current
 			? { details: { current: failure.current } }
 			: {}),
+		...(fields.length > 0 ? { fields } : {}),
 	}
 	return reply.code(OPERATOR_DATA_ERROR_DEFINITIONS[failure.code][0]).send(body)
 }
@@ -125,15 +263,42 @@ export function registerOperatorData(
 		keys: readonly string[],
 		id?: string,
 	): OperatorDataMutation => {
-		if (!isRecord(body) || Object.keys(body).some(k => !keys.includes(k)))
-			throw new OperatorFailure("OPERATOR_DATA_INVALID")
+		const listed = keys.join(", ")
+		if (!isRecord(body))
+			throw new OperatorFailure("OPERATOR_DATA_INVALID", undefined, [
+				{ field: "body", expected: `a JSON object with the fields ${listed}` },
+			])
+		if (Object.keys(body).some(k => !keys.includes(k)))
+			throw new OperatorFailure("OPERATOR_DATA_INVALID", undefined, [
+				{ field: "body", expected: `only the fields ${listed}` },
+			])
 		if (body["expected"] === undefined)
 			throw new OperatorFailure("OPERATOR_DATA_PRECONDITION_REQUIRED")
 		const input: Record<string, unknown> = { type }
 		for (const key of keys) if (Object.hasOwn(body, key)) input[key] = body[key]
 		if (id !== undefined) input["id"] = id
 		const result = mutationSchema.safeParse(input)
-		if (!result.success) throw new OperatorFailure("OPERATOR_DATA_INVALID")
+		if (!result.success)
+			// Core describes each field from its schema; the mock names the field and points at the docs.
+			throw new OperatorFailure(
+				"OPERATOR_DATA_INVALID",
+				undefined,
+				[
+					...new Set(
+						result.error.issues.map(i =>
+							mockIssueField(mutationSchema, i.path),
+						),
+					),
+				]
+					.slice(0, 8)
+					.map(field => ({
+						field,
+						expected:
+							field === "expected"
+								? EXPECTED_TOKEN_TEXT
+								: "a valid value: see docs/API.md, operator data",
+					})),
+			)
 		return result.data
 	}
 

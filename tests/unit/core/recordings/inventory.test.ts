@@ -1466,6 +1466,9 @@ describe("recordings catalogue", () => {
 	it("lists the newest recordings first past 2000 files, and every file exactly once across pages", async () => {
 		const fs = scannerTree(300, 8) // 2400 files
 		const inv = fakeInventory(fs)
+		// A listing waits at most RECORDINGS_INDEXING_WAIT_MS of real time for the first build:
+		// wait for the build itself, so a loaded host cannot turn this into a partial answer.
+		await inv.start?.()
 		const first = await inv.list({ limit: 50 })
 		expect(first.truncated).toBe(false)
 		expect(first.scannedFiles).toBe(2400)
@@ -1477,10 +1480,16 @@ describe("recordings catalogue", () => {
 		expect(ids[ids.length - 1]).toBe("scan:d_00000~r-0.wav")
 	})
 
+	// CPU work only (a 10 501-file fake tree built, then every page and three filters):
+	// 2 747 ms measured at load average 112 on 8 cores. Scaled to load average 400:
+	// 2 747 × 400 / 112 ≈ 9 800 ms; three times that is 29 400, so 30 000 ms. It bounds a
+	// hang, never speed.
 	it("at 10 000 recordings, warm listings, filters and pages make no fs call", async () => {
 		const fs = scannerTree(1500, 7) // 10 500 files
 		fs.file(`/r/dsd/${DSD("120000")}`, OLD)
 		const inv = fakeInventory(fs, { discoveryCentreHz: () => 446_006_250 })
+		// The build itself, not the listing's bounded real-time wait for it (see above).
+		await inv.start?.()
 		expect((await inv.list({})).scannedFiles).toBe(10_501)
 		const calls = fs.calls
 		await allPages(inv)
@@ -1488,15 +1497,14 @@ describe("recordings catalogue", () => {
 		await inv.list({ minHz: "446000000", maxHz: "446100000", q: "446.006" })
 		await inv.list({ discoveryId: "d_00042", kept: "false" })
 		expect(fs.calls).toBe(calls)
-	})
+	}, 30_000)
 
 	it("answers from a partial first build, marked indexing, with the newest folders first", async () => {
 		const fs = scannerTree(60, 8)
 		fs.delayMs = 2
 		const inv = fakeInventory(fs)
-		const t0 = performance.now()
+		// `indexing: true` with part of the tree is the proof it answered before the build ended.
 		const page = await inv.list({ limit: 5 })
-		expect(performance.now() - t0).toBeLessThan(5_000)
 		expect(page.indexing).toBe(true)
 		expect(page.scannedFiles).toBeLessThan(480)
 		expect(page.items[0]?.discoveryId).toBe("d_00059")

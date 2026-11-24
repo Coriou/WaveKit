@@ -137,6 +137,7 @@ export function inputOf(f: SavedFrequency): SavedFrequencyInput {
 		tone: f.tone,
 	}
 	if (f.group !== undefined) input.group = f.group
+	if (f.centre !== undefined) input.centre = f.centre
 	return input
 }
 

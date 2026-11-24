@@ -276,7 +276,10 @@ const missingDir = (): Promise<fs.Dir> =>
  * opendir whose first `n` reads of this test's root itself stay pending until `release(i)` (each
  * then fails as a missing directory: no match); later reads of the root are real. Its
  * subdirectories' reads are real too, or with `missingSubdirs` fail at once as missing (no real
- * I/O: the test's turns, not the machine's load, decide when they settle).
+ * I/O: the test's turns, not the machine's load, decide when they settle). No test here creates
+ * WAV/ or wav/, so `missingSubdirs` gives the same answer as a real read; a test that releases a
+ * held read and then waits with `untilReal` needs it, or two real opendir calls race its 500
+ * turns on a loaded host.
  */
 function heldReads(n: number, opts: { missingSubdirs?: boolean } = {}) {
 	const real = fs.promises.opendir.bind(fs.promises)
@@ -480,7 +483,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("a new run keeps an old run's stuck read: its waiting attempt reads nothing and the next lookup starts no second listing until it settles", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const reads = heldReads(1)
+		const reads = heldReads(1, { missingSubdirs: true })
 		const { d } = decoderWithUpdates()
 		const seen = recorder(d)
 		const internals = d as unknown as StuckInternals & {
@@ -592,7 +595,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("a merely slow read (it settles after the timeout, before the retry runs): the retry reads and finds the file", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const reads = heldReads(1)
+		const reads = heldReads(1, { missingSubdirs: true })
 		const { d, found } = decoderWithUpdates()
 		const internals = d as unknown as StuckInternals
 		endThrough(d, 70)
@@ -610,7 +613,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("a slow read that settles at 2.3 s, after the retry began waiting for it: the retry reads and finds the file", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const reads = heldReads(1)
+		const reads = heldReads(1, { missingSubdirs: true })
 		const { d, found } = decoderWithUpdates()
 		const internals = d as unknown as StuckInternals
 		endThrough(d, 71)
@@ -630,7 +633,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("a read that settles only after the retry's one wait: the lookup ends at 4 200 ms (the hung-mount bound)", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const reads = heldReads(1)
+		const reads = heldReads(1, { missingSubdirs: true })
 		const { d, found } = decoderWithUpdates()
 		const internals = d as unknown as StuckInternals
 		endThrough(d, 74)
@@ -652,7 +655,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("a lookup whose first attempt was only queued when start() began a new run reads once and retries nothing", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const reads = heldReads(1)
+		const reads = heldReads(1, { missingSubdirs: true })
 		const { d, found } = decoderWithUpdates()
 		const internals = d as unknown as StuckInternals & {
 			callTimeoutTimer: ReturnType<typeof setInterval> | null
@@ -753,7 +756,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 		it("an attempt that ends in a new run schedules no retry", async () => {
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-			const reads = heldReads(1)
+			const reads = heldReads(1, { missingSubdirs: true })
 			const { d } = decoderWithUpdates()
 			const released = dmrLookup(d, 82)
 			await vi.advanceTimersByTimeAsync(0)
@@ -780,7 +783,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("an old run's attempt that wakes after start() schedules no retry in the new run", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const reads = heldReads(1)
+		const reads = heldReads(1, { missingSubdirs: true })
 		const { d, found } = decoderWithUpdates()
 		const internals = d as unknown as StuckInternals & {
 			callTimeoutTimer: ReturnType<typeof setInterval> | null

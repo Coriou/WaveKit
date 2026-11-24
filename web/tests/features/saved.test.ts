@@ -13,6 +13,7 @@ import {
 	entryTarget,
 	recallPatch,
 	recallSaved,
+	recallTuneOptions,
 	saveInput,
 	saveSummary,
 	savedMeta,
@@ -268,5 +269,12 @@ describe("saving and recalling", () => {
 		steps.length = 0
 		await recallSaved(ports, ITEMS[1] as SavedFrequency)
 		expect(steps).toEqual(["tune 161150000"])
+	})
+})
+
+describe("recallTuneOptions", () => {
+	it("recentres only under Click to tune Centre", () => {
+		expect(recallTuneOptions("centre")).toEqual({ recentre: true })
+		expect(recallTuneOptions("free")).toEqual({})
 	})
 })
