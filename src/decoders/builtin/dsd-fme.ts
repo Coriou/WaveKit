@@ -51,7 +51,12 @@ import {
 	pruneCallRecordings,
 } from "./call-recordings.js"
 import { receiveFilterEffect } from "./dsd-fme-filter.js"
-import { dsdFmeCallWavPattern } from "./dsd-fme-wav-names.js"
+import {
+	type DsdFmeWavPrevious,
+	dsdFmeCallWavIdentity,
+	dsdFmeCallWavPattern,
+	dsdFmeWavStampAfterPrevious,
+} from "./dsd-fme-wav-names.js"
 import {
 	classifyDmrLine,
 	DMR_SOURCE_MAX,
@@ -915,6 +920,14 @@ export const DSD_FME_HELD_OUTPUTS_MAX = 1_024
  * set restarts (each directory then logs once more).
  */
 const WAV_TRUNCATION_WARNED_MAX = 16
+/**
+ * Call identities (dsdFmeCallWavIdentity) whose last end is remembered, per adapter, so a call
+ * never takes the file of the earlier call it shares a name with. One adapter decodes one lane,
+ * where a handful of identities alternate; 64 keeps the last end of every recent one, and the
+ * oldest is dropped past it. A key is the slot and a name pattern of at most a few hundred
+ * characters: 64 x ~0.5 KB, about 32 KB at most.
+ */
+const WAV_LAST_END_IDENTITIES_MAX = 64
 
 /** A call_end held for its WAV lookup's first attempt (endCall, findWavFileAsync). */
 type WavHeldEnd = {
@@ -1423,6 +1436,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}> = []
 	/** Directories whose truncated listing was logged (WAV_TRUNCATION_WARNED_MAX). */
 	private readonly wavTruncationWarned = new Set<string>()
+	/** Wall start and end of the last call per identity (WAV_LAST_END_IDENTITIES_MAX), oldest first. */
+	private readonly wavLastEndByIdentity = new Map<string, DsdFmeWavPrevious>()
 	/** Whether a timed-out lookup attempt was logged (once per adapter). */
 	private wavTimeoutWarned = false
 	private dmrRoute = newDmrRoute()
@@ -5609,6 +5624,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		call: DsdFmeCallState,
 		callEndTime: Date,
 		end?: WavHeldEnd,
+		previous?: DsdFmeWavPrevious,
 	): void {
 		const baseDir = this.recordingDir()
 		if (baseDir === null) {
@@ -5624,7 +5640,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		]
 		const searchAll = async (): Promise<string | undefined> => {
 			for (const dir of dirsToSearch) {
-				const found = await this.searchForWavFile(call, callEndTime, dir)
+				const found = await this.searchForWavFile(
+					call,
+					callEndTime,
+					dir,
+					previous,
+				)
 				if (found) return found
 			}
 			return undefined
@@ -5801,6 +5822,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		call: DsdFmeCallState,
 		callEndTime: Date,
 		dir: string,
+		previous?: DsdFmeWavPrevious,
 	): Promise<string | undefined> {
 		// The name built from the call's own fields, per protocol (dsd-fme-wav-names.ts); a call
 		// whose fields cannot tell its file from another call's links none.
@@ -5858,8 +5880,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 				const fileMs = fileTimestamp.getTime()
 
-				// Check if file timestamp falls within call window
-				if (fileMs >= windowStartMs && fileMs <= windowEndMs) {
+				// Check if file timestamp falls within call window; a stamp before the previous
+				// same-identity call ended is that call's file, never this one's.
+				if (
+					fileMs >= windowStartMs &&
+					fileMs <= windowEndMs &&
+					dsdFmeWavStampAfterPrevious(fileMs, previous)
+				) {
 					// How close this file's timestamp is to call start; the first of equals stays
 					const diff = Math.abs(fileMs - startWallMs)
 					candidates++
@@ -5950,6 +5977,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const endTime = endAt ?? (timeout ? this.callState.lastUpdate : now)
 		const duration = endTime.getTime() - this.callState.startTime.getTime()
 		const callInfo = this.callState
+
+		// Every end (linkable or not: an encrypted over, a suppressed one) is remembered per
+		// identity, so a later call of that identity never takes a file stamped before it.
+		// Calls suppressed below as weak metadata are recorded too: harmless, their identity holds
+		// TG 0 / SRC 0 (or there is none), which no real call's file name shares.
+		const identity = dsdFmeCallWavIdentity(callInfo)
+		let previous: DsdFmeWavPrevious | undefined
+		if (identity !== null) {
+			previous = this.wavLastEndByIdentity.get(identity)
+			this.wavLastEndByIdentity.delete(identity)
+			this.wavLastEndByIdentity.set(identity, {
+				startWallMs: callInfo.startWallMs,
+				endWallMs:
+					callInfo.startWallMs +
+					(endTime.getTime() - callInfo.startTime.getTime()),
+			})
+			if (this.wavLastEndByIdentity.size > WAV_LAST_END_IDENTITIES_MAX) {
+				const oldest = this.wavLastEndByIdentity.keys().next()
+				if (oldest.done !== true) this.wavLastEndByIdentity.delete(oldest.value)
+			}
+		}
 
 		// Calculate error rate
 		const totalErrors = callInfo.quality.crcErrs + callInfo.quality.fecErrs
@@ -6069,7 +6117,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				this.settleEnd(end, undefined)
 			}, DSD_FME_WAV_END_WAIT_MS)
 			this.pendingEnds.set(data, end)
-			this.findWavFileAsync(callInfo, endTime, end)
+			this.findWavFileAsync(callInfo, endTime, end, previous)
 		} else logEnd(false)
 		return { timestamp: now, decoder: this.id, type: "call_end", data }
 	}

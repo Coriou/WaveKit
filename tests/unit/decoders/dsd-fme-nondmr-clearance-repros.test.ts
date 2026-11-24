@@ -172,6 +172,8 @@ interface Trace {
 	violations: string[]
 	/** Call ends that linked a recording, as `tg/src`. */
 	linked: string[]
+	/** The file names those ends linked, in order. */
+	files: string[]
 	ends: number
 	/** Every call_start and call_end (not a recording follow-up), in order. */
 	calls: string[]
@@ -219,6 +221,7 @@ async function replay(
 	const pubs: Pub[] = []
 	const violations: string[] = []
 	const linked: string[] = []
+	const linkedFiles: string[] = []
 	let ends = 0
 	const calls: string[] = []
 	const judge = (pub: Omit<Pub, "verdict">) => {
@@ -239,7 +242,10 @@ async function replay(
 		if (o.type === "call_end" && !d.flags?.wavFileUpdate) ends++
 		if (o.type === "call_start" || !d.flags?.wavFileUpdate)
 			calls.push(`${o.type} ${d.protocol} ${d.talkgroup}/${d.source}`)
-		if (isLinked) linked.push(`${d.talkgroup}/${d.source}`)
+		if (isLinked) {
+			linked.push(`${d.talkgroup}/${d.source}`)
+			linkedFiles.push(path.basename(d.wavFile ?? ""))
+		}
 		judge({
 			kind: o.type,
 			callId: d.callId,
@@ -291,7 +297,7 @@ async function replay(
 		await tail
 		if (internals.wavSearch === tail) break
 	}
-	return { pubs, violations, linked, ends, calls }
+	return { pubs, violations, linked, files: linkedFiles, ends, calls }
 }
 
 /** Every publication is authorized and no recording is linked. */
@@ -335,6 +341,82 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 		vi.useRealTimers()
 		vi.restoreAllMocks()
 		fs.rmSync(root, { recursive: true, force: true })
+	})
+
+	describe("same-station previous over (one identity, one slot)", () => {
+		// A 2 s over (TDU at 2 000 ms), then 1 s later an over of the same talkgroup and source:
+		// the earlier over's file (stamped at 0) lies in the later over's window (start - 5 s).
+		const EARLY = (alg: string) =>
+			p25Over(0, { alg: () => alg, superframes: 5 })
+		const LATE = p25Over(3000, { alg: () => LDU2_CLEAR, superframes: 5 })
+		const EARLY_FILE = wavName("P25_2A5", 56, 1234, 0)
+		const LATE_FILE = wavName("P25_2A5", 56, 1234, 3000)
+
+		it("own file missing, the earlier same-identity file in the window: no link", async () => {
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_CLEAR), ...LATE],
+				[[...P1_FILE(), 0]],
+			)
+			expect(trace.ends).toBe(2)
+			expectLinked(trace, ["56/1234"])
+			expect(trace.files).toEqual([EARLY_FILE])
+		})
+
+		it("with both files, each over links its own", async () => {
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_CLEAR), ...LATE],
+				[
+					[...P1_FILE(), 0],
+					[...P1_FILE(), 3000],
+				],
+			)
+			expectLinked(trace, ["56/1234", "56/1234"])
+			expect(trace.files).toEqual([EARLY_FILE, LATE_FILE])
+		})
+
+		it("an encrypted earlier over's file is never taken by the later clear over", async () => {
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_ENC), ...LATE],
+				[[...P1_FILE(), 0]],
+			)
+			expect(trace.ends).toBe(2)
+			expectNeverLinked(trace)
+		})
+
+		it("an encrypted earlier over: the later clear over links its own file, not the earlier one", async () => {
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_ENC), ...LATE],
+				[
+					[...P1_FILE(), 0],
+					[...P1_FILE(), 3000],
+				],
+			)
+			expectLinked(trace, ["56/1234"])
+			expect(trace.files).toEqual([LATE_FILE])
+		})
+
+		it("a lagged previous end past the re-key's stamp second: the re-key still links its own file", async () => {
+			// The earlier over ends at 4 160 ms as the adapter saw it (a lagging stdout), while
+			// dsd-fme stamped the re-key's file at 3 000: before the end's second, after the
+			// earlier start's second.
+			const LONG = p25Over(0, { alg: () => LDU2_CLEAR, superframes: 11 })
+			const REKEY = p25Over(4300, { alg: () => LDU2_CLEAR, superframes: 5 })
+			const trace = await replay(
+				"p25",
+				[...LONG, ...REKEY],
+				[
+					[...P1_FILE(), 0],
+					[...P1_FILE(), 3000],
+				],
+			)
+			expect(trace.ends).toBe(2)
+			expectLinked(trace, ["56/1234", "56/1234"])
+			expect(trace.files).toEqual([EARLY_FILE, LATE_FILE])
+		})
 	})
 
 	describe("P25 phase 1", () => {

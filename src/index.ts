@@ -2765,6 +2765,7 @@ async function main(): Promise<void> {
 		})
 		const storageReport = createStorageReporter({
 			stateDir: config.stateDir,
+			logger: createComponentLogger(logger, "StorageReport"),
 			areas: storageSources.areas,
 			activityRetention: () =>
 				activity.status === "disabled" || activityLimits === null
@@ -2774,6 +2775,9 @@ async function main(): Promise<void> {
 			// WG10 req 1.8: keep totals in protected mode; legacy reports `kept: null`.
 			...(protectedMode ? { kept: () => keptSummaryOf(keeps) } : {}),
 		})
+		// The first count starts now, in the background (warm returns at once and handles its own
+		// failure), so the first report after startup usually serves finished sizes.
+		storageReport.warm?.()
 		// Band plans never stop core: a storage failure leaves built-ins readable.
 		// The API server closes it after HTTP drain; own() covers a failed construction.
 		let publishBandPlans: BandPlansCommitSink | undefined

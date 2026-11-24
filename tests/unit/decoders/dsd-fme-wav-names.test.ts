@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import {
 	type DsdFmeWavCall,
+	dsdFmeCallWavIdentity,
 	dsdFmeCallWavPattern,
+	dsdFmeWavStampAfterPrevious,
 } from "../../../src/decoders/builtin/dsd-fme-wav-names.js"
 import { createDecoder } from "./dsd-fme-call-first-helpers.js"
 
@@ -361,5 +363,39 @@ describe("dsd-fme per-call WAV names", () => {
 			}),
 			{ numRuns: 300 },
 		)
+	})
+
+	it("one identity per slot and protocol fields; none without a pattern", () => {
+		const p25 = {
+			protocol: "p25p1",
+			talkgroup: 56,
+			source: 1234,
+			p25: { nac: "2A5" },
+		}
+		const id = dsdFmeCallWavIdentity({ ...p25, slot: null })
+		expect(id).not.toBeNull()
+		expect(dsdFmeCallWavIdentity({ ...p25, slot: null })).toBe(id)
+		expect(dsdFmeCallWavIdentity({ ...p25, slot: 1 })).not.toBe(id)
+		expect(dsdFmeCallWavIdentity({ ...p25, source: 99, slot: null })).not.toBe(
+			id,
+		)
+		expect(
+			dsdFmeCallWavIdentity({ protocol: "dpmr", talkgroup: 1, source: 2 }),
+		).toBeNull()
+	})
+
+	it("a stamp before the previous same-identity end second, or its start second, is refused", () => {
+		const prev = { startWallMs: 8_200, endWallMs: 10_300 }
+		expect(dsdFmeWavStampAfterPrevious(8_000, prev)).toBe(false)
+		// Past the previous start's second, before its (lagged) end's second: admitted.
+		expect(dsdFmeWavStampAfterPrevious(9_000, prev)).toBe(true)
+		expect(dsdFmeWavStampAfterPrevious(10_000, prev)).toBe(true)
+		expect(dsdFmeWavStampAfterPrevious(11_000, prev)).toBe(true)
+		// A short previous call: its end's second is the threshold.
+		const short = { startWallMs: 10_100, endWallMs: 10_300 }
+		expect(dsdFmeWavStampAfterPrevious(9_000, short)).toBe(false)
+		// The end's own second cannot be told apart (whole-second stamps): admitted.
+		expect(dsdFmeWavStampAfterPrevious(10_000, short)).toBe(true)
+		expect(dsdFmeWavStampAfterPrevious(0, undefined)).toBe(true)
 	})
 })

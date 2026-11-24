@@ -2,6 +2,7 @@
  * WG4 frozen contract for lane S (docs/specs/web-gaps-4, requirement 3, design "Storage
  * report"). Read-only for the lane: the report builder and route consume these names.
  */
+import type { Logger } from "../../utils/logger.js"
 import type {
 	StorageActivityRetention,
 	StorageAreaId,
@@ -19,7 +20,12 @@ export const STORAGE_SCAN_FS_CONCURRENCY = 8
  * pool of 4 (the image sets no UV_THREADPOOL_SIZE), so a count running for up to
  * STORAGE_COUNT_MAX_WALL_MS never fills the pool that recording and journal writes share. A
  * report's statfs is one more call outside it (reports share one build, so at most one): 3
- * pool threads at most, one always free.
+ * pool threads at most, one always free. Counts are single-flight across their fs calls: a
+ * count that hit its wall time on a stalled filesystem settles with its calls still pending,
+ * and the next count starts only once they drain, so counts never hold more than 2 threads
+ * together. Only a report's statfs that never answers stays outside this bound: each later
+ * report may add one (only the count requested by the report whose statfs timed out takes one
+ * call less).
  */
 export const STORAGE_COUNT_FS_CONCURRENCY = 2
 
@@ -106,6 +112,8 @@ export interface StorageReportOptions {
 	/** WG10 req 1.8: the keep store summary; omitted or throwing means `kept: null`. */
 	kept?: () => StorageKeptSummary | null
 	now?: () => number
+	/** Warns once when a count waits for an earlier count's stalled fs calls. */
+	logger?: Logger
 }
 
 /**

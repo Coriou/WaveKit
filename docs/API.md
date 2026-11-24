@@ -6859,11 +6859,11 @@ request. A report starts a count when the last one is older than 30 s (or the
 areas changed) and serves the last finished count at once; it waits for the
 count, at most 2,000 ms (`statfs` included), only when an area has no finished
 count yet or the last count is older than 120 s. A failed count keeps the
-previous one served; a failed first count answers 500. The first report after
-startup may be partial until the first background count finishes. When the
-areas change while a count runs, the new count starts when that one finishes,
-and meanwhile the areas the previous count holds (same id and paths) are served
-from it.
+previous one served; a failed first count answers 500. The core starts the
+first count at startup, so a report shortly after it usually serves finished
+sizes already. When the areas change while a count runs, the new count starts
+when that one finishes and its file-system calls drain, and meanwhile the areas
+the previous count holds (same id and paths) are served from it.
 
 `count` (since 2026-11-24; absent from older cores) says how old the sizes are:
 `countedAt` (when the served count finished, null while no area is served from

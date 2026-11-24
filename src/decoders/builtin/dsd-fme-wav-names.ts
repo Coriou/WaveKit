@@ -149,3 +149,40 @@ export function dsdFmeCallWavPattern(call: DsdFmeWavCall): RegExp | null {
 		}
 	}
 }
+
+/**
+ * The identity two calls share when one's recording name would match the other's: the slot and
+ * the name pattern built from the protocol fields. Null when the call gets no pattern.
+ */
+export function dsdFmeCallWavIdentity(
+	call: DsdFmeWavCall & { slot?: number | null | undefined },
+): string | null {
+	const pattern = dsdFmeCallWavPattern(call)
+	return pattern === null ? null : `${call.slot ?? "-"}|${pattern.source}`
+}
+
+/** The previous call of an identity, in wall ms: when it started and when the adapter saw it end. */
+export interface DsdFmeWavPrevious {
+	startWallMs: number
+	endWallMs: number
+}
+
+/**
+ * Whether a recording stamped `fileMs` (a whole second) may be a call's own when `previous` is
+ * the previous call of the same identity: a stamp in a second before that call's end second is
+ * the earlier call's file (dsd-fme stamps the file at its call's start, which precedes that
+ * call's end), never the later call's. The end the adapter saw lags dsd-fme (stdout, event loop)
+ * and a back-to-back re-key's file can be stamped before it, so the threshold is also capped at
+ * the second after the previous start's second: the earlier file is stamped in that start
+ * second. A stamp in the threshold's own second cannot be told apart and stays admitted.
+ */
+export function dsdFmeWavStampAfterPrevious(
+	fileMs: number,
+	previous: DsdFmeWavPrevious | undefined,
+): boolean {
+	if (previous === undefined) return true
+	const endSecondMs = Math.floor(previous.endWallMs / 1000) * 1000
+	const afterStartSecondMs =
+		Math.floor(previous.startWallMs / 1000) * 1000 + 1000
+	return fileMs >= Math.min(endSecondMs, afterStartSecondMs)
+}
