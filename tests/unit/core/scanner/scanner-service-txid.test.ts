@@ -7,7 +7,10 @@
 import { rm } from "node:fs/promises"
 import { expect, it } from "vitest"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
-import type { ScannerRecordingKept } from "../../../../src/core/scanner/scanner-service.js"
+import {
+	txEndReasonOf,
+	type ScannerRecordingKept,
+} from "../../../../src/core/scanner/scanner-service.js"
 import type {
 	AnalogCommitExtra,
 	AnalogInput,
@@ -17,7 +20,11 @@ import type {
 	PipelineEvent,
 	TrackSnapshot,
 } from "../../../../src/core/spectrum/types.js"
-import { TransmissionRegistry } from "../../../../src/core/transmissions/index.js"
+import {
+	TransmissionRegistry,
+	TX_MATCH_HALF_MAX,
+	TX_ROLLOVER_HOLD_MS,
+} from "../../../../src/core/transmissions/index.js"
 import { makeTrack } from "../../../mocks/scanner/observations.js"
 import { CENTRE, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 
@@ -28,6 +35,7 @@ type TrackEvent = Extract<
 
 interface Internal {
 	live: Map<string, LiveObservation>
+	rolloverTxSizes(): { rolloverTx: number; rolloverOf: number }
 	onTrack(sourceId: string, ev: TrackEvent): void
 	withTx(input: AnalogInput): AnalogInput
 	emitRecordingKept(plan: RecordingCommitPlan, extra?: AnalogCommitExtra): void
@@ -35,15 +43,26 @@ interface Internal {
 
 const HZ = CENTRE + 25_000
 
-function passed(id: string, centreHz = HZ): TrackSnapshot {
-	const track = makeTrack({ id, centreHz, startedAt: 0 })
+function passed(id: string, centreHz = HZ, obwHz?: number): TrackSnapshot {
+	const track = makeTrack({
+		id,
+		centreHz,
+		startedAt: 0,
+		...(obwHz !== undefined ? { obwHz } : {}),
+	})
 	track.sourceId = "rtl"
 	track.gate = "passed"
 	return track
 }
 
-async function setup(registry: TransmissionRegistry | null) {
-	const h = serviceHarness(registry ? { transmissions: registry } : {})
+async function setup(
+	registry: TransmissionRegistry | null,
+	now?: () => number,
+) {
+	const h = serviceHarness({
+		...(registry ? { transmissions: registry } : {}),
+		...(now ? { now } : {}),
+	})
 	await h.service.start()
 	await h.service.createJob({
 		sourceId: "rtl",
@@ -217,6 +236,109 @@ it("without a registry nothing carries a txId", async () => {
 		internal.onTrack("rtl", { kind: "track-close", track, endReason: "quiet" })
 		expect(activity.length).toBeGreaterThan(0)
 		for (const a of activity) expect(a).not.toHaveProperty("txId")
+	} finally {
+		await done()
+	}
+})
+
+it("a gap end is a lost source, never a complete over", async () => {
+	expect(txEndReasonOf("gap")).toBe("source-lost")
+	expect(txEndReasonOf("quiet")).toBe("ended")
+	expect(txEndReasonOf(undefined)).toBe("ended")
+	expect(txEndReasonOf("job-end")).toBe("stopped")
+	const registry = new TransmissionRegistry()
+	const { internal, done } = await setup(registry)
+	try {
+		const track = passed("g")
+		internal.onTrack("rtl", { kind: "track-open", track })
+		const txId = registry.openTxOf(
+			`obs:${observationOf(internal, track.trackId)}`,
+		)!
+		internal.onTrack("rtl", { kind: "track-close", track, endReason: "gap" })
+		const v = registry.get(txId)!
+		expect(v.close).toBe("source-lost")
+		expect(v.complete).toBe(false)
+	} finally {
+		await done()
+	}
+})
+
+it("rollover links are kept only with a port and expire unconsumed after the hold", async () => {
+	// without a port nothing is remembered
+	const bare = await setup(null)
+	try {
+		bare.internal.onTrack("rtl", {
+			kind: "track-open",
+			track: passed("np2"),
+			rolloverFrom: "t-np1",
+		})
+		expect(bare.internal.rolloverTxSizes()).toEqual({
+			rolloverTx: 0,
+			rolloverOf: 0,
+		})
+	} finally {
+		await bare.done()
+	}
+	let clock = 1_000_000
+	const registry = new TransmissionRegistry({ now: () => clock })
+	const { internal, done } = await setup(registry, () => clock)
+	try {
+		const first = passed("x1")
+		internal.onTrack("rtl", { kind: "track-open", track: first })
+		const txId = registry.openTxOf(
+			`obs:${observationOf(internal, first.trackId)}`,
+		)!
+		internal.onTrack("rtl", {
+			kind: "track-close",
+			track: first,
+			endReason: "max-duration",
+		})
+		expect(internal.rolloverTxSizes().rolloverTx).toBe(1)
+		// exactly at the bound the link is still read…
+		clock += TX_ROLLOVER_HOLD_MS
+		internal.onTrack("rtl", { kind: "track-open", track: passed("y") })
+		expect(internal.rolloverTxSizes().rolloverTx).toBe(1)
+		// …one millisecond past it, it is dropped on the next write or read
+		clock += 1
+		internal.onTrack("rtl", {
+			kind: "track-open",
+			track: passed("x2", HZ - 40_000),
+			rolloverFrom: first.trackId,
+		})
+		expect(internal.rolloverTxSizes()).toEqual({
+			rolloverTx: 0,
+			rolloverOf: 0,
+		})
+		const x2 = registry.openTxOf(`obs:${observationOf(internal, "t-x2")}`)
+		expect(x2).not.toBeNull()
+		expect(x2).not.toBe(txId)
+	} finally {
+		await done()
+	}
+})
+
+it("two wide tracks just inside the 6.25 kHz bound share an id, at the bound they do not", async () => {
+	// Both tracks are 25 kHz wide (half 12.5 kHz), so TX_MATCH_HALF_MAX alone bounds the distance.
+	const registry = new TransmissionRegistry()
+	const { internal, done } = await setup(registry)
+	try {
+		const a = passed("e1", HZ, 25_000)
+		const inside = passed("e2", HZ + TX_MATCH_HALF_MAX - 1, 25_000)
+		const outside = passed("e3", HZ - TX_MATCH_HALF_MAX, 25_000)
+		internal.onTrack("rtl", { kind: "track-open", track: a })
+		internal.onTrack("rtl", { kind: "track-open", track: inside })
+		internal.onTrack("rtl", { kind: "track-open", track: outside })
+		const ta = registry.openTxOf(`obs:${observationOf(internal, a.trackId)}`)
+		const tIn = registry.openTxOf(
+			`obs:${observationOf(internal, inside.trackId)}`,
+		)
+		const tOut = registry.openTxOf(
+			`obs:${observationOf(internal, outside.trackId)}`,
+		)
+		expect(ta).not.toBeNull()
+		expect(tIn).toBe(ta)
+		expect(tOut).not.toBeNull()
+		expect(tOut).not.toBe(ta)
 	} finally {
 		await done()
 	}

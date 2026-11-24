@@ -66,6 +66,7 @@ const REF_TYPES = new Set<ActivityRefType>([
 	"probeId",
 	"channelId",
 	"recordingId",
+	"txId",
 ])
 
 const SEARCH_PARAMS = new Set([

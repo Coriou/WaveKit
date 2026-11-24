@@ -67,6 +67,7 @@ const REF_TYPES = [
 	"probeId",
 	"channelId",
 	"recordingId",
+	"txId",
 ] as const satisfies readonly ActivityRefType[]
 
 const FACET_DIMENSIONS = [

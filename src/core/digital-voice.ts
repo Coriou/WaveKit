@@ -59,6 +59,7 @@ import {
 	type VoiceChannels,
 } from "./dsd-fme-voice-format.js"
 import { PacedPcmStream } from "./paced-pcm-stream.js"
+import { TX_ID } from "./transmissions/types.js"
 import type { PacedPcmStats } from "./paced-pcm-stream.js"
 import type { VoiceTap, VoiceTapSource } from "./auto-listen/contract.js"
 
@@ -67,6 +68,8 @@ export type { DigitalVoiceConfig } from "../config.js"
 export interface DigitalVoiceCall {
 	decoderId: string
 	callId: string
+	/** The call's transmission id (`tx_<ULID>`); absent without one. */
+	txId?: string
 	protocol: string | null
 	talkgroup: number | null
 	source: number | null
@@ -194,6 +197,8 @@ function lenientHex(maxLength: number) {
 
 const VoiceCallStateSchema = z.object({
 	callId: z.string().min(1),
+	/** The call's transmission id; malformed: dropped, the call kept. */
+	txId: z.string().regex(TX_ID).optional().catch(undefined),
 	protocol: z.string().nullable(),
 	talkgroup: z.number().nullable(),
 	source: z.number().nullable(),
@@ -1961,6 +1966,7 @@ export class DigitalVoiceService
 		const call: DigitalVoiceCall = {
 			decoderId: channel.decoderId,
 			callId: state.callId,
+			...(state.txId !== undefined ? { txId: state.txId } : {}),
 			protocol: state.protocol,
 			talkgroup: state.talkgroup,
 			source: state.source,

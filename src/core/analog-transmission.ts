@@ -62,6 +62,7 @@ import {
 } from "./live-demod-activity.js"
 import type { TransmissionConfigIdentity } from "./live-demod-activity.js"
 import type { DataDecodeGate } from "./scanner/data-decode-gate.js"
+import type { TxEndReason, TxLiveDemodPort } from "./transmissions/types.js"
 import type {
 	LiveAudioLevel,
 	LiveDemodConfig,
@@ -329,6 +330,12 @@ export interface AnalogTransmissionTrackerOptions {
 	createToneDetector?: () => ToneDetectorPort
 	/** WG10 activity hygiene; default {@link ANALOG_TRANSMISSION_HYGIENE}. */
 	hygiene?: Partial<AnalogTransmissionHygiene>
+	/**
+	 * Transmission identity: each published transmission claims a txId when it is announced
+	 * (a suppressed one never does), a max-duration continuation keeps it, a tone split claims a
+	 * fresh one. Absent: no txId anywhere, behaviour unchanged.
+	 */
+	transmissions?: TxLiveDemodPort
 	/** Merge-gap timer (tests inject); default an unref'd setTimeout. Returns a cancel. */
 	setTimer?: (fn: () => void, ms: number) => () => void
 	/** Called once per suppressed transmission (Main logs it at debug). */
@@ -355,8 +362,22 @@ export interface AnalogTransmissionTrackerEvents {
 	tone: [event: AnalogTransmissionEventData]
 }
 
+/** A transmission's claim, shared by the parts of a max-duration continuation. */
+interface LiveTx {
+	readonly txId: string
+	readonly claimant: number
+	/** A CTCSS tone or DCS code was noted on it (a later untoned part never clears it). */
+	heard: boolean
+	/** Any tone report (heard or none) was noted. */
+	noted: boolean
+}
+
 interface OpenTransmission {
 	transmissionId: string
+	/** Its transmission claim once announced (a continuation's from the start); null before. */
+	tx: LiveTx | null
+	/** A tone split's held part's txId: the split never joins it. */
+	txSplitFrom: string | null
 	sourceId: string
 	startedAtMs: number
 	startedAt: string
@@ -524,6 +545,7 @@ export function toActivityPayload(
 		peakChannelPowerDbfs: event.peakChannelPowerDbfs,
 		meanChannelPowerDbfs: event.meanChannelPowerDbfs,
 		closeReason: event.closeReason,
+		...(event.txId === undefined ? {} : { txId: event.txId }),
 		...(event.tone === undefined
 			? {}
 			: {
@@ -533,6 +555,24 @@ export function toActivityPayload(
 						dcs: copyDcs(event.tone.dcs),
 					},
 				}),
+	}
+}
+
+/**
+ * A live close as a transmission end: a retune or config change is a retune, an operator stop
+ * is a stop (never complete), a squelch close ended the over. (A max-duration close is carried.)
+ */
+function txEndReasonOf(reason: AnalogTransmissionCloseReason): TxEndReason {
+	switch (reason) {
+		case "retune":
+		case "config":
+			return "retune"
+		case "stopped":
+			return "stopped"
+		case "max-duration":
+			return "max-duration"
+		default:
+			return "ended"
 	}
 }
 
@@ -552,6 +592,9 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	private readonly frequencyAt: AnalogTransmissionTrackerOptions["frequencyAt"]
 	private readonly now: () => number
 	private readonly newId: () => string
+	private readonly txPort: TxLiveDemodPort | undefined
+	/** A max-duration close's claim, waiting for the continuation that keeps it. */
+	private carriedTx: LiveTx | null = null
 	private readonly maxDurationMs: number
 	private readonly createToneDetector: () => ToneDetectorPort
 	private transmission: OpenTransmission | null = null
@@ -621,6 +664,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.frequencyAt = options.frequencyAt
 		this.now = options.now ?? (() => Date.now())
 		this.newId = options.randomUUID ?? randomUUID
+		this.txPort = options.transmissions
 		this.createToneDetector =
 			options.createToneDetector ?? (() => new ToneDetector())
 		const max = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS
@@ -783,6 +827,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 				this.close("max-duration", now)
 				// m5: the continuation is exempt from the minimum duration (carrier rule applies).
 				this.reopenIfHeld(now, true)
+				this.endCarriedTx(now)
 				return
 			}
 			if (this.frequencyDrifted(current)) {
@@ -862,11 +907,18 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.attached = false
 		this.detachPcm()
 		this.attached = wasAttached
+		this.endCarriedTx(this.clock())
 		const held = this.transmission
 		if (held) {
 			// Detached while a transmission is held: drop it without output (stop() closed it first).
 			this.transmission = null
 			this.cancelGapTimer(held)
+			if (held.tx !== null)
+				try {
+					this.txPort?.end(held.tx.claimant, this.clock(), "stopped")
+				} catch {
+					// The registry never blocks the tracker.
+				}
 		}
 		if (!this.attached) return
 		this.attached = false
@@ -936,8 +988,15 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const squelchMode = liveDemodDetectionMode(status.config.squelchMode)
 		this.toneBroken = false
 		const detector = this.makeDetector()
+		// A max-duration continuation keeps the closed part's claim (same txId); anything else
+		// claims its own when announced.
+		const carried = continuation ? this.carriedTx : null
+		this.carriedTx = null
+		if (!continuation) this.endCarriedTx(now)
 		this.transmission = {
 			transmissionId: this.newId(),
+			tx: carried,
+			txSplitFrom: null,
 			sourceId: status.sourceId,
 			startedAtMs: now,
 			startedAt: new Date(now).toISOString(),
@@ -1028,12 +1087,16 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		endedMs: number,
 		tone: AnalogTransmissionTone,
 	): void {
-		const event = this.closedEvent(open, reason, endedMs, tone)
 		const rejected = open.announced ? null : this.rejection(open)
 		if (rejected !== null) {
+			// A continuation's carried claim ends with it (a fresh one never claimed).
+			this.endTx(open, reason, endedMs, null)
 			this.suppressedCounts[rejected] += 1
 			try {
-				this.onSuppressed?.(rejected, event)
+				this.onSuppressed?.(
+					rejected,
+					this.closedEvent(open, reason, endedMs, tone),
+				)
 			} catch {
 				// A broken observer never blocks the tracker.
 			}
@@ -1041,9 +1104,98 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		}
 		if (!open.announced) {
 			open.announced = true
+			this.claimTx(open)
 			this.publish(this.openEvent(open))
 		}
+		const event = this.closedEvent(open, reason, endedMs, tone)
+		this.endTx(open, reason, endedMs, tone)
 		this.publish(event)
+	}
+
+	/**
+	 * The transmission's claim at its announcement: a continuation's carried claim names this
+	 * part too (an `evt:` alias), anything else claims (a tone split never joins its held part).
+	 */
+	private claimTx(open: OpenTransmission): void {
+		const port = this.txPort
+		if (port === undefined) return
+		const alias = `evt:${open.transmissionId}` as const
+		try {
+			if (open.tx !== null) {
+				port.attach(open.tx.txId, alias)
+				return
+			}
+			const hz = open.frequency?.hz
+			const res = port.claim({
+				origin: "live-demod",
+				kind: "voice-analog",
+				sourceId: open.sourceId,
+				...(hz !== undefined && Number.isFinite(hz) ? { hz } : {}),
+				halfWidthHz: open.bandwidthHz / 2,
+				...(open.txSplitFrom !== null ? { splitFrom: open.txSplitFrom } : {}),
+				atMs: open.startedAtMs,
+				alias,
+			})
+			if (res !== null)
+				open.tx = {
+					txId: res.txId,
+					claimant: res.claimant,
+					heard: false,
+					noted: false,
+				}
+		} catch {
+			// The registry never blocks the tracker: the transmission goes out without an id.
+		}
+	}
+
+	/**
+	 * A closed part's claim: its tone is noted (CTCSS and DCS, a heard one never overwritten by
+	 * a later untoned part), then it ends, unless a max-duration close carries it to the
+	 * continuation (ended there if none opens).
+	 */
+	private endTx(
+		open: OpenTransmission,
+		reason: AnalogTransmissionCloseReason,
+		endedMs: number,
+		tone: AnalogTransmissionTone | null,
+	): void {
+		const tx = open.tx
+		const port = this.txPort
+		if (tx === null || port === undefined) return
+		try {
+			if (tone !== null) {
+				const dcs = copyDcs(tone.dcs)
+				const ctcssHz =
+					typeof tone.ctcssHz === "number" && Number.isFinite(tone.ctcssHz)
+						? tone.ctcssHz
+						: null
+				const heard = ctcssHz !== null || dcs !== null
+				if (heard || !tx.noted) {
+					port.noteLiveTone(tx.claimant, { ctcssHz, dcs })
+					tx.noted = true
+				}
+				if (heard) tx.heard = true
+			}
+			if (reason === "max-duration") {
+				this.carriedTx = tx
+				return
+			}
+			port.end(tx.claimant, endedMs, txEndReasonOf(reason))
+		} catch {
+			// Same rule: the registry never blocks the tracker.
+		}
+	}
+
+	/** A carried claim whose continuation did not open ends now. */
+	private endCarriedTx(atMs: number): void {
+		const tx = this.carriedTx
+		if (tx === null) return
+		this.carriedTx = null
+		try {
+			this.txPort?.end(tx.claimant, atMs, "max-duration")
+		} catch {
+			// The registry never blocks the tracker.
+		}
 	}
 
 	/** Ends the open segment on a squelch close and waits a merge gap for a re-open. */
@@ -1165,6 +1317,9 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const next: OpenTransmission = {
 			...open,
 			transmissionId: this.newId(),
+			// A fresh claim at its announcement, never the held part's (which ends first).
+			tx: null,
+			txSplitFrom: open.tx?.txId ?? null,
 			startedAtMs: open.segmentStartMs,
 			startedAt: new Date(open.segmentStartMs).toISOString(),
 			peak: split.peak,
@@ -1456,6 +1611,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 					startBlock: next,
 					endMs: now,
 				})
+			this.endCarriedTx(now)
 			return
 		}
 		if (this.frequencyDrifted(current)) {
@@ -1973,6 +2129,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		)
 			return
 		open.announced = true
+		this.claimTx(open)
 		this.publish(this.openEvent(open))
 	}
 
@@ -2071,6 +2228,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	private openEvent(open: OpenTransmission): AnalogTransmissionEventData {
 		return {
 			transmissionId: open.transmissionId,
+			...(open.tx === null ? {} : { txId: open.tx.txId }),
 			sourceId: open.sourceId,
 			state: "open",
 			startedAt: open.startedAt,
@@ -2098,6 +2256,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	): AnalogTransmissionEventData {
 		return {
 			transmissionId: open.transmissionId,
+			...(open.tx === null ? {} : { txId: open.tx.txId }),
 			sourceId: open.sourceId,
 			state: "closed",
 			startedAt: open.startedAt,
@@ -2303,6 +2462,8 @@ export interface AnalogTransmissionWiring {
 	randomUUID?: () => string
 	/** WG10 activity hygiene: one call per suppressed transmission (Main logs at debug). */
 	onSuppressed?: AnalogTransmissionTrackerOptions["onSuppressed"]
+	/** Transmission identity (wireTransmissions().liveDemod); absent: no txId. */
+	transmissions?: TxLiveDemodPort
 	/**
 	 * Detection quality R4: each close waits in the data decode gate and is not
 	 * published to Activity when it matched a data decode. The WS event is not held.
@@ -2324,6 +2485,7 @@ export function wireAnalogTransmissions(
 		...(wiring.now ? { now: wiring.now } : {}),
 		...(wiring.randomUUID ? { randomUUID: wiring.randomUUID } : {}),
 		...(wiring.onSuppressed ? { onSuppressed: wiring.onSuppressed } : {}),
+		...(wiring.transmissions ? { transmissions: wiring.transmissions } : {}),
 	})
 	tracker.on("transmission", event => {
 		wiring.broadcast(event)

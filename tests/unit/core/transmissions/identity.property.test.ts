@@ -13,6 +13,7 @@ import {
 	type TxAlias,
 	type TxView,
 } from "../../../../src/core/transmissions/index.js"
+import { harness } from "../scanner/wideband-recorder-harness.js"
 
 const CHANNELS = [100e6, 100.00625e6, 100.0125e6, 200e6] as const
 const HALF = 6_250
@@ -88,6 +89,31 @@ function frozen(v: TxView): string {
 	return JSON.stringify({ ...v, aliases: null, noAudioReason: null })
 }
 
+/**
+ * The real WidebandAnalogRecorder's file transmission path (fileTxIds at a file's start,
+ * noteFileTx when a track opens or joins during it), driven on a session shaped as the recorder
+ * keeps it: the channel's tracks as its activity, its file's txIds. The recorder resolves each
+ * observation through `txOf`, here the run's registry.
+ */
+interface RecorderSession {
+	owner: string
+	voiceTx: string | null
+	activity: Map<string, { open: boolean }>
+	file: { txIds: string[]; endSample: number | null } | null
+}
+interface RecorderTx {
+	fileTxIds(s: RecorderSession): string[]
+	noteFileTx(s: RecorderSession, observationId: string): void
+}
+let current: TransmissionRegistry | null = null
+const recorder = harness({
+	txOf: id => current?.openTxOf(`obs:${id}`) ?? null,
+}).rec as unknown as RecorderTx
+
+function observationOf(alias: TxAlias): string {
+	return alias.slice("obs:".length)
+}
+
 function failIf(cond: boolean, msg: string): void {
 	if (cond) throw new Error(msg)
 }
@@ -95,13 +121,20 @@ function failIf(cond: boolean, msg: string): void {
 function run(ops: readonly Op[]): void {
 	let t = 1_000
 	const r = new TransmissionRegistry({ now: () => t })
+	current = r
 	let seq = 0
 	let epoch = 1
 	let run = 1
 	const tracks: (Active & { ch: number })[] = []
 	let live: (Active & { ch: number }) | null = null
 	const lanes = new Map<number, Active>()
-	let file: { channel: number; txIds: string[]; part: number } | null = null
+	let file: {
+		channel: number
+		txIds: string[]
+		part: number
+		session: RecorderSession
+		recorderNote(observationId: string): void
+	} | null = null
 	const known = new Set<string>()
 	const closed = new Set<string>()
 	const snapshots = new Map<string, string>()
@@ -110,6 +143,11 @@ function run(ops: readonly Op[]): void {
 		failIf(closed.has(id), `a closed id was given out: ${id}`)
 		failIf(r.get(id)?.state !== "open", "a claim gave an id that is not open")
 		known.add(id)
+	}
+	const closeActivity = (a: Active): void => {
+		const id = observationOf(a.alias)
+		if (file?.session.activity.has(id) === true)
+			file.session.activity.set(id, { open: false })
 	}
 	const claimTrack = (ch: number, continues?: string): Active | null => {
 		const alias: TxAlias = `obs:o_${++seq}`
@@ -129,9 +167,12 @@ function run(ops: readonly Op[]): void {
 		fresh(res.txId)
 		const a = { ...res, hz: CHANNELS[ch]!, alias, ch }
 		tracks.push(a)
-		// a track joining during the file's channel adds its transmission to the file
-		if (file !== null && file.channel === ch && !file.txIds.includes(res.txId))
-			if (file.txIds.length < 8) file.txIds.push(res.txId)
+		// a track opening on the file's channel adds its transmission to the file (the recorder's
+		// noteActivity → noteFileTx)
+		if (file !== null && file.channel === ch) {
+			file.session.activity.set(observationOf(alias), { open: true })
+			file.recorderNote(observationOf(alias))
+		}
 		return a
 	}
 
@@ -145,6 +186,7 @@ function run(ops: readonly Op[]): void {
 				const a = tracks[o.i % Math.max(1, tracks.length)]
 				if (!a) break
 				tracks.splice(tracks.indexOf(a), 1)
+				closeActivity(a)
 				r.end(a.claimant, t, o.reason)
 				break
 			}
@@ -152,6 +194,7 @@ function run(ops: readonly Op[]): void {
 				const a = tracks[o.i % Math.max(1, tracks.length)]
 				if (!a) break
 				tracks.splice(tracks.indexOf(a), 1)
+				closeActivity(a)
 				const wasOpen = r.get(a.txId)?.state === "open"
 				r.end(a.claimant, t, "max-duration")
 				const next = claimTrack(a.ch, a.txId)
@@ -217,18 +260,33 @@ function run(ops: readonly Op[]): void {
 				if (file !== null) break
 				const a = tracks[o.i % Math.max(1, tracks.length)]
 				if (!a) break
-				const start = r.openTxOf(a.alias)
-				const txIds = start === null ? [] : [start]
-				for (const other of tracks)
-					if (other.ch === a.ch) {
-						const tx = r.openTxOf(other.alias)
-						if (tx !== null && !txIds.includes(tx) && txIds.length < 8)
-							txIds.push(tx)
-					}
-				// (i) a file's start id was open at its first sample
+				const session: RecorderSession = {
+					owner: observationOf(a.alias),
+					voiceTx: observationOf(a.alias),
+					activity: new Map(
+						tracks
+							.filter(o => o.ch === a.ch)
+							.map(o => [observationOf(o.alias), { open: true }]),
+					),
+					file: null,
+				}
+				const txIds = recorder.fileTxIds(session)
+				session.file = { txIds, endSample: null }
+				// (i) a file's start id was open at its first sample, and is the voiced track's
 				for (const id of txIds)
 					failIf(r.openTxOf(id) === null, "a file started on a closed id")
-				file = { channel: a.ch, txIds, part: 0 }
+				failIf(
+					txIds.length > 0 && txIds[0] !== r.openTxOf(a.alias),
+					"a file's start id is not its voiced track's",
+				)
+				failIf(txIds.length > 8, "a file holds more than 8 ids")
+				file = {
+					channel: a.ch,
+					txIds,
+					part: 0,
+					session,
+					recorderNote: id => recorder.noteFileTx(session, id),
+				}
 				break
 			}
 			case "filePart":
@@ -314,11 +372,17 @@ function run(ops: readonly Op[]): void {
 			case "retune":
 				epoch++
 				r.closeSource(SOURCE, "retune", t, { epochNot: epoch })
-				for (const a of tracks.splice(0)) r.end(a.claimant, t, "retune")
+				for (const a of tracks.splice(0)) {
+					closeActivity(a)
+					r.end(a.claimant, t, "retune")
+				}
 				break
 			case "sourceLost":
 				r.closeSource(SOURCE, "source-lost", t)
-				for (const a of tracks.splice(0)) r.end(a.claimant, t, "source-lost")
+				for (const a of tracks.splice(0)) {
+					closeActivity(a)
+					r.end(a.claimant, t, "source-lost")
+				}
 				if (live !== null) r.end(live.claimant, t)
 				live = null
 				lanes.clear()

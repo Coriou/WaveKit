@@ -392,6 +392,7 @@ import type {
 	TxRefusalCode,
 	TxScannerPort,
 } from "../transmissions/types.js"
+import { TX_ROLLOVER_HOLD_MS } from "../transmissions/registry.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
 import {
 	CHANNEL_GATE_DEFAULT_WIDTH_HZ,
@@ -673,6 +674,12 @@ const CLOSED_TRACKS_KEEP = 4096
  * normally opens in the same block, so an entry is consumed at once; the oldest goes first.
  */
 const ROLLOVER_TX_KEEP = 4096
+/**
+ * An unconsumed rollover entry expires after the registry's rollover hold (1 000 ms): past it
+ * the predecessor's transmission has closed `max-duration` and no `continues` can join it, so
+ * the entry is useless. One engine block is ≤ 200 ms, so a same-block successor always finds it.
+ */
+const ROLLOVER_TX_MAX_AGE_MS = TX_ROLLOVER_HOLD_MS
 const BURST_PROTOCOLS: ReadonlySet<ScannerProtocol> = new Set([
 	"ism",
 	"pocsag",
@@ -881,6 +888,33 @@ function nonAnalogFmClass(c: ScannerClass): boolean {
  * recorder only). Such a shadow has the lowest slot priority and is discarded when it is not
  * voiced within 3 s or not classed within 12 s of in-track audio (WIDEBAND_DIGITAL_*_MS).
  */
+/** A remembered rollover link and when it was written (ROLLOVER_TX_MAX_AGE_MS). */
+interface Remembered {
+	readonly value: string
+	readonly atMs: number
+}
+
+/**
+ * An observation's end as a transmission end. A `gap` (the stream lost samples) is a lost
+ * source, never a complete over; `job-end` is an operator stop.
+ */
+export function txEndReasonOf(
+	endReason: ObservationEndReason | undefined,
+): TxEndReason {
+	switch (endReason) {
+		case "max-duration":
+		case "hop":
+		case "retune":
+			return endReason
+		case "gap":
+			return "source-lost"
+		case "job-end":
+			return "stopped"
+		default:
+			return "ended"
+	}
+}
+
 /** An observation input's `txId` member: present only while the observation holds a claim. */
 function txOf(tx: { txId: string } | undefined): { txId?: string } {
 	return tx === undefined ? {} : { txId: tx.txId }
@@ -1356,10 +1390,13 @@ export class ScannerService extends EventEmitter {
 		string,
 		{ txId: string; claimant: number }
 	>()
-	/** A track closed `max-duration`: its trackId → its txId (≤ ROLLOVER_TX_KEEP). */
-	private readonly rolloverTx = new Map<string, string>()
-	/** A rollover successor's trackId → its predecessor's (≤ ROLLOVER_TX_KEEP). */
-	private readonly rolloverOf = new Map<string, string>()
+	/**
+	 * A track closed `max-duration`: its trackId → its txId (≤ ROLLOVER_TX_KEEP, each at most
+	 * ROLLOVER_TX_MAX_AGE_MS old). Only with a `transmissions` port.
+	 */
+	private readonly rolloverTx = new Map<string, Remembered>()
+	/** A rollover successor's trackId → its predecessor's (same bounds). */
+	private readonly rolloverOf = new Map<string, Remembered>()
 	private passiveChain: Promise<void> = Promise.resolve()
 	/** Maintenance and passive-cost checks started by the tick (finding 5). */
 	private readonly background = new Set<Promise<void>>()
@@ -3942,9 +3979,13 @@ export class ScannerService extends EventEmitter {
 	): void {
 		const track = ev.track
 		if (this.closedTracks.has(track.trackId)) return
-		if (ev.kind === "track-open" && ev.rolloverFrom !== undefined)
-			this.remember(this.rolloverOf, track.trackId, ev.rolloverFrom)
 		const now = this.now()
+		if (
+			this.deps.transmissions &&
+			ev.kind === "track-open" &&
+			ev.rolloverFrom !== undefined
+		)
+			this.remember(this.rolloverOf, track.trackId, ev.rolloverFrom, now)
 		const covering = this.driversOn(sourceId).filter(d =>
 			d.covers(sourceId, track.centreHz),
 		)
@@ -4178,10 +4219,10 @@ export class ScannerService extends EventEmitter {
 	private claimTx(live: LiveObservation, track: TrackSnapshot): void {
 		const port = this.deps.transmissions
 		if (!port) return
-		const pred = this.rolloverOf.get(track.trackId)
-		if (pred !== undefined) this.rolloverOf.delete(track.trackId)
-		const continues = pred === undefined ? undefined : this.rolloverTx.get(pred)
-		if (pred !== undefined) this.rolloverTx.delete(pred)
+		const now = this.now()
+		const pred = this.consume(this.rolloverOf, track.trackId, now)
+		const continues =
+			pred === undefined ? undefined : this.consume(this.rolloverTx, pred, now)
 		const res = port.claim({
 			origin: "scanner-observation",
 			kind: "voice-analog",
@@ -4208,27 +4249,52 @@ export class ScannerService extends EventEmitter {
 		const tx = this.liveTx.get(live.observationId)
 		if (tx === undefined) return
 		this.liveTx.delete(live.observationId)
-		const reason: TxEndReason =
-			endReason === "max-duration"
-				? "max-duration"
-				: endReason === "hop"
-					? "hop"
-					: endReason === "retune"
-						? "retune"
-						: endReason === "job-end"
-							? "stopped"
-							: "ended"
+		const reason = txEndReasonOf(endReason)
 		this.deps.transmissions?.end(tx.claimant, now, reason)
 		if (reason === "max-duration")
-			this.remember(this.rolloverTx, track.trackId, tx.txId)
+			this.remember(this.rolloverTx, track.trackId, tx.txId, now)
 	}
 
-	private remember(map: Map<string, string>, key: string, value: string): void {
+	/** Insertion order is age order: stale heads are dropped on every write (and read). */
+	private remember(
+		map: Map<string, Remembered>,
+		key: string,
+		value: string,
+		now: number,
+	): void {
+		this.pruneRemembered(map, now)
 		map.delete(key)
-		map.set(key, value)
+		map.set(key, { value, atMs: now })
 		if (map.size > ROLLOVER_TX_KEEP) {
 			const oldest = map.keys().next()
 			if (oldest.done !== true) map.delete(oldest.value)
+		}
+	}
+
+	private consume(
+		map: Map<string, Remembered>,
+		key: string,
+		now: number,
+	): string | undefined {
+		this.pruneRemembered(map, now)
+		const hit = map.get(key)
+		if (hit === undefined) return undefined
+		map.delete(key)
+		return hit.value
+	}
+
+	private pruneRemembered(map: Map<string, Remembered>, now: number): void {
+		for (const [key, r] of map) {
+			if (now - r.atMs <= ROLLOVER_TX_MAX_AGE_MS) break
+			map.delete(key)
+		}
+	}
+
+	/** Rollover bookkeeping sizes (tests). */
+	rolloverTxSizes(): { rolloverTx: number; rolloverOf: number } {
+		return {
+			rolloverTx: this.rolloverTx.size,
+			rolloverOf: this.rolloverOf.size,
 		}
 	}
 

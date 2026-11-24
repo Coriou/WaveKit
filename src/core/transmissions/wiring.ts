@@ -5,7 +5,7 @@
 import type { Logger } from "../../utils/logger.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import { TransmissionRegistry } from "./registry.js"
-import type { TxScannerPort } from "./types.js"
+import type { TxDvPort, TxLiveDemodPort, TxScannerPort } from "./types.js"
 
 export interface TransmissionWiringOptions {
 	now?: () => number
@@ -16,6 +16,10 @@ export interface TransmissionWiring {
 	readonly registry: TransmissionRegistry
 	/** The scanner analog chain (ScannerService `transmissions`). */
 	readonly scanner: TxScannerPort
+	/** The live demodulator's transmissions (wireAnalogTransmissions `transmissions`). */
+	readonly liveDemod: TxLiveDemodPort
+	/** Digital-voice calls (dsd-fme options `transmissions`). */
+	readonly dv: TxDvPort
 	closeSource(
 		sourceId: string | null,
 		reason: "retune" | "source-lost",
@@ -35,6 +39,8 @@ export function wireTransmissions(
 	return {
 		registry,
 		scanner: registry,
+		liveDemod: registry,
+		dv: registry,
 		closeSource(sourceId, reason, filter) {
 			const n = registry.closeSource(sourceId, reason, undefined, filter)
 			if (n > 0) log.debug({ closed: n, reason }, "Transmissions closed")

@@ -19,6 +19,7 @@ import type {
 } from "./storage/contract.js"
 import { activityChannelOf, recordingLinkOf } from "./storage/row.js"
 import { dsdFmeKeepKey } from "../recordings/contract.js"
+import { isTxId } from "../transmissions/types.js"
 import {
 	callTrustAdmits,
 	dsdFmeCallRecordable,
@@ -356,6 +357,17 @@ function callIdOf(value: unknown): string | undefined {
 		: undefined
 }
 
+/** A digital-voice call output's transmission id (`tx_<ULID>`), else undefined. */
+function callTxIdOf(output: DecoderOutput): string | undefined {
+	if (output.type !== "call_start" && output.type !== "call_end")
+		return undefined
+	const data = output.data
+	if (typeof data !== "object" || data === null || Array.isArray(data))
+		return undefined
+	const txId = (data as Record<string, unknown>)["txId"]
+	return isTxId(txId) ? txId : undefined
+}
+
 /** What a `call_end` output says about its recording (dsd-fme's `wavFile` and flags). */
 interface CallEndFile {
 	callId: string | undefined
@@ -659,16 +671,20 @@ export function createActivityIngress(
 			} catch (err) {
 				provenanceError = { err }
 			}
+			// A call's end row is found again by its call id (a late file, links.ts); a call's rows by
+			// their transmission id.
+			const txId = callTxIdOf(output)
+			const refs = {
+				...(file?.callId === undefined ? {} : { callId: file.callId }),
+				...(txId === undefined ? {} : { txId }),
+			}
 			let context: DecodeEnvelopeContext = {
 				eventId,
 				receivedAt,
 				decoderId,
 				...(decoderType === undefined ? {} : { decoderType }),
 				provenance: provenance ?? { sourceId: null, frequency: null },
-				// A call's end row is found again by its call id (a late file, links.ts).
-				...(file?.callId === undefined
-					? {}
-					: { refs: { callId: file.callId } }),
+				...(Object.keys(refs).length === 0 ? {} : { refs }),
 			}
 			let envelope: DecodeEnvelope
 			try {

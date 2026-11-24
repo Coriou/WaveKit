@@ -1,6 +1,7 @@
 import { types } from "node:util"
 import { z } from "zod"
 import type { DecoderOutput } from "../../decoders/types.js"
+import { TX_ID, isTxId } from "../transmissions/types.js"
 import {
 	invalidEnvelope,
 	MAX_ENVELOPE_BYTES,
@@ -55,6 +56,8 @@ const refsSchema = z
 		callId: id.optional(),
 		discoveryId: id.optional(),
 		observationId: id.optional(),
+		/** The transmission the row belongs to (`tx_<ULID>`). */
+		txId: z.string().regex(TX_ID).optional(),
 	})
 	.strict()
 const fieldSchema = z
@@ -464,6 +467,7 @@ const REFS_KEYS: ReadonlySet<string> = new Set([
 	"callId",
 	"discoveryId",
 	"observationId",
+	"txId",
 ])
 
 function guardRefs(value: unknown): object | undefined {
@@ -472,16 +476,19 @@ function guardRefs(value: unknown): object | undefined {
 	const callId = r["callId"]
 	const discoveryId = r["discoveryId"]
 	const observationId = r["observationId"]
+	const txId = r["txId"]
 	if (
 		(callId !== undefined && !isText(callId, 128)) ||
 		(discoveryId !== undefined && !isText(discoveryId, 128)) ||
-		(observationId !== undefined && !isText(observationId, 128))
+		(observationId !== undefined && !isText(observationId, 128)) ||
+		(txId !== undefined && !isTxId(txId))
 	)
 		return undefined
 	return {
 		...(callId === undefined ? {} : { callId }),
 		...(discoveryId === undefined ? {} : { discoveryId }),
 		...(observationId === undefined ? {} : { observationId }),
+		...(txId === undefined ? {} : { txId }),
 	}
 }
 

@@ -878,6 +878,7 @@ function receptionRow(
 	pushRef(refs, "callId", envelope.refs?.callId)
 	pushRef(refs, "discoveryId", envelope.refs?.discoveryId)
 	pushRef(refs, "observationId", envelope.refs?.observationId)
+	pushRef(refs, "txId", envelope.refs?.txId)
 	pushRef(refs, "jobId", envelope.provenance.jobId)
 	pushRef(refs, "probeId", envelope.provenance.probeId)
 	pushRef(refs, "channelId", envelope.provenance.channelId)

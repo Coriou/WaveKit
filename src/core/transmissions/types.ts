@@ -162,3 +162,20 @@ export interface TxScannerPort {
 	noteRefusal(ref: string, code: TxRefusalCode): void
 	noteFileWithoutTx(): void
 }
+
+/** The live demodulator's view of the registry (AnalogTransmissionTracker `transmissions`). */
+export interface TxLiveDemodPort {
+	claim(c: TxClaim): TxClaimResult | null
+	end(claimant: number, atMs: number, reason?: TxEndReason): void
+	attach(txId: string, alias: TxAlias): boolean
+	noteLiveTone(claimant: number, tone: TxLiveTone): void
+}
+
+/** A digital-voice decoder's view of the registry (dsd-fme options `transmissions`). */
+export interface TxDvPort {
+	claim(c: TxClaim): TxClaimResult | null
+	end(claimant: number, atMs: number, reason?: TxEndReason): void
+	noteIdentity(claimant: number, identity: TxIdentity): void
+	noteRefusal(ref: string, code: TxRefusalCode): void
+	retireRun(run: string, atMs?: number): void
+}

@@ -32,6 +32,8 @@ import {
 	type TxReadOptions,
 	type TxRefusalCode,
 	type TxScannerPort,
+	type TxLiveDemodPort,
+	type TxDvPort,
 	type TxState,
 	type TxView,
 } from "./types.js"
@@ -193,7 +195,9 @@ function sameChannel(
 	return Math.abs(aHz - bHz) < limit
 }
 
-export class TransmissionRegistry implements TxScannerPort {
+export class TransmissionRegistry
+	implements TxScannerPort, TxLiveDemodPort, TxDvPort
+{
 	private readonly now: () => number
 	private readonly entries = new Map<string, Entry>()
 	/** Open and held entries per source. */
@@ -463,8 +467,11 @@ export class TransmissionRegistry implements TxScannerPort {
 				else if (now - e.startedAtMs >= TX_MAX_MS)
 					this.closeEntry(e, "max-duration", now, false)
 			}
-		for (const e of this.artefactClosed.values()) {
-			if (e.closedAtMs !== null && now - e.closedAtMs < TX_CLOSED_TTL_MS) break
+		// Ring order is entry order, not close order: a bare entry that gains an artefact joins at
+		// the tail with its older close. So skip, never break: ≤ TX_CLOSED_MAX (2 048) compares/s.
+		for (const e of [...this.artefactClosed.values()]) {
+			if (e.closedAtMs !== null && now - e.closedAtMs < TX_CLOSED_TTL_MS)
+				continue
 			this.evict(e, this.artefactClosed)
 		}
 		for (const [key, list] of this.recent) {

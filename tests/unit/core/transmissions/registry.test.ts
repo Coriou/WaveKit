@@ -349,6 +349,27 @@ describe("TransmissionRegistry", () => {
 		expect(r.get(a.txId)!.aliases.rec).toEqual(["rec:scan:d~f.wav"])
 	})
 
+	it("the TTL sweep does not stall behind a younger entry ahead of a moved one", () => {
+		const r = new TransmissionRegistry()
+		// B closes bare at 1; F closes with an artefact at 1 000; B then gains a recording and
+		// joins the artefact ring behind F with its older close.
+		const b = r.claim(obs(HZ, 0))!
+		r.end(b.claimant, 1)
+		const f = r.claim(live(HZ + 100_000, 999))!
+		r.end(f.claimant, 1_000)
+		expect(r.attach(b.txId, "rec:scan:d~old.wav")).toBe(true)
+		expect(r.stats().closed).toBe(2)
+		// one millisecond before B's TTL both stay
+		r.sweep(1 + TX_CLOSED_TTL_MS - 1)
+		expect(r.get(b.txId)).not.toBeNull()
+		// at B's TTL B goes although F (ahead of it) is still young
+		r.sweep(1 + TX_CLOSED_TTL_MS)
+		expect(r.get(b.txId)).toBeNull()
+		expect(r.get(f.txId)).not.toBeNull()
+		r.sweep(1_000 + TX_CLOSED_TTL_MS)
+		expect(r.get(f.txId)).toBeNull()
+	})
+
 	it("caps aliases per kind, per alias and in all", () => {
 		const r = new TransmissionRegistry()
 		const a = r.claim(live(HZ, 0))!

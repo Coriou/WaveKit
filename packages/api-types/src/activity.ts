@@ -35,6 +35,8 @@ export interface DecodeReferences {
 	callId?: string
 	discoveryId?: string
 	observationId?: string
+	/** The transmission the row belongs to (`tx_<ULID>`); absent before it or without one. */
+	txId?: string
 }
 export interface DecodePosition {
 	lat: number

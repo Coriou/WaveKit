@@ -45,7 +45,9 @@ import {
 	DSD_FME_RECORDING_MAX_TOTAL_MB_MAX,
 	DSD_FME_SAMPLE_RATE_MAX_HZ,
 	DSD_FME_SAMPLE_RATE_MIN_HZ,
+	type DsdFmeRuntimeOptions,
 } from "../options/dsd-fme.js"
+import type { TxDvPort, TxEndReason } from "../../core/transmissions/types.js"
 import {
 	DMR_RECORDING_LINK_ENABLED,
 	pruneCallRecordings,
@@ -415,6 +417,8 @@ export function dsdFmeUdpChannels(mode: DsdFmeMode): 1 | 2 {
  */
 export interface DsdFmeVoiceCallState {
 	callId: string
+	/** The call's transmission id (`tx_<ULID>`), from its call_start on; absent without one. */
+	txId?: string
 	protocol: Exclude<DsdFmeProtocol, null> | null
 	talkgroup: number | null
 	source: number | null
@@ -523,6 +527,13 @@ interface CallFlags {
 interface DsdFmeCallState {
 	/** Stable id shared by call_start, call_end and voice-call events. */
 	callId: string
+	/**
+	 * The call's transmission (claimed with its call_start, on its lane and run): every later
+	 * output and voice-call state of the call carries `txId`. Absent without a registry, before
+	 * the call_start, or when the claim was refused.
+	 */
+	txId?: string | undefined
+	txClaimant?: number | undefined
 	protocol: DsdFmeProtocol
 	talkgroup: number | null
 	source: number | null
@@ -1256,6 +1267,8 @@ function applyVoiceMetadata(
 /** Fields of the call_start / call_end data this decoder publishes. */
 interface CallEventData {
 	callId?: string
+	/** The call's transmission id (DsdFmeCallState.txId). */
+	txId?: string
 	startedAt?: string
 	endedAt?: string
 	encrypted?: boolean
@@ -1490,6 +1503,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private dmrBs = false
 	private dmrBsSlot = 1
 
+	/** Transmission identity (DsdFmeRuntimeOptions.transmissions); absent: no txId. */
+	private readonly txPort: TxDvPort | undefined
+	/**
+	 * This decoder's run: start() retires the previous run (its calls closed `decoder-restart`
+	 * and any later claim of it refused) and opens the next.
+	 */
+	private txRunSeq = 0
+
 	/** The adapter's clocks (DsdFmeClock). */
 	private readonly clock: DsdFmeClock
 	/** mono() 0 on the epoch scale: the wall time at construction minus mono(). */
@@ -1499,8 +1520,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		config: DecoderConfig,
 		logger: Logger,
 		clock: DsdFmeClock = SYSTEM_CLOCK,
+		runtime: DsdFmeRuntimeOptions = {},
 	) {
 		super(config, logger)
+		this.txPort = runtime.transmissions
 		this.clock = clock
 		this.monoEpochMs = clock.wall() - clock.mono()
 		this.options = this.parseOptions(config.options)
@@ -1718,6 +1741,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.callTimeoutTimer = null
 		}
 		this.endOpenCallsForRestart(this.monoDate())
+		this.nextTxRun()
 		// An old run's waiting attempt reads nothing; the stuck listing itself stays recorded until
 		// it settles, so this run starts no second read beside it (single flight across runs).
 		this.wakeOldRunWavWaiters()
@@ -1824,6 +1848,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				}
 			}
 		})
+		this.retireTxRun()
 
 		this.flushPendingDmrLink(false)
 		this.dmrRoute = newDmrRoute()
@@ -1987,6 +2012,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const live = this.liveCall(callId)
 		const state: DsdFmeVoiceCallState = {
 			callId,
+			...(data.txId === undefined ? {} : { txId: data.txId }),
 			protocol: data.protocol ?? null,
 			talkgroup: data.talkgroup ?? null,
 			source: data.source ?? null,
@@ -2436,6 +2462,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const encrypted = call.flags.encrypted
 		const state: DsdFmeVoiceCallState = {
 			callId: call.callId,
+			...(call.txId === undefined ? {} : { txId: call.txId }),
 			protocol: call.protocol,
 			talkgroup: call.talkgroup,
 			source: call.source,
@@ -2640,6 +2667,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		timestamp: Date,
 	): DecoderOutput {
 		call.announced = true
+		this.claimCallTx(call)
 		this.logger.info(
 			{
 				protocol: call.protocol,
@@ -2656,6 +2684,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			type: "call_start",
 			data: {
 				callId: call.callId,
+				...(call.txId === undefined ? {} : { txId: call.txId }),
 				startedAt: this.startedAtIso(call),
 				encrypted: call.flags.encrypted,
 				...this.encryptionKnownField(call),
@@ -5864,6 +5893,96 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return !call.flags.encrypted && call.encryptionKnown !== false
 	}
 
+	/** This run's id in the transmission registry. */
+	private txRun(): string {
+		return `${this.id}#${this.txRunSeq}`
+	}
+
+	/** Closes this run's transmissions (`decoder-restart`) and refuses its later claims. */
+	private retireTxRun(): void {
+		try {
+			this.txPort?.retireRun(this.txRun(), this.clock.wall())
+		} catch {
+			// The registry never blocks the decoder.
+		}
+	}
+
+	/** start(): the previous run is retired, the next one claims from here. */
+	private nextTxRun(): void {
+		this.retireTxRun()
+		this.txRunSeq++
+	}
+
+	/**
+	 * A call's transmission, claimed once when its call_start is made (the promotion that
+	 * publishes; a pending call that never publishes mints none), keyed by this decoder, the
+	 * call's TDMA lane (a repeater slot, else 0) and the run. A refused claim leaves no id.
+	 */
+	private claimCallTx(call: DsdFmeCallState): void {
+		const port = this.txPort
+		if (port === undefined || call.txId !== undefined) return
+		const lane = this.laneKey === 1 || this.laneKey === 2 ? this.laneKey : 0
+		try {
+			const res = port.claim({
+				origin: "dv-call",
+				kind: "voice-digital",
+				sourceId: this.config.sourceId ?? null,
+				dvKey: `dv:${this.id}`,
+				lane,
+				run: this.txRun(),
+				atMs: call.startWallMs,
+				alias: `call:${this.id}:${call.callId}`,
+			})
+			if (res === null) return
+			call.txId = res.txId
+			call.txClaimant = res.claimant
+			port.noteIdentity(res.claimant, this.txIdentityOf(call))
+		} catch {
+			// The registry never blocks the decoder: the call goes out without an id.
+		}
+	}
+
+	/**
+	 * The call's transmission ends with its call_end: its identity and encryption are noted
+	 * first; a restart's end closes `decoder-restart`, stop()'s an operator stop.
+	 */
+	private endCallTx(call: DsdFmeCallState, endTime: Date): void {
+		const port = this.txPort
+		const claimant = call.txClaimant
+		if (port === undefined || claimant === undefined) return
+		call.txClaimant = undefined
+		const reason: TxEndReason =
+			call.flags.restart === true
+				? "decoder-restart"
+				: this.stopping
+					? "stopped"
+					: "ended"
+		try {
+			port.noteIdentity(claimant, this.txIdentityOf(call))
+			if (call.flags.encrypted && call.txId !== undefined)
+				port.noteRefusal(call.txId, "encrypted")
+			port.end(
+				claimant,
+				call.startWallMs + (endTime.getTime() - call.startTime.getTime()),
+				reason,
+			)
+		} catch {
+			// The registry never blocks the decoder.
+		}
+	}
+
+	private txIdentityOf(call: DsdFmeCallState): {
+		protocol: string | null
+		talkgroup: string | null
+		source: string | null
+	} {
+		return {
+			protocol: call.protocol,
+			talkgroup: call.talkgroup === null ? null : String(call.talkgroup),
+			source: call.source === null ? null : String(call.source),
+		}
+	}
+
 	/**
 	 * Ends the current call and returns a call_end event.
 	 * Generates expected WAV filename if per-call recording is enabled.
@@ -5967,8 +6086,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 							},
 			})
 
+		this.endCallTx(callInfo, endTime)
 		const data = {
 			callId: callInfo.callId,
+			...(callInfo.txId === undefined ? {} : { txId: callInfo.txId }),
 			startedAt: this.startedAtIso(callInfo),
 			endedAt: this.wallIso(callInfo, endTime),
 			...this.encryptionKnownField(callInfo),
@@ -6014,8 +6135,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 export function createDsdFmeDecoder(
 	config: DecoderConfig,
 	logger: Logger,
+	runtime: DsdFmeRuntimeOptions = {},
 ): DsdFmeDecoder {
-	return new DsdFmeDecoder(config, logger)
+	return new DsdFmeDecoder(config, logger, SYSTEM_CLOCK, runtime)
 }
 
 /**
