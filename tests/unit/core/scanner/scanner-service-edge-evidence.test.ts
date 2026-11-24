@@ -88,6 +88,16 @@ function liveOf(
 	}
 }
 
+/**
+ * A discovery's observation time: now, not 0. The service's first tick (20 ms after start)
+ * runs maintenance, which prunes discoveries last seen past storage.discoveryMaxAgeDays; one
+ * seen in 1970 would be removed whenever that prune lands inside the test's awaits, which only
+ * host load decides.
+ */
+function recent(): number {
+	return Date.now()
+}
+
 /** A 1 kHz-bin summary covering the whole 1.024 Msps span. */
 function summaryAt(): BlockSummary {
 	const bins = Array.from({ length: 1_024 }, () => -60)
@@ -116,7 +126,7 @@ describe("PSD evidence keeps off edge tracks (DQ 1.4e)", () => {
 		const obs = makeObs({
 			id: `p${offsetHz}`,
 			centreHz: CENTRE + offsetHz,
-			startedAt: 0,
+			startedAt: recent(),
 			snrDb: 30,
 			blocks: 40,
 			obwHz: 12_500,
@@ -159,7 +169,7 @@ describe("PSD evidence keeps off edge tracks (DQ 1.4e)", () => {
 			makeObs({
 				id: "q",
 				centreHz: CENTRE + 100_000,
-				startedAt: 0,
+				startedAt: recent(),
 				snrDb: 30,
 				blocks: 40,
 				gate: "passed",
