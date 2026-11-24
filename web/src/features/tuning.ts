@@ -194,10 +194,12 @@ export async function tuneTo(
 						? { ...ctx, offsetAvailable: false }
 						: ctx,
 				)
-	// The centre is already the target (a recentre or a sweep found an offset): only the offset goes
-	// back to 0. No tuner write, so a sweep is not paused for nothing.
+	// Asked to recentre with no sweep, a centre already on the target only resets the offset (no tuner
+	// write). While a sweep has the receiver the tuner write stays: it is what pauses the scan.
 	const plan: TunePlan =
-		planned.kind === "recentre" && planned.centreHz === ctx.centreHz
+		!scanning &&
+		planned.kind === "recentre" &&
+		planned.centreHz === ctx.centreHz
 			? { kind: "offset", hz: target, offsetHz: 0 }
 			: planned
 	await applyTunePlan(data, plan, tuner.sourceId)

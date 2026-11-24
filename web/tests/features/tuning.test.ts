@@ -174,10 +174,13 @@ describe("tuneTo with the centre already on the target", () => {
 		return { data, tune, setConfig }
 	}
 
-	it.each([
-		["a sweep has the receiver", "running" as const, {}],
-		["asked to recentre", null, { recentre: true }],
-	])(
+	it("a sweep has the receiver: the tuner is written even on the centre, so the scan pauses", async () => {
+		const f = fake("running")
+		await tuneTo(f.data, 161_500_000)
+		expect(f.tune).toHaveBeenCalledWith(161_500_000, "pi")
+	})
+
+	it.each([["asked to recentre", null, { recentre: true }]])(
 		"%s: only the offset resets, the tuner is not written (no pause for nothing)",
 		async (_label, sweep, options) => {
 			const f = fake(sweep)
