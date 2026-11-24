@@ -266,6 +266,23 @@ describe("recording search", () => {
 			maxHz: 156_806_250,
 		})
 		expect(recordingsQuery({ tokens: [], text: "", filter: "all" })).toEqual({})
+		// Copies shown (the default): the core's default, nothing asked; Hide copies asks copies=false.
+		expect(
+			recordingsQuery({
+				tokens: [],
+				text: "",
+				filter: "all",
+				showCopies: true,
+			}),
+		).toEqual({})
+		expect(
+			recordingsQuery({
+				tokens: [],
+				text: "",
+				filter: "all",
+				showCopies: false,
+			}),
+		).toEqual({ copies: false })
 	})
 
 	it("sends typed text as the core reads it, the typed text winning over a text chip", () => {

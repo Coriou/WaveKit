@@ -1549,6 +1549,8 @@ describe("recordings catalogue", () => {
 				"scanner-analog": 1,
 				"dv-call": 0,
 			},
+			// No file is a copy (copy-facts.ts): the count is there, zero.
+			copiesTotal: 0,
 		})
 		expect(all.items.find(i => i.kind === "scanner-analog")).toMatchObject({
 			discoveryId: "d_01K446ZZ",

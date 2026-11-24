@@ -106,6 +106,9 @@ import {
 	type Bandplan,
 	type BandRegionCode,
 } from "./bandplan/index.js"
+import { CopyDetector } from "./channel/copy-detector.js"
+import type { RasterFit } from "./channel/copy-intermod.js"
+import type { CopyFacts } from "./store/copy-facts.js"
 import { builtinBandplansFor } from "../bandplans/builtin-supplement.js"
 import {
 	createBandRangeCache,
@@ -1768,7 +1771,24 @@ export class ScannerService extends EventEmitter {
 					}
 				},
 			})
+			// Copy (ghost) detection over the kept files: the store writes its sidecars, its removals
+			// reach the detector and its mark changes the recordings catalogue (`recording-copy-changed`,
+			// `recording-copies-loaded` once recovery loaded the marks).
+			const copies = new CopyDetector({
+				write: (operationId, copy) =>
+					this.evidence.writeCopy(operationId, copy),
+				logger: deps.logger,
+			})
+			this.evidence.onAnalogNotice(n => {
+				if (n.kind === "removed") copies.forget(n.operationId)
+				else if (n.kind === "copies-loaded")
+					this.emit("recording-copies-loaded")
+				else this.emit("recording-copy-changed", n.alias)
+			})
 			this.widebandAnalog = new WidebandAnalogRecorder({
+				copies,
+				rasterOf: (sourceId, hz, obwHz) =>
+					this.rasterFit(sourceId, hz, obwHz ?? null),
 				engine: sourceId => this.spectrum.engine(sourceId),
 				settings: () => ({
 					...this.settings().hold,
@@ -3196,6 +3216,14 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
+	 * Copy detection: the copy mark of a kept analog file's operation (memory only, the store's
+	 * index), or null. The recordings catalogue reads this, never the mark's file.
+	 */
+	recordingCopyOf(operationId: string): CopyFacts | null {
+		return this.evidence.copyOf(operationId)
+	}
+
+	/**
 	 * The Activity channel of a reception from scanner probe `decoderId` (the activity ingress
 	 * `channel` lookup): the discovery the probe was started for, followed to the survivor a merge
 	 * absorbed it into (recording aliases first, then the absorbed-id index, as resolveDiscovery),
@@ -3882,6 +3910,18 @@ export class ScannerService extends EventEmitter {
 		if (jobs.some(j => j.passive))
 			out.push(...this.channelRastersAt(sourceId, hz))
 		return out
+	}
+
+	/**
+	 * Copy detection's raster fit of `hz` (a raw centre): the discovery placement's rasters and the
+	 * source's learned frequency correction (DiscoveryStore.rasterFit), unknown with no raster.
+	 */
+	private rasterFit(
+		sourceId: string,
+		hz: number,
+		obwHz: number | null,
+	): RasterFit {
+		return this.store.rasterFit(sourceId, hz, obwHz)
 	}
 
 	/**

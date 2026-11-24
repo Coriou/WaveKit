@@ -58,12 +58,14 @@ import {
 	type AnalogHandle,
 	type AnalogInput,
 	type AnalogMetadataAdapter,
+	type AnalogNotice,
 	type AnalogOperationIo,
 	type AnalogQuarantine,
 	type AnalogReconciliation,
 	type AnalogSetAsideStatus,
 	type LegacyRetention,
 } from "./analog-operations.js"
+import type { CopyFacts, CopyFactsInput } from "./copy-facts.js"
 import {
 	NOISE_QUARANTINE,
 	NoiseQuarantine,
@@ -798,6 +800,9 @@ export class EvidenceStore {
 					{ code, kind },
 					"Directory fsync unsupported here; analog operation folders are not synced",
 				),
+			notice: n => {
+				for (const l of [...this.analogNoticeListeners]) l(n)
+			},
 			setAsideLogged: counts =>
 				this.log.warn(
 					counts,
@@ -825,6 +830,28 @@ export class EvidenceStore {
 	}
 	get analogAuthorityReady(): boolean {
 		return this.analog?.ready ?? false
+	}
+	/** Store notices of the analog operations (copy-changed, copies-loaded, removed); see AnalogNotice. */
+	private readonly analogNoticeListeners = new Set<(n: AnalogNotice) => void>()
+	/** Subscribes to the analog operations' notices (also before configureAnalog); unsubscribe. */
+	onAnalogNotice(listener: (n: AnalogNotice) => void): () => void {
+		this.analogNoticeListeners.add(listener)
+		return () => {
+			this.analogNoticeListeners.delete(listener)
+		}
+	}
+	/** AnalogOperations.writeCopy; "skipped" without an analog authority. */
+	writeCopy(
+		operationId: string,
+		copy: CopyFactsInput | null,
+	): Promise<"written" | "removed" | "skipped"> {
+		return (
+			this.analog?.writeCopy(operationId, copy) ?? Promise.resolve("skipped")
+		)
+	}
+	/** AnalogOperations.copyOf (memory only); null without an analog authority. */
+	copyOf(operationId: string): CopyFacts | null {
+		return this.analog?.copyOf(operationId) ?? null
 	}
 	/** Analog operations active now over all sources (0 without an analog authority). */
 	get analogActiveCount(): number {

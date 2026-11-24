@@ -86,6 +86,10 @@ export async function harness(now = Date.now()): Promise<Harness> {
 						i.facts?.txId === txId || (i.facts?.moreTxIds ?? []).includes(txId),
 				)
 				.map(i => i.key ?? i.id),
+		keysOfCopyRoot: (key: string) =>
+			[...items.values()]
+				.filter(i => i.copyOf?.key === key)
+				.map(i => i.key ?? i.id),
 	} as unknown as RecordingInventory
 	const counts = { search: 0, detail: 0 }
 	const service = runtime.service
@@ -181,6 +185,9 @@ export function analogItem(
 		tone?: RecordingTone | null
 		part?: number
 		parts?: number
+		/** The listed root this file is a copy of (RecordingInventoryItem.copyOf). */
+		copyOf?: { key: string; evidence: string[] }
+		frequencyHz?: number
 	} = {},
 ): RecordingInventoryItem {
 	return {
@@ -207,12 +214,13 @@ export function analogItem(
 		speech: "heard",
 		keptBy: "final",
 		txId: patch.txId ?? null,
+		copyOf: patch.copyOf ?? null,
 		facts: {
 			version: 1,
 			operationId: "op-1",
 			discoveryId: DISCOVERY,
 			observationId: "o_01JTESTOBSERVATION",
-			frequencyHz: 100_000_300,
+			frequencyHz: patch.frequencyHz ?? 100_000_300,
 			startedAt: "2026-10-12T00:00:26.500Z",
 			endedAt: "2026-10-12T00:00:30.000Z",
 			keptAt: "2026-10-12T00:00:30.000Z",

@@ -198,6 +198,19 @@ export interface RecordingInventoryItem {
 	 * facts' `txId`); null when unknown. Absent for other kinds and from older cores.
 	 */
 	txId?: string | null
+	/**
+	 * Scanner analog recordings only: this file is a copy (a ghost: the same audio heard again on
+	 * another frequency, with evidence of its own: `intermod`, `off-raster`) of the listed root
+	 * recording `key`. Null when it is not a copy, or its root is no longer listed or is itself a
+	 * copy. Absent for other kinds and from older cores.
+	 */
+	copyOf?: RecordingCopyOf | null
+}
+
+/** RecordingInventoryItem.copyOf: the root recording's key and the copy's own evidence. */
+export interface RecordingCopyOf {
+	key: string
+	evidence: string[]
 }
 
 /**
@@ -288,6 +301,11 @@ export interface RecordingInventoryQuery {
 	decoderId?: string
 	/** `true` or `false`. */
 	kept?: boolean | "true" | "false"
+	/**
+	 * Default true: copies (items with a `copyOf`) are listed. `false` leaves them out of the
+	 * listing and `matched` (never out of `counts`); GET by id, play and delete ignore it.
+	 */
+	copies?: boolean | "true" | "false"
 	/** A discovery id: matches its own folder and every folder whose live owner it is. */
 	discoveryId?: string
 	/** Decimal digits. */
@@ -325,6 +343,8 @@ export interface RecordingInventoryCounts {
 	kept: number
 	bytes: number
 	byKind: Record<RecordingInventoryKind, number>
+	/** Copies (items with a `copyOf`) in the unfiltered listing a `copies=false` listing leaves out (a Kept copy is never left out, so never counted). Absent from older cores. */
+	copiesTotal?: number
 }
 
 /** WG8 req 4.4: GET /api/recordings 200 body. Newest `modifiedAt` first, ties by id. */

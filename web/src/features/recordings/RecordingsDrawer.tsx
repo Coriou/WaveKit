@@ -8,7 +8,8 @@ import "./recordings.css"
 // list; Back returns to the same search, scroll and open row. Playback is the app's one player (services.playback, its dock
 // the only transport): the row disc toggles it, the open row's waveform seeks it, the playing row is marked.
 // The list follows the catalogue's `recordings` socket notices; arrivals hold while it is scrolled or playing
-// from it ("N new"). Names, notes, trim, transcripts, IQ captures and Opus downloads wait for the core
+// from it ("N new"). Copies (the same audio heard again on another frequency) are listed with a "copy" chip that
+// opens their original; the footer's Hide copies leaves them out. Names, notes, trim, transcripts, IQ captures and Opus downloads wait for the core
 // (CORE-GAPS "Recordings").
 import { memo, useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode, KeyboardEvent as ReactKeyboardEvent } from "react"
@@ -59,11 +60,13 @@ import type { PlaybackService, QueueRef } from "../playback/service.ts"
 import { PlayGlyph, RecIcon } from "./icons.tsx"
 import { listKeyAction } from "./keys.ts"
 import {
+	copiesToggleLabel,
 	countText,
 	dayEntries,
 	deleteBlocker,
 	formatBytes,
 	headerCount,
+	isCopy,
 	recordedAt,
 	recordingIcon,
 	recordingMeta,
@@ -82,6 +85,7 @@ import {
 	removeToken,
 	setCursor,
 	setFilter,
+	setShowCopies,
 	revealRequest,
 	setText,
 	visibleRecordings,
@@ -204,6 +208,7 @@ function useSearchQuery() {
 	const tokens = useStore(recordingsUi, s => s.tokens)
 	const text = useStore(recordingsUi, s => s.text)
 	const filter = useStore(recordingsUi, s => s.filter)
+	const showCopies = useStore(recordingsUi, s => s.showCopies)
 	const first = useRef(true)
 	useEffect(() => {
 		// the attach above already asked for the opening query
@@ -211,13 +216,13 @@ function useSearchQuery() {
 			first.current = false
 			return
 		}
-		const q = recordingsQuery({ tokens, text, filter })
+		const q = recordingsQuery({ tokens, text, filter, showCopies })
 		const t = setTimeout(
 			() => void recordings.show(q),
 			text.trim() === "" ? 0 : TYPE_DEBOUNCE_MS,
 		)
 		return () => clearTimeout(t)
-	}, [recordings, tokens, text, filter])
+	}, [recordings, tokens, text, filter, showCopies])
 }
 
 function Progress() {
@@ -239,8 +244,9 @@ function HeaderActions({ usable }: { usable: boolean }) {
 		recordingsUi,
 		s => s.tokens.length > 0 || s.text.trim() !== "",
 	)
+	const showCopies = useStore(recordingsUi, s => s.showCopies)
 	if (!usable) return null
-	const count = headerCount(meta, filter, searching)
+	const count = headerCount(meta, filter, searching, !showCopies)
 	const kept = meta?.counts?.kept ?? null
 	return (
 		<>
@@ -1074,6 +1080,7 @@ const Row = memo(function Row({
 						<span className="wkr-meta">{recordingMeta(r)}</span>
 					</span>
 				</button>
+				{isCopy(r) && <CopyChip item={r} />}
 				<PlayDisc
 					id={pid}
 					title={title}
@@ -1105,6 +1112,32 @@ const Row = memo(function Row({
 		</article>
 	)
 })
+
+/**
+ * A copy's chip: the same audio heard again on another frequency (a receiver ghost), kept and listed under its
+ * original; it opens the original's Transmission view.
+ */
+export function CopyChip({ item: r }: { item: RecordingInventoryItem }) {
+	const of = r.copyOf?.key ?? null
+	if (of === null) return null
+	return (
+		<button
+			type="button"
+			className="wk-chip wkr-copy"
+			data-size="sm"
+			title="Copy: the same audio heard again on another frequency. Open the original"
+			aria-label="Open the original recording (this is a copy)"
+			onClick={() =>
+				openTransmission(
+					{ recording: of },
+					{ host: "recordings", label: "Recordings" },
+				)
+			}
+		>
+			copy
+		</button>
+	)
+}
 
 /** The channel link's words: "History of Club net", "History of 145.6125", "History of TG 2081". */
 export function channelLinkLabel(r: RecordingInventoryItem): string | null {
@@ -1390,9 +1423,15 @@ function Footer() {
 		services.data.recordings,
 		s => s.meta?.counts?.kept ?? null,
 	)
+	const copiesTotal = useStore(
+		services.data.recordings,
+		s => s.meta?.counts?.copiesTotal ?? null,
+	)
+	const showCopies = useStore(recordingsUi, s => s.showCopies)
 	const unavailable = useStore(services.data.recordings, recordingsUnavailable)
 	if (unavailable !== null) return null
 	const low = storage?.lowSpace.state === "low"
+	const copies = copiesToggleLabel(copiesTotal, showCopies)
 	return (
 		<footer className="wkr-footer" data-tone={low ? "warn" : undefined}>
 			<span className="wkr-footer-text">
@@ -1401,6 +1440,19 @@ function Footer() {
 					: ""}
 				{storageLine(storage, kept)}
 			</span>
+			{copies !== null && (
+				<button
+					type="button"
+					className="wk-btn wkr-copies"
+					data-variant="ghost"
+					data-size="sm"
+					aria-pressed={!showCopies}
+					title="Copies: the same audio heard again on another frequency, marked with a copy chip that opens their original"
+					onClick={() => setShowCopies(!showCopies)}
+				>
+					{copies}
+				</button>
+			)}
 			<button
 				type="button"
 				className="wkr-link"

@@ -25,6 +25,8 @@ import type { ActivityQueryService } from "../../core/activity/storage/contract.
 import type { RecordingInventory } from "../../core/recordings/inventory.js"
 import {
 	buildTransmissionDto,
+	type TransmissionDtoSources,
+	TRANSMISSION_COPIES_MAX,
 	TRANSMISSION_GROUP_MEMBERS_MAX,
 } from "../../core/transmissions/dto.js"
 import { TransmissionRefSchema } from "../../core/transmissions/ref.js"
@@ -293,6 +295,32 @@ export async function transmissionRoutes(
 						? sendError(reply, 503, "TRANSMISSIONS_UNAVAILABLE")
 						: sendError(reply, 404, "TRANSMISSION_NOT_FOUND")
 
+				// 6. Copy links (bounded: the root its copyOf names, at most TRANSMISSION_COPIES_MAX
+				// of its own copies), from the catalogue's memory index only.
+				// The item the ref names (a `rec:` key: that roll-over part, not the first one), else
+				// the first analog item.
+				const refKey = ref.startsWith("rec:") ? ref.slice("rec:".length) : null
+				const analogItem =
+					items.find(
+						i => i.kind === "scanner-analog" && (i.key ?? i.id) === refKey,
+					) ?? items.find(i => i.kind === "scanner-analog")
+				let copy: TransmissionDtoSources["copy"]
+				if (analogItem !== undefined && inventory !== undefined) {
+					const rootKey = analogItem.copyOf?.key ?? null
+					let copyKeys: readonly string[] = []
+					try {
+						copyKeys =
+							inventory.keysOfCopyRoot?.(analogItem.key ?? analogItem.id) ?? []
+					} catch {
+						copyKeys = []
+					}
+					copy = {
+						item: analogItem,
+						root: rootKey === null ? null : (itemsOf([rootKey])[0] ?? null),
+						copies: itemsOf(copyKeys.slice(0, TRANSMISSION_COPIES_MAX)),
+						copiesTotal: copyKeys.length,
+					}
+				}
 				const dto = buildTransmissionDto({
 					view,
 					storedTxId: txId,
@@ -311,6 +339,7 @@ export async function transmissionRoutes(
 									TRANSMISSION_GROUP_MEMBERS_MAX,
 								),
 					audioServed: inventory !== undefined,
+					...(copy === undefined ? {} : { copy }),
 				})
 				// Rule six: a dsd-fme file is reached by its key only while a clear call's decoder link
 				// names it. An unlisted file (unproven, encrypted, never linked) answers exactly as an

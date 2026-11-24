@@ -4,12 +4,14 @@
 // and Activity rows with `id` null, and a `tx_` or `obs:` ref is 404. A digital call is "clear" and
 // lists its file only when its decoder call row (decoder-reception) links that file in `recording`,
 // the decoder's link the core accepts; a row whose `encrypted` field is true reads "encrypted";
-// anything else "unproven" with no audio.
+// anything else "unproven" with no audio. An analog recording's `copy` comes from the catalogue items'
+// `copyOf` (the original it names, the listed copies naming it), as the core builds it.
 import type { FastifyInstance } from "fastify"
 import type {
 	ActivityRecord,
 	ActivitySummary,
 	RecordingInventoryItem,
+	TransmissionCopy,
 	TransmissionDto,
 	TransmissionTone,
 } from "@wavekit/api-types"
@@ -55,9 +57,41 @@ function toneOf(item: RecordingInventoryItem | undefined): TransmissionTone {
 	}
 }
 
+/** Copies listed per transmission (the core's TRANSMISSION_COPIES_MAX). */
+const COPIES_MAX = 8
+
+const keyOf = (i: RecordingInventoryItem): string => i.key ?? i.id
+const hzOf = (i: RecordingInventoryItem): number | null =>
+	i.facts?.frequencyHz ?? i.frequencyHz ?? null
+
+/** TransmissionDto.copy of an analog item, from the catalogue's `copyOf` links only. */
+function copyOf(
+	item: RecordingInventoryItem | undefined,
+	items: readonly RecordingInventoryItem[],
+): TransmissionCopy | null {
+	if (item?.kind !== "scanner-analog") return null
+	const named = item.copyOf ?? null
+	const root =
+		named === null ? undefined : items.find(i => keyOf(i) === named.key)
+	const of =
+		named === null
+			? null
+			: { ref: `rec:${named.key}`, hz: root ? hzOf(root) : null }
+	const all = items.filter(c => c.copyOf?.key === keyOf(item))
+	const copies = all.slice(0, COPIES_MAX).map(c => ({
+		ref: `rec:${keyOf(c)}`,
+		hz: hzOf(c),
+		recordingKey: keyOf(c),
+		evidence: [...(c.copyOf?.evidence ?? [])],
+	}))
+	if (of === null && copies.length === 0) return null
+	return { of, copies, copiesTotal: all.length }
+}
+
 function dto(
 	item: RecordingInventoryItem | undefined,
 	row: { summary: ActivitySummary; record: ActivityRecord } | null,
+	items: readonly RecordingInventoryItem[] = [],
 ): TransmissionDto {
 	const digital =
 		item !== undefined
@@ -151,6 +185,7 @@ function dto(
 					? "clear"
 					: "unproven"
 			: null,
+		copy: digital ? null : copyOf(item, items),
 	}
 }
 
@@ -181,7 +216,7 @@ export function registerTransmissionsMock(
 				typeof item.activityEventId === "string"
 					? options.activity(item.activityEventId)
 					: null
-			return dto(item, row)
+			return dto(item, row, items)
 		}
 		if (ref.startsWith("evt:")) {
 			const row = options.activity(ref.slice(4))
@@ -189,7 +224,7 @@ export function registerTransmissionsMock(
 			const key = row.summary.recording?.id
 			const item =
 				key === undefined ? undefined : items.find(i => i.key === key)
-			return dto(item, row)
+			return dto(item, row, items)
 		}
 		return notFound()
 	})

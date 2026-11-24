@@ -17,6 +17,7 @@ import {
 	RECORDING_FACTS_MAX_BYTES,
 	recordingFactsOf,
 } from "../scanner/store/recording-facts.js"
+import type { CopyFacts } from "../scanner/store/copy-facts.js"
 import type { RecordingFsPort } from "./inventory.js"
 import { startedAtLocalFromName } from "./names.js"
 
@@ -70,6 +71,11 @@ export interface RecordingReceiptFacts {
 	 * oversized, malformed or of another operation. Absent: not read.
 	 */
 	facts?: RecordingFacts | null
+	/**
+	 * The file's copy mark (copy-facts.ts), taken by the catalogue from the scanner's in-memory
+	 * index (never read here: readRecordingReceipt leaves it out). Absent or null: not a copy.
+	 */
+	copy?: CopyFacts | null
 }
 
 /** A receipt's `speechHeard` as a RecordingSpeech: anything but a boolean is `unchecked`. */
@@ -178,6 +184,11 @@ export async function readRecordingReceipt(
 		facts:
 			sidecar === undefined ? null : recordingFactsOf(sidecar, operationId),
 	}
+}
+
+/** The operation id of a scanner analog file name (`analog-<uuid>.wav`), or null. */
+export function analogOperationIdOf(name: string): string | null {
+	return ANALOG_FILE.exec(name)?.[1] ?? null
 }
 
 /**

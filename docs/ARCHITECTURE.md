@@ -496,7 +496,15 @@ Signal discovery: finds activity on a source, confirms it with a probe decode, a
 
 A kept scanner analog file has a facts sidecar (`src/core/scanner/store/recording-facts.ts`) in
 its operation folder beside the receipt; the catalogue reads it with the receipt into the item's
-`facts`, and the store's one removal path deletes it with the file. `GET /api/storage`
+`facts`, and the store's one removal path deletes it with the file. Copy (ghost) detection
+(`src/core/scanner/channel/copy-detector.ts`, one per wideband recorder) compares each kept file's
+speech envelope with the recent kept files of the same source and writes a mutable mark,
+`<storage>/copies/<operationId>.json` (outside `.analog-operations/`, so an older core's strict
+operation-folder scan never sees it), through `AnalogOperations.writeCopy` (under the store lock,
+one write at a time); the store keeps the marks in an in-memory index loaded at recovery, and its
+`copy-changed` notice makes the catalogue take only that file's mark from the index (the WAV's stat
+is unchanged, no file is read), which it serves as `copyOf`; the transmission DTO derives `copy`
+from those items alone. `GET /api/storage`
 (`src/core/storage-report/`) splits the scanner storage area into its folders (`parts`) in the
 same bounded, cached walk.
 

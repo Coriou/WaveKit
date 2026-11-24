@@ -3,7 +3,11 @@
  * Recordings drawer can be exercised (a real legacy core does not mount these routes: 404).
  *
  * - GET /api/recordings: newest `modifiedAt` first, ties by id; `limit` (1–200, default 50),
- *   opaque `cursor`, `kind`, `decoderId`; 400 RECORDINGS_QUERY_INVALID otherwise.
+ *   opaque `cursor`, `kind`, `decoderId`, `copies` (default true; `false` leaves copies out of the
+ *   listing and `matched`, never `counts`, whose `copiesTotal` counts them; a Kept copy is never
+ *   left out nor counted); 400
+ *   RECORDINGS_QUERY_INVALID otherwise. Scanner analog items carry `copyOf` (null, or the original's
+ *   key and the copy's evidence: one seeded ghost pair).
  * - GET /api/recordings/:id/file: the WAV (synthetic speech-like bursts, 8 kHz 16-bit mono),
  *   `Content-Disposition: attachment`, no ranges.
  * - PUT / DELETE /api/recordings/:id/keep, DELETE /api/recordings/:id with the core's codes:
@@ -63,6 +67,11 @@ interface Seed {
 	 * member left out), or `false` for a file with no facts at all (an older file). Default: facts without a tone.
 	 */
 	tone?: RecordingTone | null | "absent" | false
+	/**
+	 * Scanner analog recordings: a copy (a ghost: the same audio heard again on another frequency) of the seed
+	 * with the same `agoMin` at this frequency (MHz), with the copy's own evidence.
+	 */
+	copyOf?: { mhz: number; evidence: string[] }
 }
 
 const SEEDS: readonly Seed[] = [
@@ -112,6 +121,23 @@ const SEEDS: readonly Seed[] = [
 	},
 	// The tone states of the facts sidecar (Transmission view, Tone row): CTCSS, DCS, measured none, not measured,
 	// and no facts at all.
+	// A ghost pair (made-up frequencies): one voice heard on its channel and again, weaker, off the raster as an
+	// intermodulation product at the same time. The copy shows with its "copy" chip until Hide copies.
+	{
+		kind: "scanner-analog",
+		agoMin: 14,
+		durationS: 18,
+		mhz: 156.8,
+		tone: null,
+	},
+	{
+		kind: "scanner-analog",
+		agoMin: 14,
+		durationS: 18,
+		mhz: 156.9137,
+		tone: null,
+		copyOf: { mhz: 156.8, evidence: ["intermod", "off-raster"] },
+	},
 	{
 		kind: "scanner-analog",
 		agoMin: 26,
@@ -336,6 +362,8 @@ function makeRec(s: Seed, at: Date): Rec {
 						cut: s.cut ?? null,
 						part: s.part ?? null,
 						parts: s.parts ?? null,
+						// linked to its original once every seed is made (createRecordingsState)
+						copyOf: null,
 					}
 				: {}),
 			// The receipt's verdict facts (scanner analog only); roll-over parts share an observation.
@@ -532,9 +560,30 @@ export function createRecordingsState(
 ): RecordingsState {
 	const started = now()
 	const recs = new Map<string, Rec>()
+	const made: { s: Seed; r: Rec }[] = []
 	for (const s of SEEDS) {
 		const r = makeRec(s, new Date(started - s.agoMin * 60_000))
 		recs.set(r.item.id, r)
+		made.push({ s, r })
+	}
+	// a copy names its original: the seed of the same time at the named frequency
+	for (const { s, r } of made) {
+		const of = s.copyOf
+		if (of === undefined) continue
+		const root = made.find(
+			m =>
+				m.s.agoMin === s.agoMin &&
+				m.s.mhz === of.mhz &&
+				m.s.copyOf === undefined,
+		)
+		if (root === undefined) continue
+		r.item = {
+			...r.item,
+			copyOf: {
+				key: root.r.item.key ?? root.r.item.id,
+				evidence: [...of.evidence],
+			},
+		}
 	}
 	return { started, recs }
 }
@@ -648,6 +697,7 @@ export function registerRecordingsMock(
 			since?: string
 			until?: string
 			q?: string
+			copies?: string
 		}
 	}>("/api/recordings", async (request, reply) => {
 		const q = request.query
@@ -668,6 +718,7 @@ export function registerRecordingsMock(
 			"since",
 			"until",
 			"q",
+			"copies",
 		])
 		const invalid = () =>
 			error(
@@ -700,6 +751,8 @@ export function registerRecordingsMock(
 		}
 		if (q.kept !== undefined && q.kept !== "true" && q.kept !== "false")
 			return invalid()
+		if (q.copies !== undefined && q.copies !== "true" && q.copies !== "false")
+			return invalid()
 		const text = q.q?.trim().toLowerCase()
 		const minHz = q.minHz === undefined ? null : Number(q.minHz)
 		const maxHz = q.maxHz === undefined ? null : Number(q.maxHz)
@@ -711,6 +764,9 @@ export function registerRecordingsMock(
 				(q.kind === undefined || r.kind === q.kind) &&
 				(q.decoderId === undefined || r.decoderId === q.decoderId) &&
 				(q.kept === undefined || (r.kept === true) === (q.kept === "true")) &&
+				(q.copies !== "false" ||
+					(r.copyOf ?? null) === null ||
+					r.kept === true) &&
 				(q.discoveryId === undefined || r.discoveryId === q.discoveryId) &&
 				(q.talkgroup === undefined || r.talkgroup === q.talkgroup) &&
 				(q.source === undefined || r.source === q.source) &&
@@ -766,6 +822,9 @@ export function registerRecordingsMock(
 					"scanner-analog": all.filter(r => r.kind === "scanner-analog").length,
 					"dv-call": all.filter(r => r.kind === "dv-call").length,
 				},
+				copiesTotal: all.filter(
+					r => (r.copyOf ?? null) !== null && r.kept !== true,
+				).length,
 			},
 			truncatedBefore: null,
 		}

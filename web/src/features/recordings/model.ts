@@ -280,23 +280,29 @@ export function dayEntries(
 /**
  * The header count, from the core (never the loaded rows): what the search matches, else every
  * recording (or the kept ones under Kept); "50,000+" when the catalogue left older ones out. Null
- * before the first answer, or from a core without counts.
+ * before the first answer, or from a core without counts. With copies hidden (the list asked for
+ * copies=false) and copies to hide, `matched` too: `counts` holds the copies, so the count equals
+ * the rows shown.
  */
 export function headerCount(
 	meta: {
-		counts: { total: number; kept: number } | null
+		counts: { total: number; kept: number; copiesTotal?: number } | null
 		matched: number | null
 		truncated: boolean
 	} | null,
 	filter: "all" | "kept",
 	searching: boolean,
+	copiesHidden = false,
 ): string | null {
 	if (meta === null) return null
-	const n = searching
-		? meta.matched
-		: filter === "kept"
-			? (meta.counts?.kept ?? meta.matched)
-			: (meta.counts?.total ?? meta.matched)
+	const hiding =
+		copiesHidden && (meta.counts?.copiesTotal ?? 0) > 0 && meta.matched !== null
+	const n =
+		searching || hiding
+			? meta.matched
+			: filter === "kept"
+				? (meta.counts?.kept ?? meta.matched)
+				: (meta.counts?.total ?? meta.matched)
 	if (n === null) return null
 	return `${countText(n)}${meta.truncated && filter === "all" && !searching ? "+" : ""}`
 }
@@ -352,16 +358,25 @@ export function serverText(text: string): string | null {
 }
 
 /**
- * The core query of the drawer's view: Kept, one value per chip kind (a later chip of a kind replaces
- * an earlier one, see addToken), and the typed text, which wins over a text chip while it is there.
+ * The drawer's core query: the store's, plus `copies: false` once the user hid copies (Hide copies; the
+ * core lists them by default, and so does the drawer).
+ */
+export type RecordingsViewQuery = RecordingsQuery & { copies?: false }
+
+/**
+ * The core query of the drawer's view: Kept, copies left out only under Hide copies, one value per
+ * chip kind (a later chip of a kind replaces an earlier one, see addToken), and the typed text, which
+ * wins over a text chip while it is there.
  */
 export function recordingsQuery(ui: {
 	tokens: readonly RecToken[]
 	text: string
 	filter: "all" | "kept"
-}): RecordingsQuery {
-	const q: RecordingsQuery = {}
+	showCopies?: boolean
+}): RecordingsViewQuery {
+	const q: RecordingsViewQuery = {}
 	if (ui.filter === "kept") q.kept = true
+	if (ui.showCopies === false) q.copies = false
 	for (const t of ui.tokens) {
 		if (t.kind === "talkgroup") q.talkgroup = t.value
 		else if (t.kind === "radio") q.source = t.value
@@ -447,6 +462,26 @@ export function suggest(
 			return true
 		})
 		.map(token => ({ token }))
+}
+
+// ---- copies
+
+/** Whether the item is a copy (the core's copyOf names its listed original). */
+export function isCopy(r: RecordingInventoryItem): boolean {
+	return (r.copyOf ?? null) !== null
+}
+
+/**
+ * The footer's copies toggle, in words: "Hide copies (3)" while they are shown (the default), "Show copies (3)"
+ * while they are hidden; null when there is nothing to toggle (no copies to hide, or an older core without the
+ * count, which is never sent copies=false).
+ */
+export function copiesToggleLabel(
+	copiesTotal: number | null | undefined,
+	showing: boolean,
+): string | null {
+	if (copiesTotal == null || copiesTotal <= 0) return null
+	return `${showing ? "Hide" : "Show"} copies (${countText(copiesTotal)})`
 }
 
 // ---- actions

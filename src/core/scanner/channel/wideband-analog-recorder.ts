@@ -155,6 +155,17 @@ import {
 	admissionNoise,
 	strongSpeech,
 } from "./speech-content.js"
+import type { CopyDetector, CopyFingerprint } from "./copy-detector.js"
+import { COPY_FRAME_SAMPLES, excludeGapFrames } from "./copy-fingerprint.js"
+import {
+	intermodEvidenceOf,
+	medianHz,
+	sampleHz,
+	TrackSpans,
+	type HzSampler,
+	type IntermodEvidence,
+	type RasterFit,
+} from "./copy-intermod.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 export { rememberWaiver, trustedRunEnd } from "./recorder-memory.js"
@@ -1051,7 +1062,53 @@ export interface WidebandAnalogDeps {
 	schedule?(run: () => void): void
 	/** Monotonic milliseconds for the per-turn budget; default performance.now. */
 	clock?(): number
+	/**
+	 * Copy (ghost) detection (copy-detector.ts): each kept, fingerprinted file is handed to it with
+	 * its operation's settlement. Absent: no fingerprint is captured at all.
+	 */
+	copies?: CopyDetector
+	/**
+	 * Whether the raw centre `hz` (OBW `obwHz`, null: unknown) is on the raster of a scan range
+	 * covering it on `sourceId`, on discovery placement's terms: the source's learned frequency
+	 * correction subtracted, the same rasters (`unknown`: no range covers it, so no off-raster
+	 * evidence). Absent: unknown.
+	 */
+	rasterOf?(sourceId: string, hz: number, obwHz?: number | null): RasterFit
 }
+
+/**
+ * Joined-snapshot centres a file's copy sampler keeps (copyHz): at most this many, evenly spread
+ * over the file (when full, every other one is dropped and the stride doubles), so its median is
+ * the file's settled frequency at O(1) memory per file.
+ */
+export const COPY_HZ_SAMPLES_MAX = 64
+
+/** A file's sampled joined-snapshot centres (copy detection's settled frequency). */
+export interface CopyHzSampler extends HzSampler {
+	/** The latest joined OBW heard (the raster fit's grid choice); null: none. */
+	obwHz: number | null
+}
+
+/** Adds one joined snapshot's centre and OBW to a file's sampler (at most COPY_HZ_SAMPLES_MAX). */
+export function sampleCopyHz(
+	c: CopyHzSampler,
+	hz: number,
+	obwHz: number,
+): void {
+	if (Number.isFinite(obwHz) && obwHz > 0) c.obwHz = obwHz
+	sampleHz(c, hz, COPY_HZ_SAMPLES_MAX)
+}
+
+/** The sampler's median centre, or `fallback` (the session's first centre) when it heard none. */
+export function settledCopyHz(c: CopyHzSampler, fallback: number): number {
+	return medianHz(c) ?? fallback
+}
+
+/**
+ * Source gaps a file's copy fingerprint remembers (excluded frames); past it the file gets no
+ * fingerprint. 64 = the store's own per-file gap list bound (AnalogOperations.addGap).
+ */
+export const COPY_GAPS_MAX = 64
 
 export interface WidebandTrackInput {
 	readonly observationId: string
@@ -1153,8 +1210,27 @@ interface FileState {
 	toneCarried: boolean
 	/** A roll-over file (the previous one hit the duration limit): of a classed session, content-checked only on a no-voice channel. */
 	rollOver: boolean
-	/** What it wrote, measured for speech (speech-content.ts; finishVerdict's `notSpeech`). */
+	/**
+	 * What it wrote, measured for speech (speech-content.ts; finishVerdict's `notSpeech`); with
+	 * copy detection on, also the file's copy fingerprint envelope.
+	 */
 	readonly speech: SpeechContentMeter
+	/** The strongest joined-track SNR and peak while the file was open (copy ranking, intermod). */
+	peakSnrDb: number
+	peakDbfs: number
+	/**
+	 * The source gaps filled with silence, in the file's 8 kHz samples [from, to) (outputFrameIndex
+	 * and the fill's length): their frames are excluded from the fingerprint. Null past COPY_GAPS_MAX.
+	 */
+	copyGaps: { readonly from: number; readonly to: number }[] | null
+	/** The joined snapshots' centres and OBW while the file was open (its settled frequency). */
+	readonly copyHz: CopyHzSampler
+	/** Captured when the file ended (finishFile): its settled centre, raster fit and intermod evidence. */
+	copySettledHz: number | null
+	copyRaster: RasterFit
+	copyIntermod: IntermodEvidence | null
+	/** Input sample where the file ended (finishFile); null before. */
+	copyEnd: number | null
 	/**
 	 * The judged audio so far, measured for speech while its session is unclassed (classBySpeech:
 	 * nothing is written before a class, so `speech` has not heard it yet). Null when it can never
@@ -1727,6 +1803,8 @@ export class WidebandAnalogRecorder {
 	/** noteStoreRefusal: when each refusal code and class was last logged (at most STORE_REFUSAL_CODES). */
 	private readonly storeRefusedAt = new Map<string, number>()
 	private readonly decisions: RecorderDecisions
+	/** Recent track spans per source and epoch (copy detection's intermod parents). */
+	private readonly spans = new TrackSpans()
 
 	constructor(private readonly deps: WidebandAnalogDeps) {
 		this.log = createComponentLogger(deps.logger, "WidebandAnalogRecorder")
@@ -2214,7 +2292,19 @@ export class WidebandAnalogRecorder {
 				backlogMs: Math.max(0, Math.round((backlog * 1000) / s.fs)),
 			})
 		}
-		return { sessions, parked: this.parked.size, ...this.decisions.status() }
+		return {
+			sessions,
+			parked: this.parked.size,
+			...this.decisions.status(),
+			...(this.deps.copies === undefined
+				? {}
+				: {
+						copies: {
+							...this.deps.copies.status(),
+							copyTrackSpansDropped: this.spans.overflow,
+						},
+					}),
+		}
 	}
 
 	/** Discovery reads (Discovery.recorder): the decisions about its observations, or null. */
@@ -2239,6 +2329,7 @@ export class WidebandAnalogRecorder {
 	/** A non-closing snapshot of a live observation. */
 	track(input: WidebandTrackInput): void {
 		if (this.stopped) return
+		this.noteCopyTrack(input.observationId, input.sourceId, input.track)
 		try {
 			// Another producer's operation may have ended since: a file waiting for the store begins.
 			this.drainStoreWaiters()
@@ -2262,6 +2353,7 @@ export class WidebandAnalogRecorder {
 		cut: AnalogCut | null,
 		info?: WidebandCloseInfo,
 	): void {
+		if (!this.stopped) this.noteCopyTrack(observationId, track.sourceId, track)
 		// Its closing ingest came first: the observation asks for no waiver any more.
 		this.waived.delete(observationId)
 		this.closeUnrecorded(observationId)
@@ -3447,6 +3539,114 @@ export class WidebandAnalogRecorder {
 		return s.endCut ?? "track-ended"
 	}
 
+	/**
+	 * Copy detection's view of a snapshot (only with `copies`): its span on its source (intermod
+	 * parents) and, for a session's open files, the strongest SNR and peak heard. Never throws.
+	 */
+	private noteCopyTrack(
+		observationId: string,
+		sourceId: string,
+		track: TrackSnapshot,
+	): void {
+		if (this.deps.copies === undefined) return
+		try {
+			const fs = this.deps.engine(sourceId)?.currentEpoch().sampleRateHz
+			if (typeof fs === "number") this.spans.note(sourceId, fs, track)
+			const id = this.byObservation.get(observationId)
+			const s = id === undefined ? undefined : this.sessions.get(id)
+			if (s === undefined) return
+			for (const f of s.files) {
+				if (f.finishing) continue
+				if (track.snrDb > f.peakSnrDb) f.peakSnrDb = track.snrDb
+				if (track.peakDbfs > f.peakDbfs) f.peakDbfs = track.peakDbfs
+				sampleCopyHz(f.copyHz, track.centreHz, track.obwHz)
+			}
+		} catch {
+			// Copy detection is best effort: a snapshot never fails for it.
+		}
+	}
+
+	/**
+	 * Copy detection, when a file ends (finishFile, before any hold): its raster fit and the
+	 * intermod evidence of the tracks concurrent with it, from the recent spans, so parents that
+	 * closed before the keep still count. Never throws.
+	 */
+	private captureCopyEnd(s: Session, file: FileState, endedAt: number): void {
+		if (this.deps.copies === undefined) return
+		try {
+			file.copyEnd = endedAt
+			// The file's settled centre (median of its joined snapshots), not the session's first.
+			const hz = settledCopyHz(file.copyHz, s.targetHz)
+			const obwHz = file.copyHz.obwHz
+			file.copySettledHz = hz
+			const rasterOf = (at: number, obw: number | null): RasterFit =>
+				this.deps.rasterOf?.(s.sourceId, at, obw) ?? "unknown"
+			file.copyRaster = rasterOf(hz, obwHz)
+			const spans = this.spans.spansOf(s.sourceId, s.epoch)
+			file.copyIntermod = intermodEvidenceOf(
+				{
+					hz,
+					obwHz,
+					startSample: file.startSample,
+					endSample: endedAt,
+					peakDbfs: file.peakDbfs,
+					binHz: spans.find(t => t.binHz !== null)?.binHz ?? null,
+				},
+				spans,
+				rasterOf,
+			)
+		} catch {
+			file.copyIntermod = null
+		}
+	}
+
+	/**
+	 * Copy detection, when a file is kept (its finish asked): its fingerprint to the detector
+	 * with the operation's settlement (it joins the ring only once finalized). A session classed
+	 * by its own audio (toneOnly, speechOnly included) is fingerprinted like any analog one (the
+	 * eligibility and evidence gates still decide); not one classed digital or that may only be
+	 * classed by a tone (toneRequired), nor a file without a measured level, end or gap list. The
+	 * envelope is read only once the file's queue is flushed (every written frame pushed to its
+	 * meter: finishOrHold runs only then), so its tail is never cut: a file still holding queued
+	 * or in-flight audio gets no fingerprint rather than a short one. Never throws.
+	 */
+	private noteKept(s: Session, file: FileState, handle: AnalogHandle): void {
+		const copies = this.deps.copies
+		if (copies === undefined || s.digital || s.toneRequired) return
+		try {
+			const e = file.speech.envelope()
+			if (
+				e === null ||
+				e.frames === 0 ||
+				file.queue.length > 0 ||
+				file.writing ||
+				file.copyGaps === null ||
+				file.copyEnd === null ||
+				!Number.isFinite(file.peakSnrDb)
+			)
+				return
+			excludeGapFrames(e.env, e.frames, file.copyGaps)
+			const fp: CopyFingerprint = {
+				operationId: handle.operationId,
+				sourceId: s.sourceId,
+				epoch: s.epoch,
+				rateHz: s.fs,
+				hz: file.copySettledHz ?? s.targetHz,
+				snrDb: file.peakSnrDb,
+				raster: file.copyRaster,
+				intermod: file.copyIntermod,
+				env: e.env,
+				voiced: e.voiced,
+				frames: e.frames,
+				startSample: file.startSample,
+				samplesPerFrame: (COPY_FRAME_SAMPLES * s.fs) / ANALOG_AUDIO_RATE_HZ,
+			}
+			copies.kept(fp, handle.settled)
+		} catch {
+			// Best effort: the file is kept and served whatever happens here.
+		}
+	}
+
 	/** A new file from `startSample`, held in memory until it is admitted (`admit`). */
 	private openFile(s: Session, startSample: number): void {
 		s.generation++
@@ -3463,7 +3663,17 @@ export class WidebandAnalogRecorder {
 			toneHz: null,
 			toneCoverage: null,
 			toneClass: new ToneClassEvidence(),
-			speech: new SpeechContentMeter(),
+			speech: new SpeechContentMeter({
+				envelope: this.deps.copies !== undefined,
+			}),
+			peakSnrDb: Number.NEGATIVE_INFINITY,
+			peakDbfs: Number.NEGATIVE_INFINITY,
+			copyGaps: [],
+			copyHz: { values: [], stride: 1, seen: 0, obwHz: null },
+			copySettledHz: null,
+			copyRaster: "unknown",
+			copyIntermod: null,
+			copyEnd: null,
 			judgedSpeech:
 				s.classed || s.toneRequired ? null : new SpeechContentMeter(),
 			speechPriorAt: 0,
@@ -4358,6 +4568,15 @@ export class WidebandAnalogRecorder {
 		const silence = new Int16Array(
 			Math.round((missing * ANALOG_AUDIO_RATE_HZ) / s.fs),
 		)
+		// The fingerprint excludes the fill's frames (outputFrameIndex = file.frames before it).
+		if (file.copyGaps !== null && silence.length > 0) {
+			if (file.copyGaps.length >= COPY_GAPS_MAX) file.copyGaps = null
+			else
+				file.copyGaps.push({
+					from: file.frames,
+					to: file.frames + silence.length,
+				})
+		}
 		// The tone detectors and the class evidence hear the fill as before (every keep, class and
 		// admission decision counts it), marked as gap: a block holding it is never quiet and a
 		// file with any reads no "No tone heard" (gapSamples, toneFactOf).
@@ -4689,6 +4908,7 @@ export class WidebandAnalogRecorder {
 	private finishFile(s: Session, file: FileState): void {
 		file.finishing = true
 		const endedAt = file.endSample ?? s.next
+		this.captureCopyEnd(s, file, endedAt)
 		const endFrames = this.framesAt(s, file, endedAt)
 		this.judge(s, file, endFrames)
 		if (file.failed) {
@@ -5120,6 +5340,7 @@ export class WidebandAnalogRecorder {
 					...(file.txIds.length > 0 ? { txIds: [...file.txIds] } : {}),
 				})
 				.catch(() => undefined)
+			this.noteKept(s, file, file.handle)
 		}
 	}
 

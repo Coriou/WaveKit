@@ -17,6 +17,7 @@ import type { ApiClient } from "../../data/api-client.ts"
 import type {
 	RecordingFacts,
 	TransmissionArtefact,
+	TransmissionCopyView,
 	TransmissionDto,
 	TransmissionMember,
 	TransmissionRef,
@@ -431,6 +432,21 @@ class Reads {
 		})
 	}
 
+	/**
+	 * The copy links the core serves for an analog recording (GET /api/transmissions/rec:<key>, its `copy`):
+	 * optional, absent on any failure or from a core without the route.
+	 */
+	transmissionCopy(key: string): Promise<ServedCopy | null> {
+		return this.optional(async () =>
+			servedCopyOf(
+				await this.#deps.api.get<unknown>(
+					`/api/transmissions/${encodeURIComponent(`rec:${key}`)}`,
+					this.#options(true),
+				),
+			),
+		)
+	}
+
 	/** The channel's recordings: the same page the file was found in when its folder is the channel's. */
 	neighbours(discoveryId: string): Promise<RecordingInventoryItem[] | null> {
 		return this.optional(async () => {
@@ -438,6 +454,71 @@ class Reads {
 			return page.items
 		})
 	}
+}
+
+/** Copies listed per transmission (the core's TRANSMISSION_COPIES_MAX). */
+export const COPIES_MAX = 8
+
+/** What the view reads of the core's TransmissionDto.copy. */
+export interface ServedCopy {
+	of: { hz: number | null } | null
+	copies: { recordingKey: string; hz: number | null }[]
+	copiesTotal: number
+}
+
+const hzOrNull = (v: unknown): number | null =>
+	typeof v === "number" && Number.isFinite(v) ? v : null
+
+/** The core's TransmissionDto body's `copy`, checked field by field; null when absent or malformed. */
+export function servedCopyOf(body: unknown): ServedCopy | null {
+	const copy = (body as { copy?: unknown } | null)?.copy
+	if (copy === null || typeof copy !== "object") return null
+	const c = copy as { of?: unknown; copies?: unknown; copiesTotal?: unknown }
+	const of =
+		c.of !== null && typeof c.of === "object"
+			? { hz: hzOrNull((c.of as { hz?: unknown }).hz) }
+			: null
+	const copies: ServedCopy["copies"] = []
+	for (const m of Array.isArray(c.copies) ? c.copies : []) {
+		if (copies.length >= COPIES_MAX) break
+		const key = (m as { recordingKey?: unknown } | null)?.recordingKey
+		if (typeof key !== "string" || key.length === 0 || key.length > 512)
+			continue
+		copies.push({
+			recordingKey: key,
+			hz: hzOrNull((m as { hz?: unknown }).hz),
+		})
+	}
+	const total =
+		typeof c.copiesTotal === "number" && Number.isInteger(c.copiesTotal)
+			? c.copiesTotal
+			: copies.length
+	return { of, copies, copiesTotal: Math.max(copies.length, total) }
+}
+
+/**
+ * The copy links of an analog recording: the original it is a copy of (its own `copyOf`, with the frequency the
+ * core serves, else the original's own item) and its copies (the core's lookup: copies are other channels'
+ * files, never in this folder). Read only from a core that serves `copyOf` at all; null when neither.
+ */
+async function copyViewOf(
+	item: RecordingInventoryItem,
+	ctx: Reads,
+): Promise<TransmissionCopyView | null> {
+	if (item.kind !== "scanner-analog" || !("copyOf" in item)) return null
+	const served = await ctx.transmissionCopy(item.key ?? item.id)
+	const named = item.copyOf ?? null
+	let of: TransmissionCopyView["of"] = null
+	if (named !== null) {
+		const hz =
+			served?.of?.hz ??
+			(await ctx.optional(() => ctx.recording(named.key, true)))?.frequencyHz ??
+			null
+		of = { recordingKey: named.key, hz }
+	}
+	const copies = served?.copies ?? []
+	if (of === null && copies.length === 0) return null
+	return { of, copies, copiesTotal: served?.copiesTotal ?? copies.length }
 }
 
 /** When a recording's audio starts: the receipt's first sample, the facts', the file name's, the file's write. */
@@ -597,6 +678,10 @@ async function fromRecording(
 	const owner =
 		item.ownerDiscoveryId ?? item.discoveryId ?? facts?.discoveryId ?? null
 	const scanner = item.kind === "scanner-analog" || item.kind === "scanner-dv"
+	// read beside the channel's reads (never fails: each read is optional)
+	const copyRead = copyViewOf(item, ctx)
+	// an abort rejects it too: awaited below, never left unhandled if the reads beside it reject first
+	void copyRead.catch(() => undefined)
 	const [discovery, observations, neighbours] =
 		scanner && owner !== null
 			? await Promise.all([
@@ -626,6 +711,7 @@ async function fromRecording(
 		(record?.kind === "recording-change" ? record.payload.frequencyHz : null)
 	const proofTone =
 		discovery?.proof?.kind === "analog-tone" ? discovery.proof.tone : undefined
+	const copy = await copyRead
 	return {
 		id: null,
 		refs: {
@@ -707,6 +793,7 @@ async function fromRecording(
 				}
 			: null,
 		gone: [...gone],
+		copy,
 		raw: {
 			recording: structuredClone(item),
 			activity: record === null ? null : structuredClone(record),

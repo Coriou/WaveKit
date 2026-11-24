@@ -49,6 +49,11 @@ export const RECORDINGS_WINDOW_MAX = 10_000
 /** The server-side filters the panel uses (GET /api/recordings query keys). */
 export interface RecordingsQuery {
 	kept?: true
+	/**
+	 * false: copies (items with a copyOf) are left out; the core lists them by default. Sent only to a
+	 * core that showed it knows the key (an older one refuses it: RecordingsStore.copiesKnown).
+	 */
+	copies?: false
 	kind?: RecordingInventoryKind
 	talkgroup?: string
 	source?: string
@@ -130,15 +135,21 @@ const pageSchema = z
 	})
 	.passthrough()
 
-/** The GET /api/recordings query string of a query, at most `limit` rows after `cursor`. */
+/**
+ * The GET /api/recordings query string of a query, at most `limit` rows after `cursor`. `copies=false`
+ * only with `copiesKnown` (the core showed it knows the key: an older core answers 400
+ * RECORDINGS_QUERY_INVALID to an unknown key); without it the list asks with copies listed.
+ */
 export function recordingsParams(
 	q: RecordingsQuery,
 	limit: number,
 	cursor: string | null,
+	copiesKnown = true,
 ): Record<string, QueryValue> {
 	const p: Record<string, QueryValue> = { limit }
 	if (cursor !== null) p["cursor"] = cursor
 	if (q.kept) p["kept"] = "true"
+	if (q.copies === false && copiesKnown) p["copies"] = "false"
 	if (q.kind !== undefined) p["kind"] = q.kind
 	if (q.talkgroup !== undefined) p["talkgroup"] = q.talkgroup
 	if (q.source !== undefined) p["source"] = q.source
@@ -197,6 +208,16 @@ export class RecordingsStore extends PagedFeed<
 	 * asked for after them is the truth and ends them.
 	 */
 	private readonly kept = new Map<string, { kept: boolean; after: number }>()
+	/**
+	 * The core showed it knows copies (an answer with `counts.copiesTotal`, or an item carrying
+	 * `copyOf`): only then is `copies=false` sent. Forgotten only when the core refuses it (copiesRefused).
+	 */
+	private copiesKnown = false
+	/**
+	 * The core refused `copies=false` (400 RECORDINGS_QUERY_INVALID): it is never sent again for this
+	 * store's life, so a refusal is retried once without it and can never loop.
+	 */
+	private copiesRefused = false
 	private readonly gone = new Map<string, number>()
 
 	constructor(
@@ -333,9 +354,15 @@ export class RecordingsStore extends PagedFeed<
 		cursor: string | null,
 		signal: AbortSignal,
 	): Promise<FeedPage<RecordingInventoryItem, RecordingsMeta>> {
+		const params = recordingsParams(
+			query,
+			this.pageSize,
+			cursor,
+			this.copiesKnown,
+		)
 		return this.api
 			.get<unknown>(RECORDINGS_ROUTE, {
-				query: recordingsParams(query, this.pageSize, cursor),
+				query: params,
 				signal,
 				timeoutMs: this.timeoutMs,
 			})
@@ -356,11 +383,28 @@ export class RecordingsStore extends PagedFeed<
 					if (item.success) items.push(item.data as RecordingInventoryItem)
 				}
 				const d = page.data
+				const counts =
+					(d.counts as RecordingInventoryCounts | undefined) ?? null
+				if (
+					!this.copiesKnown &&
+					!this.copiesRefused &&
+					(counts?.copiesTotal !== undefined ||
+						items.some(i => i.copyOf !== undefined))
+				) {
+					this.copiesKnown = true
+					// A list that wanted copies left out was read with them: read again (the key changed),
+					// the query shown when the timer fires and only while it still leaves copies out.
+					if (query.copies === false)
+						setTimeout(() => {
+							const now = this.get().query
+							if (now?.copies === false) void this.setQuery(now)
+						}, 0)
+				}
 				return {
 					items,
 					nextCursor: d.nextCursor,
 					meta: {
-						counts: (d.counts as RecordingInventoryCounts | undefined) ?? null,
+						counts,
 						matched: d.matched ?? null,
 						truncated: d.truncated,
 						truncatedBefore: d.truncatedBefore ?? null,
@@ -370,6 +414,20 @@ export class RecordingsStore extends PagedFeed<
 						scannedFiles: d.scannedFiles,
 					},
 				}
+			})
+			.catch((cause: unknown) => {
+				// A core that refuses the key it seemed to know: forget it and ask once without it.
+				if (
+					params["copies"] !== undefined &&
+					cause instanceof ApiError &&
+					cause.status === 400 &&
+					cause.code === "RECORDINGS_QUERY_INVALID"
+				) {
+					this.copiesKnown = false
+					this.copiesRefused = true
+					return this.fetchPage(query, cursor, signal)
+				}
+				throw cause
 			})
 	}
 
@@ -401,7 +459,7 @@ export class RecordingsStore extends PagedFeed<
 	}
 
 	protected override keyOf(q: RecordingsQuery): string {
-		return JSON.stringify(recordingsParams(q, 0, null))
+		return JSON.stringify(recordingsParams(q, 0, null, this.copiesKnown))
 	}
 
 	protected override retryable(error: unknown): boolean {

@@ -515,7 +515,13 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   Scanner**, Delete with Undo) and one channel link, **History of …**, which opens the channel's list
   in Activity and nothing over it. **Open in Scanner** says so in a notice when the core can no
   longer give the channel's discovery. A row's time is when its audio starts, not when it was kept,
-  so Recordings and the Transmission view agree. New recordings
+  so Recordings and the Transmission view agree. **Copies** (the same audio heard again on another
+  frequency, a receiver ghost the scanner marked, see
+  [SCANNER.md](SCANNER.md#analog-voice-recordings)) stay in the list, each row carrying a `copy`
+  chip that opens its original's Transmission view. The footer's quiet **Hide copies (n)** leaves
+  them out (**Show copies (n)** lists them again) until you reload; a copy you kept is never left
+  out. With a core older than copies the toggle does not show. Copies stay on disk, play and
+  download like any recording. New recordings
   appear on their own (the core announces each change on the socket; nothing polls); while you
   scroll down or play one from this list, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,
   then the placeholder, `Still loading. WaveKit is busy.` after 3 s, and after 10 s (or an error)
@@ -672,6 +678,10 @@ no audio, such as `The recording was deleted`); **What we know**, a few short ro
   the audio was too short, its detector failed, or the core predates the check.
 - **Signal** (`Strong, 24 dB over the noise`), **Ended** (`The transmission ended`,
   `Cut: the receiver was retuned`) and **Kept** (`Speech heard over a tone`), each only when known.
+
+For a scanner analog recording the scanner marked as a copy, a link **Copy of 156.8 MHz** opens its
+original; an original lists each copy as **Also heard on 156.9137 MHz (copy)** (at most 8, then
+`and 3 more copies`), each opening that recording in place. Back still returns to where you came from.
 
 Then the **Conversation**: the other parts of the same transmission, oldest first, this one marked,
 with **Play all**, which plays every one in that order to the last, whether **Auto-next** is on

@@ -11,6 +11,7 @@ import type {
 	RecordingInventoryItem,
 	RecordingTone,
 	TransmissionArtefact,
+	TransmissionCopy,
 	TransmissionDto,
 	TransmissionKind,
 	TransmissionMember,
@@ -26,6 +27,12 @@ import type { TxToneReading, TxView } from "./types.js"
  * returns within 120 s) rarely passes a dozen; 64 bounds the body (about 130 B per member).
  */
 export const TRANSMISSION_GROUP_MEMBERS_MAX = 64
+
+/**
+ * Copies listed per transmission: a ghost pattern puts at most a few copies of one voice on the
+ * air at once (2·f1 − f2 and 2·f2 − f1 for each strong pair); 8 bounds the body (about 150 B each).
+ */
+export const TRANSMISSION_COPIES_MAX = 8
 
 export interface TransmissionDtoSources {
 	/** The registry's view; null once it no longer holds the transmission. */
@@ -51,6 +58,57 @@ export interface TransmissionDtoSources {
 	members: readonly TxView[]
 	/** The recordings routes are mounted (the inventory is served at all). */
 	audioServed: boolean
+	/**
+	 * The copy links of the transmission's analog recording (the route's bounded lookup): the
+	 * item they are of (the roll-over part a `rec:` ref names, else the first analog item), the
+	 * listed root item its `copyOf` names (null: not a copy, or the root is not served), the
+	 * listed copies of it (at most TRANSMISSION_COPIES_MAX) and how many there are. Absent: none read.
+	 */
+	copy?: {
+		readonly item?: RecordingInventoryItem
+		readonly root: RecordingInventoryItem | null
+		readonly copies: readonly RecordingInventoryItem[]
+		readonly copiesTotal: number
+	}
+}
+
+/** A recording's transmission ref: its txId, else its `rec:` alias. */
+function copyRefOf(i: RecordingInventoryItem): string {
+	return isTxId(i.txId) ? i.txId : `rec:${i.key ?? i.id}`
+}
+
+const copyHzOf = (i: RecordingInventoryItem): number | null =>
+	i.facts?.frequencyHz ?? i.frequencyHz ?? null
+
+/** TransmissionDto.copy of the analog item, from the catalogue items only (never the registry). */
+function copyOf(
+	item: RecordingInventoryItem | undefined,
+	src: TransmissionDtoSources["copy"],
+): TransmissionCopy | null {
+	if (item?.kind !== "scanner-analog") return null
+	const named = item.copyOf ?? null
+	const root = src?.root ?? null
+	const of =
+		named === null
+			? null
+			: root !== null && (root.key ?? root.id) === named.key
+				? { ref: copyRefOf(root), hz: copyHzOf(root) }
+				: { ref: `rec:${named.key}`, hz: null }
+	const copies = (src?.copies ?? [])
+		.filter(c => c.copyOf?.key === (item.key ?? item.id))
+		.slice(0, TRANSMISSION_COPIES_MAX)
+		.map(c => ({
+			ref: copyRefOf(c),
+			hz: copyHzOf(c),
+			recordingKey: c.key ?? c.id,
+			evidence: [...(c.copyOf?.evidence ?? [])],
+		}))
+	if (of === null && copies.length === 0) return null
+	return {
+		of,
+		copies,
+		copiesTotal: Math.max(copies.length, src?.copiesTotal ?? copies.length),
+	}
 }
 
 type CallFields = {
@@ -471,5 +529,6 @@ export function buildTransmissionDto(
 			observation: null,
 		},
 		privacy,
+		copy: digital ? null : copyOf(src.copy?.item ?? item, src.copy),
 	}
 }

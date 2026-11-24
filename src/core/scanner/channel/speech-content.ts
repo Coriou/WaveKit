@@ -56,6 +56,12 @@
  * it writes).
  */
 import { Fft } from "../../spectrum/fft.js"
+import {
+	COPY_MAX_FRAMES,
+	COPY_MAX_ZEROS,
+	envelopeByte,
+	type CopyEnvelope,
+} from "./copy-fingerprint.js"
 
 /** Frame length: 256 samples, 32 ms at 8 kHz. */
 export const SPEECH_FRAME_SAMPLES = 256
@@ -294,6 +300,34 @@ export class SpeechContentMeter {
 	private maxLoudPitch = 0
 	private maxTopSpread = 0
 	private maxLoudLevel = -Infinity
+	/** The last analysed frame's exact-zero samples (the copy fingerprint's exclusion rule). */
+	private frameZeros = 0
+	/**
+	 * The copy fingerprint (copy-fingerprint.ts), only when asked for (`envelope: true`): per
+	 * frame the 312.5 to 1 500 Hz band value already computed for `ring` (0.5 dB steps, 0 when
+	 * the frame has more than COPY_MAX_ZEROS exact zeros) and its pitched bit; at most
+	 * COPY_MAX_FRAMES frames (3 750 B + 469 B, allocated once).
+	 */
+	private readonly env: Uint8Array | null
+	private readonly voiced: Uint8Array | null
+
+	constructor(options?: { readonly envelope?: boolean }) {
+		const capture = options?.envelope === true
+		this.env = capture ? new Uint8Array(COPY_MAX_FRAMES) : null
+		this.voiced = capture
+			? new Uint8Array(Math.ceil(COPY_MAX_FRAMES / 8))
+			: null
+	}
+
+	/** The copy fingerprint's envelope so far (views, not copies); null when not captured. */
+	envelope(): CopyEnvelope | null {
+		if (this.env === null || this.voiced === null) return null
+		return {
+			env: this.env,
+			voiced: this.voiced,
+			frames: Math.min(this.heard, COPY_MAX_FRAMES),
+		}
+	}
 
 	/** Whole frames heard so far (result().frames, without measuring a window). */
 	get frames(): number {
@@ -340,6 +374,16 @@ export class SpeechContentMeter {
 
 	private measureFrame(): void {
 		const peak = this.analyse()
+		const k = this.heard
+		if (this.env !== null && this.voiced !== null && k < COPY_MAX_FRAMES) {
+			// The band value analyse() just wrote to the envelope ring (one byte, one bit).
+			this.env[k] =
+				this.frameZeros > COPY_MAX_ZEROS
+					? 0
+					: envelopeByte(this.ring[k % SPEECH_WINDOW_FRAMES]!)
+			if (peak >= SPEECH_PERIODIC_MIN_CORRELATION)
+				this.voiced[k >> 3] = this.voiced[k >> 3]! | (1 << (k & 7))
+		}
 		this.heard++
 		if (
 			this.heard >= SPEECH_WINDOW_FRAMES &&
@@ -416,6 +460,7 @@ export class SpeechContentMeter {
 			im[i] = 0
 		}
 		this.frameZeroHeavy = zeros > LEVEL_MAX_ZEROS
+		this.frameZeros = zeros
 		sharedFft ??= new Fft(n)
 		sharedFft.transform(re, im)
 		let band = 0
