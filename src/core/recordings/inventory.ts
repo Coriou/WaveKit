@@ -78,6 +78,12 @@ import {
 export const RECORDINGS_COPY_DIRTY_MAX = 4096
 
 /**
+ * Copies of one root counted as changed when that root's own copy state changes: one detector
+ * group holds at most 64 files (COPY_RING_MAX), so at most 63 copies name one root.
+ */
+export const RECORDINGS_COPY_DEPENDENTS_MAX = 64
+
+/**
  * Pause of the slow reconcile between two folders: 1 500 folders take at least 30 s, so a
  * reconcile never competes with live work. Folders are re-read one at a time.
  */
@@ -1569,11 +1575,16 @@ export function createRecordingInventory(
 				readRecordingCopy(fs, copyRoot, name),
 			)
 			if (!attached(state) || state.files.get(name) !== prev) return
+			const wasCopy = (prev.receipt.copy ?? null) !== null
 			setFile(state, name, {
 				...prev,
 				listed: false,
 				receipt: { ...prev.receipt, copy },
 			})
+			// A root that became a copy (or a copy that became a root again): every listed copy naming
+			// it reads a different copyOf now (copyOfEntry), so each counts as changed too.
+			if (wasCopy !== (copy !== null) && prev.key !== null)
+				changed("changed", copiesNaming(prev.key))
 			return
 		}
 		if (
@@ -2014,6 +2025,25 @@ export function createRecordingInventory(
 		if (c.of.key === (e.key ?? e.item.id)) return null
 		if (listedRootOf(c.of.key) === null) return null
 		return { key: c.of.key, evidence: [...c.evidence] }
+	}
+
+	/**
+	 * Listed scanner analog entries whose copy sidecar names the root `key` (itself left out), at
+	 * most RECORDINGS_COPY_DEPENDENTS_MAX: the ones a change of that root's own copy state shows
+	 * differently.
+	 */
+	function copiesNaming(key: string): number {
+		let n = 0
+		for (const e of byCopyRoot.get(key) ?? []) {
+			if (n >= RECORDINGS_COPY_DEPENDENTS_MAX) break
+			if (
+				e.listed &&
+				e.item.kind === "scanner-analog" &&
+				(e.key ?? e.item.id) !== key
+			)
+				n++
+		}
+		return n
 	}
 
 	/** Listed copies over the whole catalogue (counts.copiesTotal): O(copies indexed). */

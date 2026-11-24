@@ -352,16 +352,25 @@ export function serverText(text: string): string | null {
 }
 
 /**
- * The core query of the drawer's view: Kept, one value per chip kind (a later chip of a kind replaces
- * an earlier one, see addToken), and the typed text, which wins over a text chip while it is there.
+ * The drawer's core query: the store's, plus `copies: false` (the core lists copies unless asked not to,
+ * so the drawer asks for the list without them until Show copies is on).
+ */
+export type RecordingsViewQuery = RecordingsQuery & { copies?: false }
+
+/**
+ * The core query of the drawer's view: Kept, copies left out unless Show copies is on, one value per
+ * chip kind (a later chip of a kind replaces an earlier one, see addToken), and the typed text, which
+ * wins over a text chip while it is there.
  */
 export function recordingsQuery(ui: {
 	tokens: readonly RecToken[]
 	text: string
 	filter: "all" | "kept"
-}): RecordingsQuery {
-	const q: RecordingsQuery = {}
+	showCopies?: boolean
+}): RecordingsViewQuery {
+	const q: RecordingsViewQuery = {}
 	if (ui.filter === "kept") q.kept = true
+	if (ui.showCopies !== true) q.copies = false
 	for (const t of ui.tokens) {
 		if (t.kind === "talkgroup") q.talkgroup = t.value
 		else if (t.kind === "radio") q.source = t.value
@@ -447,6 +456,26 @@ export function suggest(
 			return true
 		})
 		.map(token => ({ token }))
+}
+
+// ---- copies
+
+/** Whether the item is a copy (the core's copyOf names its listed original). */
+export function isCopy(r: RecordingInventoryItem): boolean {
+	return (r.copyOf ?? null) !== null
+}
+
+/**
+ * The footer's Show copies toggle, in words: "Show copies (3)" while they are hidden, "Hide copies" while
+ * they are shown; null when there is nothing to toggle (no copies, or an older core without the count).
+ */
+export function copiesToggleLabel(
+	copiesTotal: number | null | undefined,
+	showing: boolean,
+): string | null {
+	if (showing) return "Hide copies"
+	if (copiesTotal == null || copiesTotal <= 0) return null
+	return `Show copies (${countText(copiesTotal)})`
 }
 
 // ---- actions

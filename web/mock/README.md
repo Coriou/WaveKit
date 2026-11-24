@@ -112,8 +112,10 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   current epoch, oldest first, `backfill: true`, counted in the ack's `backfillFrames`.
 - Recordings (`recordings.ts`): `GET /api/recordings` with the core's query parameters (`limit`,
   `cursor`, `kind`, `decoderId`, `kept`, `discoveryId`, `talkgroup`, `source`, `minHz`, `maxHz`,
-  `since`, `until`, `q`) and page fields (`revision`, `indexing`, `matched`, `counts`,
-  `truncatedBefore`), the file download, Keep and delete. The seeded scanner recordings cover the
+  `since`, `until`, `q`, `copies`) and page fields (`revision`, `indexing`, `matched`, `counts`
+  with `copiesTotal`, `truncatedBefore`), the file download, Keep and delete. Scanner analog items
+  carry `copyOf`; one seeded ghost pair (made-up frequencies) has a copy of a voice heard again off
+  the raster, which `copies=false` leaves out of the listing and `matched`. The seeded scanner recordings cover the
   naming cases: a three-part transmission split by roll-overs (`Part 1 of 3 · continues`), a lone
   rolled-over file whose chain is not known yet and whose carrier sits 0.3 kHz off the raster on
   an unsaved channel (`FM voice`, `Continues…`), and files on a saved frequency (its saved name).
@@ -224,4 +226,5 @@ an unknown frequency, a proven discovery), each built through the same summary.
 
 - Transmissions (`transmissions.ts`): `GET /api/transmissions/:ref` answers `rec:` and `evt:` refs from the
   mock's recordings and Activity rows with `id` null (the mock mints no transmission ids); a `tx_` or `obs:`
-  ref is 404, a malformed one 400. A digital call lists its file only when its row links it.
+  ref is 404, a malformed one 400. A digital call lists its file only when its row links it. An analog
+  recording's `copy` names the original its `copyOf` names and the copies naming it, from the catalogue items.

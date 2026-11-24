@@ -1,7 +1,7 @@
 import "./transmission.css"
 
 // The Transmission view: one transmission, pushed into the drawer the user is in, in the order a listener asks
-// about it: Listen; What we know (Who, Tone, Signal, Ended, Kept); the Conversation, oldest first with Play all;
+// about it: Listen; What we know (Who, Tone, Signal, Ended, Kept); its copies (Copy of / Also heard on); the Conversation, oldest first with Play all;
 // the channel's doors (History, Open in Scanner, Tune); and, collapsed, the expert Details with every id and raw
 // number. It renders only the Transmission DTO (loadTransmission); Back and Esc return to the origin in one step.
 import type { JsonValue } from "@wavekit/api-types"
@@ -41,7 +41,10 @@ import {
 	replaceTransmission,
 } from "./nav.ts"
 import {
+	alsoHeardText,
 	channelText,
+	copyOfText,
+	moreCopiesText,
 	CLOSE_WORDS,
 	ctcssText,
 	durationWords,
@@ -508,6 +511,8 @@ function Ready({
 				</section>
 			)}
 
+			{t.copy != null && <Copies copy={t.copy} onPicked={onPicked} />}
+
 			{t.group !== null && (
 				<Conversation
 					t={t}
@@ -613,6 +618,59 @@ function Conversation({
 					)
 				})}
 			</ol>
+		</section>
+	)
+}
+
+/**
+ * Copies (ghosts: the same audio heard again on another frequency, kept on disk): a copy links to its original
+ * ("Copy of 446.00625 MHz"), an original lists its copies ("Also heard on 446.10625 MHz (copy)"). Each opens that
+ * recording's view in place; Back still goes to the origin.
+ */
+export function Copies({
+	copy,
+	onPicked,
+}: {
+	copy: NonNullable<TransmissionDto["copy"]>
+	onPicked: () => void
+}) {
+	const open = (key: string) => {
+		replaceTransmission({ recording: key })
+		onPicked()
+	}
+	const more = moreCopiesText(copy.copiesTotal, copy.copies.length)
+	const of = copy.of
+	return (
+		<section aria-label="Copies" className="wkt-copies">
+			{of !== null && (
+				<p className="wkt-line">
+					<button
+						type="button"
+						className="wkt-link"
+						title="The same audio, heard first on another frequency: open it"
+						onClick={() => open(of.recordingKey)}
+					>
+						{copyOfText(of.hz)}
+					</button>
+				</p>
+			)}
+			{copy.copies.length > 0 && (
+				<ul className="wkt-copy-list">
+					{copy.copies.map(c => (
+						<li key={c.recordingKey}>
+							<button
+								type="button"
+								className="wkt-link"
+								title="The same audio heard again there (a receiver ghost): open it"
+								onClick={() => open(c.recordingKey)}
+							>
+								{alsoHeardText(c.hz)}
+							</button>
+						</li>
+					))}
+				</ul>
+			)}
+			{more !== null && <p className="wkt-hint">{more}</p>}
 		</section>
 	)
 }

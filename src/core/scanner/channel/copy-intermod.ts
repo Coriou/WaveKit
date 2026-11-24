@@ -61,15 +61,26 @@ export interface TrackSpan {
 	readonly snrDb: number
 	readonly peakDbfs: number
 	readonly binHz: number | null
+	/** The latest OBW heard (the raster fit's grid choice); absent or null: unknown. */
+	readonly obwHz?: number | null
 }
 
 export interface IntermodFile {
+	/** The file's settled centre (the median of its joined snapshots). */
 	readonly hz: number
 	readonly startSample: number
 	readonly endSample: number
 	readonly peakDbfs: number
 	readonly binHz: number | null
+	/** The file's OBW (the raster fit's grid choice); absent or null: unknown. */
+	readonly obwHz?: number | null
 }
+
+/**
+ * Whether a raw centre is on its band's raster, on discovery placement's terms (the source's
+ * learned correction subtracted, the rasters kept for `obwHz`); unknown: no evidence from it.
+ */
+export type RasterOf = (hz: number, obwHz: number | null) => RasterFit
 
 /** The tolerance (Hz) for these bins: 4 × max(bin, 1 kHz). */
 export function intermodTolerance(binHz: number | null): number {
@@ -93,7 +104,7 @@ function overlapShare(t: TrackSpan, f: IntermodFile): number {
 export function intermodEvidenceOf(
 	file: IntermodFile,
 	tracks: readonly TrackSpan[],
-	rasterOf: (hz: number) => RasterFit,
+	rasterOf: RasterOf,
 ): IntermodEvidence | null {
 	const tol = intermodTolerance(file.binHz)
 	const concurrent = tracks.filter(
@@ -115,7 +126,7 @@ export function intermodEvidenceOf(
 			if (Math.abs(2 * f1.hz - f2.hz - file.hz) <= tol)
 				return { rule: "2f1-f2", parents: [{ hz: f1.hz }, { hz: f2.hz }] }
 		}
-	const fileRaster = rasterOf(file.hz)
+	const fileRaster = rasterOf(file.hz, file.obwHz ?? null)
 	for (const fa of parents)
 		for (const other of concurrent) {
 			if (other === fa) continue
@@ -123,7 +134,7 @@ export function intermodEvidenceOf(
 			if (Math.abs(file.hz + other.hz - 2 * fa.hz) > tol) continue
 			if (
 				fileRaster === "off" ||
-				rasterOf(other.hz) === "off" ||
+				rasterOf(other.hz, other.obwHz ?? null) === "off" ||
 				Math.abs(file.hz - fa.hz) >= INTERMOD_WIDE_HZ
 			)
 				return {
@@ -141,6 +152,7 @@ interface SpanEntry {
 	snrDb: number
 	peakDbfs: number
 	binHz: number | null
+	obwHz: number | null
 }
 
 /**
@@ -169,6 +181,7 @@ export class TrackSpans {
 			readonly snrDb: number
 			readonly peakDbfs: number
 			readonly binHz?: number | undefined
+			readonly obwHz?: number | undefined
 		},
 	): void {
 		if (
@@ -207,6 +220,10 @@ export class TrackSpans {
 				typeof track.binHz === "number" && Number.isFinite(track.binHz)
 					? track.binHz
 					: (prev?.binHz ?? null),
+			obwHz:
+				typeof track.obwHz === "number" && Number.isFinite(track.obwHz)
+					? track.obwHz
+					: (prev?.obwHz ?? null),
 		}
 		src.spans.delete(track.trackId)
 		src.spans.set(track.trackId, entry)

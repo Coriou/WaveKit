@@ -1065,10 +1065,48 @@ export interface WidebandAnalogDeps {
 	 */
 	copies?: CopyDetector
 	/**
-	 * Whether `hz` is on the raster of a scan range covering it on `sourceId` (`unknown`: no range
-	 * covers it, so no off-raster evidence). Absent: unknown.
+	 * Whether the raw centre `hz` (OBW `obwHz`, null: unknown) is on the raster of a scan range
+	 * covering it on `sourceId`, on discovery placement's terms: the source's learned frequency
+	 * correction subtracted, the same rasters (`unknown`: no range covers it, so no off-raster
+	 * evidence). Absent: unknown.
 	 */
-	rasterOf?(sourceId: string, hz: number): RasterFit
+	rasterOf?(sourceId: string, hz: number, obwHz?: number | null): RasterFit
+}
+
+/**
+ * Joined-snapshot centres a file's copy sampler keeps (copyHz): at most this many, evenly spread
+ * over the file (when full, every other one is dropped and the stride doubles), so its median is
+ * the file's settled frequency at O(1) memory per file.
+ */
+export const COPY_HZ_SAMPLES_MAX = 64
+
+/** A file's sampled joined-snapshot centres (copy detection's settled frequency). */
+interface CopyHzSampler {
+	values: number[]
+	stride: number
+	seen: number
+	/** The latest joined OBW heard (the raster fit's grid choice); null: none. */
+	obwHz: number | null
+}
+
+function sampleCopyHz(c: CopyHzSampler, hz: number, obwHz: number): void {
+	if (Number.isFinite(obwHz) && obwHz > 0) c.obwHz = obwHz
+	if (!Number.isFinite(hz)) return
+	if (c.seen++ % c.stride !== 0) return
+	c.values.push(hz)
+	if (c.values.length < COPY_HZ_SAMPLES_MAX) return
+	c.values = c.values.filter((_, i) => i % 2 === 0)
+	c.stride *= 2
+}
+
+/** The sampler's median centre, or `fallback` (the session's first centre) when it heard none. */
+function settledCopyHz(c: CopyHzSampler, fallback: number): number {
+	if (c.values.length === 0) return fallback
+	const sorted = [...c.values].sort((a, b) => a - b)
+	const mid = sorted.length >> 1
+	return sorted.length % 2 === 1
+		? sorted[mid]!
+		: Math.round((sorted[mid - 1]! + sorted[mid]!) / 2)
 }
 
 /**
@@ -1190,7 +1228,10 @@ interface FileState {
 	 * and the fill's length): their frames are excluded from the fingerprint. Null past COPY_GAPS_MAX.
 	 */
 	copyGaps: { readonly from: number; readonly to: number }[] | null
-	/** Captured when the file ended (finishFile): its raster fit and intermod evidence. */
+	/** The joined snapshots' centres and OBW while the file was open (its settled frequency). */
+	readonly copyHz: CopyHzSampler
+	/** Captured when the file ended (finishFile): its settled centre, raster fit and intermod evidence. */
+	copySettledHz: number | null
 	copyRaster: RasterFit
 	copyIntermod: IntermodEvidence | null
 	/** Input sample where the file ended (finishFile); null before. */
@@ -3523,6 +3564,7 @@ export class WidebandAnalogRecorder {
 				if (f.finishing) continue
 				if (track.snrDb > f.peakSnrDb) f.peakSnrDb = track.snrDb
 				if (track.peakDbfs > f.peakDbfs) f.peakDbfs = track.peakDbfs
+				sampleCopyHz(f.copyHz, track.centreHz, track.obwHz)
 			}
 		} catch {
 			// Copy detection is best effort: a snapshot never fails for it.
@@ -3538,13 +3580,18 @@ export class WidebandAnalogRecorder {
 		if (this.deps.copies === undefined) return
 		try {
 			file.copyEnd = endedAt
-			const rasterOf = (hz: number): RasterFit =>
-				this.deps.rasterOf?.(s.sourceId, hz) ?? "unknown"
-			file.copyRaster = rasterOf(s.targetHz)
+			// The file's settled centre (median of its joined snapshots), not the session's first.
+			const hz = settledCopyHz(file.copyHz, s.targetHz)
+			const obwHz = file.copyHz.obwHz
+			file.copySettledHz = hz
+			const rasterOf = (at: number, obw: number | null): RasterFit =>
+				this.deps.rasterOf?.(s.sourceId, at, obw) ?? "unknown"
+			file.copyRaster = rasterOf(hz, obwHz)
 			const spans = this.spans.spansOf(s.sourceId, s.epoch)
 			file.copyIntermod = intermodEvidenceOf(
 				{
-					hz: s.targetHz,
+					hz,
+					obwHz,
 					startSample: file.startSample,
 					endSample: endedAt,
 					peakDbfs: file.peakDbfs,
@@ -3560,18 +3607,24 @@ export class WidebandAnalogRecorder {
 
 	/**
 	 * Copy detection, when a file is kept (its finish asked): its fingerprint to the detector
-	 * with the operation's settlement (it joins the ring only once finalized). Not for a session
-	 * classed digital or by its own audio alone (toneOnly), nor without a measured level, end or
-	 * gap list. Never throws.
+	 * with the operation's settlement (it joins the ring only once finalized). A session classed
+	 * by its own audio (toneOnly, speechOnly included) is fingerprinted like any analog one (the
+	 * eligibility and evidence gates still decide); not one classed digital or that may only be
+	 * classed by a tone (toneRequired), nor a file without a measured level, end or gap list. The
+	 * envelope is read only once the file's queue is flushed (every written frame pushed to its
+	 * meter: finishOrHold runs only then), so its tail is never cut: a file still holding queued
+	 * or in-flight audio gets no fingerprint rather than a short one. Never throws.
 	 */
 	private noteKept(s: Session, file: FileState, handle: AnalogHandle): void {
 		const copies = this.deps.copies
-		if (copies === undefined || s.digital || s.toneOnly) return
+		if (copies === undefined || s.digital || s.toneRequired) return
 		try {
 			const e = file.speech.envelope()
 			if (
 				e === null ||
 				e.frames === 0 ||
+				file.queue.length > 0 ||
+				file.writing ||
 				file.copyGaps === null ||
 				file.copyEnd === null ||
 				!Number.isFinite(file.peakSnrDb)
@@ -3583,7 +3636,7 @@ export class WidebandAnalogRecorder {
 				sourceId: s.sourceId,
 				epoch: s.epoch,
 				rateHz: s.fs,
-				hz: s.targetHz,
+				hz: file.copySettledHz ?? s.targetHz,
 				snrDb: file.peakSnrDb,
 				raster: file.copyRaster,
 				intermod: file.copyIntermod,
@@ -3621,6 +3674,8 @@ export class WidebandAnalogRecorder {
 			peakSnrDb: Number.NEGATIVE_INFINITY,
 			peakDbfs: Number.NEGATIVE_INFINITY,
 			copyGaps: [],
+			copyHz: { values: [], stride: 1, seen: 0, obwHz: null },
+			copySettledHz: null,
 			copyRaster: "unknown",
 			copyIntermod: null,
 			copyEnd: null,

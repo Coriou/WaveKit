@@ -4402,7 +4402,15 @@ included: a snapshot refusal counts once per observation and code, so an observa
 slots on 10 snapshots counts 1 under `refused:slots`, and 1 more under `refused:cpu` if it is
 later refused for CPU), `refusalAttempts` (every refused snapshot per code, retries included;
 absent from older cores) and `logsSuppressed` (recording decision log lines left out by the 20-a-minute info
-log limit; snapshot refusals are logged at debug, outside it). The codes are listed in
+log limit; snapshot refusals are logged at debug, outside it). `copies` (absent from older cores)
+holds copy (ghost) detection's counters since the core started
+([SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings)): `copyCompared`
+(envelope comparisons run), `copyMarked` (copy sidecars asked to be written), `copySameAudioNoEvidence`
+(same audio, but the weaker file had no evidence of its own: nothing marked), `copyIneligible` (a
+file too flat or unvoiced to compare), `copyMultiRoot` (a file matched more than one original:
+attached to the strongest), `copyUnlinked` (copies shown again), `copyRingOverflow`,
+`copyQueueDropped` and `copyTrackSpansDropped` (bounds reached) and `copyComparisonMsMax` (the
+slowest comparison, ms). The codes are listed in
 `SCANNER_RECORDER_DECISIONS` and explained in
 [SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings). Newer cores add the
 snapshot refusal `refused:close-only` (an observation classed `analog-fm` only by the snapshot
@@ -7000,7 +7008,9 @@ merges), `talkgroup` and `source` (radio id; decimal digits), `minHz` and
 whole Hz equal to it) or `nearHz` with `toleranceHz` (integer Hz, 0 to
 1,000,000, default 6,250: recordings whose `frequencyHz` lies within the
 tolerance; `toleranceHz` without `nearHz`, or `channelHz` with `nearHz`, is a
-400), `since` and `until` (ISO-8601 with a zone, inclusive, on `modifiedAt`) and `q`
+400), `copies` (`true`, the default, or `false`: leave copies, items with a `copyOf`, out of the
+listing and `matched`; `counts` still counts them; GET by id, the file, Keep and delete ignore it),
+`since` and `until` (ISO-8601 with a zone, inclusive, on `modifiedAt`) and `q`
 (1 to 64 characters, case-insensitive, in the talkgroup, radio, decoder, kind,
 local start time or frequency in MHz; never in the opaque id). The query is
 checked strictly (unknown or repeated keys, `limit=10abc` or a malformed cursor
@@ -7158,6 +7168,13 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   as no facts (fail closed; the file is still served). Null for older files, any
   other kind, and a sidecar that is missing, larger than 2 KiB, malformed or of
   another operation; the file is served the same either way.
+- `copyOf` (scanner analog recordings only; other kinds and older cores omit it): the
+  scanner marked this file a copy (a ghost: the same audio heard again on another frequency, see
+  [SCANNER.md](SCANNER.md#analog-voice-recordings)) of the listed recording `key`, with the
+  copy's own `evidence` (`intermod`, `off-raster`), from its `copy.json` sidecar. Null when it is
+  not a copy, or when the named original is no longer listed or is itself a copy (the file is shown
+  again). `counts.copiesTotal` (absent from older cores) counts the listed copies. A change to a
+  sidecar is re-read at once and announced like any change.
 - `frequencyHz` of a scanner recording is its channel frequency: the frequency
   of the discovery that owns it now, in whole Hz (rounded as the Activity row's
   `channel.frequencyHz` is). The two agree until a merge: the catalogue item
@@ -8513,6 +8530,11 @@ decoder link counts as it does for a call with an id.
 - `group`: `{ id, heuristic: false, members }`, the transmissions of the same channel run that
   the registry still holds (at most 64); null once it no longer holds it.
 - `gone`: `activity` (a named row is gone) and `audio` (a named file is no longer listed).
+- `copy` (analog recordings only; absent from older cores): `{ of, copies, copiesTotal }`, from the
+  catalogue's `copyOf` links only. `of` (`{ ref, hz }`: the original's transmission ref, or its
+  `rec:` alias, and frequency) when this recording is a copy; `copies` the listed copies of this
+  recording (`{ ref, hz, recordingKey, evidence }`, at most 8; `copiesTotal` counts them all).
+  Null when neither, and for digital calls.
 - `raw`: the catalogue item, stored record and facts as read (Details only).
 - `signal`, `sameTime` and `channelSummary` are null: not computed yet.
 

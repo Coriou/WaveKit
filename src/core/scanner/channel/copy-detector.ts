@@ -164,6 +164,38 @@ export function strongerThan(
 	return a.key < b.key
 }
 
+/** Built-in error class names a failure log may name (anything else reads `other`). */
+const SAFE_ERROR_NAMES: ReadonlySet<string> = new Set([
+	"Error",
+	"TypeError",
+	"RangeError",
+	"ReferenceError",
+	"SyntaxError",
+	"AggregateError",
+	"WaveKitError",
+])
+/** A native errno code (`ENOENT`, `EACCES`, ...): upper-case letters only, at most 16. */
+const SAFE_ERRNO = /^E[A-Z]{1,15}$/
+
+/**
+ * A failure's cause for a log line, from closed sets only: its class name when built in, its
+ * errno code when it has the native shape. Never its message or any other value (a message can
+ * carry a path or a value from outside).
+ */
+export function safeErrorFields(cause: unknown): {
+	errorName: string
+	errorCode?: string
+} {
+	const name =
+		cause instanceof Error && SAFE_ERROR_NAMES.has(cause.name)
+			? cause.name
+			: "other"
+	const code = (cause as { code?: unknown } | null | undefined)?.code
+	return typeof code === "string" && SAFE_ERRNO.test(code)
+		? { errorName: name, errorCode: code }
+		: { errorName: name }
+}
+
 const round = (v: number, places: number): number => {
 	const f = 10 ** places
 	return Math.round(v * f) / f
@@ -257,8 +289,11 @@ export class CopyDetector {
 				try {
 					if (job.kind === "kept") await this.attach(job.fp, job.key)
 					else await this.remove(job.operationId)
-				} catch {
-					this.log.warn("Copy detection job failed")
+				} catch (cause) {
+					this.log.warn(
+						{ job: job.kind, ...safeErrorFields(cause) },
+						"Copy detection job failed",
+					)
 				}
 			}
 		} finally {

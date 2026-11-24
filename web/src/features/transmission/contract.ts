@@ -341,6 +341,12 @@ export interface TransmissionDto {
 		usualCtcssHz: number | null
 	} | null
 	gone: ("activity" | "observation" | "discovery" | "audio")[]
+	/**
+	 * Copies (ghosts: the same audio heard again on another frequency) of an analog recording: `of`, the original
+	 * this one is a copy of; `copies`, the copies of this one (at most 8, `copiesTotal` all of them). Null or
+	 * absent when neither (or not known: an older core).
+	 */
+	copy?: TransmissionCopyView | null
 	/** The stored records as read, for the expert Details (never shown elsewhere). */
 	raw: {
 		recording: unknown
@@ -348,6 +354,13 @@ export interface TransmissionDto {
 		facts: unknown
 		observation: unknown
 	}
+}
+
+/** TransmissionDto.copy: recording keys open with `{ recording: key }`; hz null when not known. */
+export interface TransmissionCopyView {
+	of: { recordingKey: string; hz: number | null } | null
+	copies: { recordingKey: string; hz: number | null }[]
+	copiesTotal: number
 }
 
 /** Freezes a DTO deeply: the view renders it and never changes it. */

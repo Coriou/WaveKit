@@ -103,7 +103,6 @@ import type { TunerController } from "../tuner-controller.js"
 import { sourceScannerConfig } from "../../config.js"
 import {
 	priorsFor,
-	snapToRaster,
 	type Bandplan,
 	type BandRegionCode,
 } from "./bandplan/index.js"
@@ -1784,7 +1783,8 @@ export class ScannerService extends EventEmitter {
 			})
 			this.widebandAnalog = new WidebandAnalogRecorder({
 				copies,
-				rasterOf: (sourceId, hz) => this.rasterFit(sourceId, hz),
+				rasterOf: (sourceId, hz, obwHz) =>
+					this.rasterFit(sourceId, hz, obwHz ?? null),
 				engine: sourceId => this.spectrum.engine(sourceId),
 				settings: () => ({
 					...this.settings().hold,
@@ -3900,11 +3900,16 @@ export class ScannerService extends EventEmitter {
 		return out
 	}
 
-	/** Copy detection's raster fit of `hz`: on or off the rasters at it, unknown with none. */
-	private rasterFit(sourceId: string, hz: number): RasterFit {
-		const rasters = this.rastersAt(sourceId, hz)
-		if (rasters.length === 0) return "unknown"
-		return snapToRaster(hz, rasters, 0).snapped ? "on" : "off"
+	/**
+	 * Copy detection's raster fit of `hz` (a raw centre): the discovery placement's rasters and the
+	 * source's learned frequency correction (DiscoveryStore.rasterFit), unknown with no raster.
+	 */
+	private rasterFit(
+		sourceId: string,
+		hz: number,
+		obwHz: number | null,
+	): RasterFit {
+		return this.store.rasterFit(sourceId, hz, obwHz)
 	}
 
 	/**

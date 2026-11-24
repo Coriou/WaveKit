@@ -11,6 +11,7 @@ import type {
 } from "@wavekit/api-types"
 
 import { clockText, dateText, sameDay } from "../display.ts"
+import { formatMHz } from "../format.ts"
 import { channelMHz } from "../naming.ts"
 import type { TransmissionTone } from "./contract.ts"
 import { readTone } from "./contract.ts"
@@ -311,4 +312,33 @@ export function recordingChangeDetails(
 	return rows
 		.filter((r): r is [string, string] => r[1] !== null && r[1] !== "")
 		.map(([term, value]) => ({ term, value }))
+}
+
+// ---- copies (the same audio heard again on another frequency)
+
+/** A copy's exact frequency ("446.10625 MHz"): a ghost sits off its raster, so it is never snapped to a channel. */
+export function copyHzText(hz: number | null | undefined): string | null {
+	if (typeof hz !== "number" || !Number.isFinite(hz)) return null
+	return `${formatMHz(hz)} MHz`
+}
+
+/** An original's row for one copy: "Also heard on 446.10625 MHz (copy)". */
+export function alsoHeardText(hz: number | null | undefined): string {
+	const f = copyHzText(hz)
+	return f === null
+		? "Also heard on another frequency (copy)"
+		: `Also heard on ${f} (copy)`
+}
+
+/** A copy's link to its original: "Copy of 446.00625 MHz", "Copy of the original recording". */
+export function copyOfText(hz: number | null | undefined): string {
+	const f = copyHzText(hz)
+	return f === null ? "Copy of the original recording" : `Copy of ${f}`
+}
+
+/** "and 3 more copies" past the listed ones; null when every copy is listed. */
+export function moreCopiesText(total: number, listed: number): string | null {
+	const more = total - listed
+	if (!(more > 0)) return null
+	return `and ${more} more ${more === 1 ? "copy" : "copies"}`
 }

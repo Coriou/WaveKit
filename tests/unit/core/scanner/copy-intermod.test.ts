@@ -203,6 +203,7 @@ describe("intermod evidence: the track-span ring", () => {
 				snrDb: 35,
 				peakDbfs: -10,
 				binHz: null,
+				obwHz: null,
 			},
 		])
 	})

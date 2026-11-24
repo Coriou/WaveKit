@@ -362,4 +362,14 @@
 	.wkr-channel {
 		margin-left: auto;
 	}
+	/* a copy's chip, between the row and its play circle: it opens the original */
+	.wkr-copy {
+		flex: none;
+		align-self: center;
+		margin-right: 2px;
+	}
+	/* the footer's quiet Show copies toggle */
+	.wkr-copies {
+		flex: none;
+	}
 }

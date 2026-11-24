@@ -5024,6 +5024,28 @@ export class DiscoveryStore
 		return this.corrections.get(sourceId) ?? 0
 	}
 
+	/**
+	 * Copy detection's raster fit of a centre heard on `sourceId`, on placement's terms: the
+	 * rasters at it kept for its OBW (gridFor; null keeps every one) and the source's learned
+	 * correction subtracted before snapping. `on` within a raster's tolerance, `off` outside every
+	 * one, `unknown` when no raster is at it (no off-raster evidence then).
+	 */
+	rasterFit(
+		sourceId: string,
+		centreHz: number,
+		obwHz: number | null,
+	): "on" | "off" | "unknown" {
+		if (!Number.isFinite(centreHz)) return "unknown"
+		const rasters = gridFor(
+			this.rastersFor(sourceId, centreHz),
+			obwHz ?? Number.NaN,
+		)
+		if (!rasters.some(r => r.spacingHz > 0)) return "unknown"
+		return snapToRaster(centreHz, rasters, this.correction(sourceId)).snapped
+			? "on"
+			: "off"
+	}
+
 	/** WG2 req 12.1: the locked-out discoveries heard on `sourceId` (no clone: three scalars each). */
 	lockouts(sourceId: string): LockoutTarget[] {
 		const out: LockoutTarget[] = []

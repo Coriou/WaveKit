@@ -5,16 +5,24 @@
  * mark it; the raster fit comes from `rasterOf`; with copy detection off nothing is captured.
  * The fake engine, synthetic NFM and made-up frequencies of wideband-recorder-harness.ts.
  */
+import pino from "pino"
 import { describe, expect, it } from "vitest"
 import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
-import type {
+import {
 	CopyDetector,
-	CopyFingerprint,
-	CopySettled,
+	type CopyFingerprint,
+	type CopyRecord,
+	type CopySettled,
 } from "../../../../src/core/scanner/channel/copy-detector.js"
+import { COPY_FRAME_SAMPLES } from "../../../../src/core/scanner/channel/copy-fingerprint.js"
+import type {
+	WidebandCloseInfo,
+	WidebandTrackInput,
+} from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import {
 	CENTRE,
 	HARNESS_T0,
+	LOW,
 	LOW_FS,
 	LOW_OFFSET,
 	harness,
@@ -145,6 +153,8 @@ describe("WidebandAnalogRecorder: copy detection", () => {
 		expect(fp.snrDb).toBe(30)
 		expect(fp.samplesPerFrame).toBe((256 * LOW_FS) / 8_000)
 		expect(fp.frames).toBeGreaterThan(150)
+		// The fingerprint is read once the queue is flushed: every frame the file wrote is in it.
+		expect(fp.frames).toBe(Math.floor(h.ops[0]!.frames / COPY_FRAME_SAMPLES))
 		const settled = await copies.kept[0]!.settled
 		expect(settled.outcome).toBe("finalized")
 	}, 120_000)
@@ -165,5 +175,89 @@ describe("WidebandAnalogRecorder: copy detection", () => {
 		expect(copies.kept).toHaveLength(1)
 		expect(copies.kept[0]!.fp.intermod).toBeNull()
 		expect(copies.kept[0]!.fp.raster).toBe("unknown")
+	}, 120_000)
+})
+
+/** A shadow whose spectrum reads `carrier`: classed only by its own speech (toneOnly, speechOnly). */
+const CARRIER: Partial<WidebandTrackInput> = {
+	analogFm: false,
+	shadowAllowed: true,
+	spectralDigital: false,
+}
+const NOT_ANALOG: WidebandCloseInfo = { analogFm: false, discoveryId: "d_1" }
+/** A carrier discovery whose own analog trials mostly heard voice (illustrative counts). */
+const voiceChannel: VoicePrior = {
+	labels: [],
+	class: "carrier",
+	analogVoice: () => false,
+	ownAnalogTrials: () => ({ attempts: 300, decoded: 240 }),
+}
+
+describe("WidebandAnalogRecorder: copy detection of own-audio classes", () => {
+	it("a ghost classed by its own speech (toneOnly) is fingerprinted, and marked a copy of the stronger root", async () => {
+		const copies = fakeCopies()
+		const h = harness({
+			fs: LOW_FS,
+			offset: LOW_OFFSET,
+			source: { syllables: true, ctcssHz: null },
+			decodedLabel: () => null,
+			voicePrior: () => voiceChannel,
+			copies: copies.det,
+			rasterOf: () => "off",
+		})
+		await h.feed(1, false)
+		const chunk = h.fs / 40
+		const onset = h.engine.liveEdge()
+		const end = onset + 4 * h.fs
+		for (let i = 0; i < 4 * 40; i++) {
+			h.engine.write(h.src.next(chunk, true))
+			const edge = h.engine.liveEdge()
+			if (edge - onset >= 0.1 * h.fs)
+				h.rec.track(
+					input("o", snapshot("o", onset, Math.min(edge, end), LOW), CARRIER),
+				)
+			await h.pump()
+		}
+		await h.feed(0.6, false)
+		h.rec.closed("o", snapshot("o", onset, end, LOW), null, NOT_ANALOG)
+		await h.feed(3.5, false)
+		await h.rec.idle()
+		expect(h.rec.diagnostics().recent.map(d => d.code)).toContain("classed")
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		expect(copies.kept).toHaveLength(1)
+		const ghost = copies.kept[0]!.fp
+		expect(ghost.raster).toBe("off")
+		expect(ghost.frames).toBe(Math.floor(h.ops[0]!.frames / COPY_FRAME_SAMPLES))
+		// The eligibility and evidence gates decide as for any analog file: against a stronger root
+		// carrying the same audio, the ghost is marked its copy.
+		const writes: { operationId: string; copy: CopyRecord | null }[] = []
+		const det = new CopyDetector({
+			write: (operationId, copy) => {
+				writes.push({ operationId, copy })
+				return Promise.resolve("written")
+			},
+			logger: pino({ level: "silent" }),
+		})
+		const root: CopyFingerprint = {
+			...ghost,
+			operationId: "root-op",
+			snrDb: ghost.snrDb + 15,
+			raster: "on",
+			intermod: null,
+		}
+		const settle = (alias: string): Promise<CopySettled> =>
+			Promise.resolve({ outcome: "finalized", alias })
+		det.kept(root, settle("d_1~analog-root.wav"))
+		await new Promise(r => setImmediate(r))
+		await det.idle()
+		det.kept(ghost, settle("d_1~analog-ghost.wav"))
+		await new Promise(r => setImmediate(r))
+		await det.idle()
+		expect(det.stateOf("scan:d_1~analog-ghost.wav")).toEqual({
+			kind: "copy",
+			of: "scan:d_1~analog-root.wav",
+		})
+		expect(writes.map(w => w.operationId)).toEqual([ghost.operationId])
+		expect(writes[0]!.copy?.evidence).toEqual(["off-raster"])
 	}, 120_000)
 })

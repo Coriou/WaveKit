@@ -1499,6 +1499,10 @@ export class AnalogOperations {
 	private moveDirectory(from: string, to: string): Promise<void> {
 		return this.io.rename?.(from, to) ?? rename(from, to)
 	}
+	/** A sidecar's temp → target rename, through the io seam (fault injection) when it has one. */
+	private renameFile(from: string, to: string): Promise<void> {
+		return this.io.rename?.(from, to) ?? rename(from, to)
+	}
 	/** fsync of a directory's entries; a tolerated refusal (DIRECTORY_SYNC_TOLERATED) is accepted. */
 	private async syncDirectory(
 		path: string,
@@ -3467,7 +3471,7 @@ export class AnalogOperations {
 						}
 						await this.writeSynced(temp, bytes)
 						await this.safeTarget(target)
-						await rename(temp, target)
+						await this.renameFile(temp, target)
 						outcome = "written"
 					}
 				}

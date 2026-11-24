@@ -11,6 +11,7 @@ import {
 	COPY_QUEUE_MAX,
 	COPY_RING_MAX,
 	CopyDetector,
+	safeErrorFields,
 	strongerThan,
 	type CopyFingerprint,
 	type CopyRecord,
@@ -359,6 +360,8 @@ describe("copy detector: bridging cases", () => {
 			const sg = det.stateOf(keyOf(g))
 			expect(sa, order.join(",")).toEqual({ kind: "root" })
 			expect(sb, order.join(",")).toEqual({ kind: "root" })
+			// The ghost is a copy of exactly one of them, and passes against that one directly.
+			expect(sg?.kind, order.join(",")).toBe("copy")
 			if (sg?.kind === "copy") {
 				const root = sg.of === keyOf(a) ? a : b
 				expect(passesDirectly(g, root), order.join(",")).toBe(true)
@@ -472,5 +475,45 @@ describe("copy detector: order, bounds and pacing", () => {
 			fingerprint(heardAgain(v, 93), { snrDb: 9, raster: "off", epoch: 2 }),
 		)
 		expect(writes).toEqual([])
+	})
+})
+
+describe("copy detector: a failed job", () => {
+	it("logs the cause from closed sets only (class name, errno code), never its message", async () => {
+		const lines: string[] = []
+		const det = new CopyDetector({
+			write: () => {
+				throw Object.assign(new TypeError("/private/path value=x"), {
+					code: "EACCES",
+				})
+			},
+			logger: pino(
+				{ level: "warn" },
+				{ write: (line: string) => void lines.push(line) },
+			),
+		})
+		const voice = talk(13, 10)
+		const orig = fingerprint(voice, { snrDb: 40 })
+		const ghost = fingerprint(heardAgain(voice, 94), {
+			snrDb: 9,
+			raster: "off",
+		})
+		await keep(det, orig, ghost)
+		const failed = lines
+			.map(l => JSON.parse(l) as Record<string, unknown>)
+			.filter(l => l["msg"] === "Copy detection job failed")
+		expect(failed).toHaveLength(1)
+		expect(failed[0]).toMatchObject({
+			job: "kept",
+			errorName: "TypeError",
+			errorCode: "EACCES",
+		})
+		expect(lines.join("\n")).not.toContain("/private/path")
+		expect(safeErrorFields({ code: "value from outside" })).toEqual({
+			errorName: "other",
+		})
+		const custom = new Error("x")
+		custom.name = "value from outside"
+		expect(safeErrorFields(custom)).toEqual({ errorName: "other" })
 	})
 })

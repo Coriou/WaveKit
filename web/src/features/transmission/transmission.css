@@ -134,6 +134,19 @@
 		flex-direction: column;
 		gap: 6px;
 	}
+	.wkt-copies {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.wkt-copy-list {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
 	.wkt-link {
 		border: 0;
 		padding: 0;

@@ -12,18 +12,22 @@ import {
 	mkdtemp,
 	readFile,
 	realpath,
+	rename,
 	rm,
+	unlink,
 	utimes,
 	writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import type { RecordingsChangedEventData } from "@wavekit/api-types"
 import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
 import {
 	OPERATION_FOLDER_NAMES,
 	type AnalogMetadataAdapter,
 	type AnalogNotice,
+	type AnalogOperationIo,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import {
 	COPY_FACTS_FILE,
@@ -53,7 +57,7 @@ afterEach(async () => {
 	)
 })
 
-async function harness() {
+async function harness(io?: AnalogOperationIo) {
 	const root = await realpath(await mkdtemp(join(tmpdir(), "wk-copy-")))
 	dirs.push(root)
 	const store = new DiscoveryStore({
@@ -109,6 +113,7 @@ async function harness() {
 			now: () => NOW,
 			statfs: async () => ({ freeBytes: 1e9 }),
 			isDiscoveryLive: id => !!store.get(id),
+			...(io ? { analogIo: io } : {}),
 		})
 		ev.onAnalogNotice(n => notices.push(n))
 		ev.configureAnalog(adapter)
@@ -242,6 +247,45 @@ describe("copy sidecar: writeCopy under the store lock", () => {
 			),
 		).toBe("skipped")
 		expect(existsSync(copyPath(h, gone.op.operationId))).toBe(false)
+	})
+
+	it("renames through the io seam: a failed rename leaves no sidecar and no temp, skipped, no notice", async () => {
+		let failRename = false
+		const renamed: string[] = []
+		const h = await harness({
+			unlink: path => unlink(path),
+			checkpoint: async () => undefined,
+			rename: async (from, to) => {
+				renamed.push(to)
+				if (failRename && to.endsWith(COPY_FACTS_FILE))
+					throw Object.assign(new Error("injected"), { code: "EIO" })
+				await rename(from, to)
+			},
+		})
+		const root = await keptOp(h)
+		const copy = await keptOp(h, "o2")
+		failRename = true
+		const before = h.notices.length
+		expect(
+			await h.evidence.writeCopy(
+				copy.op.operationId,
+				record(root.key, root.op.operationId),
+			),
+		).toBe("skipped")
+		expect(renamed.filter(p => p.endsWith(COPY_FACTS_FILE))).toHaveLength(1)
+		const dir = join(h.root, ".analog-operations", copy.op.operationId)
+		expect(existsSync(join(dir, COPY_FACTS_FILE))).toBe(false)
+		expect(existsSync(join(dir, COPY_FACTS_TEMP))).toBe(false)
+		expect(h.notices.length).toBe(before)
+		// The folder is as it was: the next write succeeds through the same seam.
+		failRename = false
+		expect(
+			await h.evidence.writeCopy(
+				copy.op.operationId,
+				record(root.key, root.op.operationId),
+			),
+		).toBe("written")
+		expect(existsSync(join(dir, COPY_FACTS_FILE))).toBe(true)
 	})
 
 	it("skips an aborted operation (never finalized)", async () => {
@@ -455,6 +499,35 @@ describe("copy sidecar: the catalogue's copyOf, copies filter and re-read", () =
 		)
 		const later = await h.inventory.list({ limit: "200" })
 		expect(later.items.find(i => i.key === other.key)?.copyOf).toBeNull()
+	})
+
+	it("a root that becomes a copy counts its listed copies as changed too (their copyOf changes)", async () => {
+		const h = await harness()
+		const { root, copy, other } = await wired(h)
+		const events: RecordingsChangedEventData[] = []
+		const off = h.inventory.onChange?.(e => events.push(e))
+		await h.evidence.writeCopy(
+			copy.op.operationId,
+			record(root.key, root.op.operationId),
+		)
+		await h.inventory.list({ limit: "200" })
+		await vi.waitFor(
+			() => expect(events.reduce((n, e) => n + e.changed, 0)).toBe(1),
+			{ timeout: 3_000 },
+		)
+		const before = events.length
+		// The root becomes a copy: the root and the one copy naming it read differently.
+		await h.evidence.writeCopy(
+			root.op.operationId,
+			record(other.key, other.op.operationId),
+		)
+		await h.inventory.list({ limit: "200" })
+		await vi.waitFor(
+			() =>
+				expect(events.slice(before).reduce((n, e) => n + e.changed, 0)).toBe(2),
+			{ timeout: 3_000 },
+		)
+		off?.()
 	})
 
 	it("removing the sidecar shows the file again", async () => {
