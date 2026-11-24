@@ -348,13 +348,7 @@ describe("dsd-fme per-call WAV names", () => {
 				(b.kind === "dstar" || b.kind === "ysf")
 			)
 				return a.my === b.my && (a.kind === "ysf" || a.ur === b.ur)
-			if (
-				a.kind === "dstar" ||
-				a.kind === "ysf" ||
-				b.kind === "dstar" ||
-				b.kind === "ysf"
-			)
-				return false
+			if (!("tg" in a) || !("tg" in b)) return false
 			return a.tg === b.tg && a.src === b.src && a.sys === b.sys
 		}
 		fc.assert(
