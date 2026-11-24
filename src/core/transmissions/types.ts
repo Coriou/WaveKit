@@ -168,6 +168,8 @@ export interface TxLiveDemodPort {
 	claim(c: TxClaim): TxClaimResult | null
 	end(claimant: number, atMs: number, reason?: TxEndReason): void
 	attach(txId: string, alias: TxAlias): boolean
+	/** The txId while that transmission is open (or held); null once closed (TX_MAX_MS). */
+	openTxOf(ref: string): string | null
 	noteLiveTone(claimant: number, tone: TxLiveTone): void
 }
 
@@ -178,4 +180,12 @@ export interface TxDvPort {
 	noteIdentity(claimant: number, identity: TxIdentity): void
 	noteRefusal(ref: string, code: TxRefusalCode): void
 	retireRun(run: string, atMs?: number): void
+}
+
+/** The read side a route takes (GET /api/transmissions/:ref): memory only, never a write. */
+export interface TxReadPort {
+	get(id: string, opts?: TxReadOptions): TxView | null
+	byAlias(alias: string, opts?: TxReadOptions): TxView | null
+	/** The group's transmissions still held, oldest first, at most `max`. */
+	groupMembers(groupId: string, max: number): readonly TxView[]
 }

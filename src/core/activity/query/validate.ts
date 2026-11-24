@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { TX_ID } from "../../transmissions/types.js"
 import { sha256Hex, canonicalJson } from "./canonical.js"
 import { ActivityQueryInvalidError } from "./errors.js"
 import { compileFtsMatch, type FtsLimits } from "./fts.js"
@@ -148,7 +149,12 @@ const querySchema = z
 						type: z.enum(REF_TYPES),
 						value: idSchema,
 					})
-					.strict(),
+					.strict()
+					// A txId ref is a transmission id (TX_ID) or nothing: a malformed one is a 400.
+					.refine(ref => ref.type !== "txId" || TX_ID.test(ref.value), {
+						message: "txId refs must be transmission ids",
+						path: ["value"],
+					}),
 			)
 			.max(64)
 			.optional(),

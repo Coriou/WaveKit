@@ -34,6 +34,7 @@ import {
 	type TxScannerPort,
 	type TxLiveDemodPort,
 	type TxDvPort,
+	type TxReadPort,
 	type TxState,
 	type TxView,
 } from "./types.js"
@@ -196,7 +197,7 @@ function sameChannel(
 }
 
 export class TransmissionRegistry
-	implements TxScannerPort, TxLiveDemodPort, TxDvPort
+	implements TxScannerPort, TxLiveDemodPort, TxDvPort, TxReadPort
 {
 	private readonly now: () => number
 	private readonly entries = new Map<string, Entry>()
@@ -219,6 +220,8 @@ export class TransmissionRegistry
 	private readonly artefactClosed = new Map<string, Entry>()
 	private readonly recent = new Map<string, Entry[]>()
 	private readonly aliasIndex = new Map<string, string[]>()
+	/** Held entries per group, oldest first. Bound: the entries map (≤ open + both rings). */
+	private readonly groups = new Map<string, string[]>()
 	private aliasPairs = 0
 	private timer: NodeJS.Timeout | null = null
 	private readonly counters: TxCounters = {
@@ -491,6 +494,18 @@ export class TransmissionRegistry
 		return e === undefined ? null : this.view(e, opts)
 	}
 
+	/** The group's transmissions the registry still holds, oldest first, at most `max`. */
+	groupMembers(groupId: string, max: number): readonly TxView[] {
+		const ids = this.groups.get(groupId) ?? []
+		const out: TxView[] = []
+		for (const id of ids) {
+			if (out.length >= max) break
+			const e = this.entries.get(id)
+			if (e !== undefined) out.push(this.view(e, {}))
+		}
+		return out
+	}
+
 	/** Every transmission an alias names (a file spanning several), oldest first. */
 	txIdsOf(alias: string): readonly string[] {
 		return [...(this.aliasIndex.get(alias) ?? [])]
@@ -642,6 +657,9 @@ export class TransmissionRegistry
 		}
 		if (e.ambiguous) this.counters.ambiguous++
 		this.entries.set(id, e)
+		const members = this.groups.get(e.groupId) ?? []
+		members.push(id)
+		this.groups.set(e.groupId, members)
 		const set = list ?? new Set<Entry>()
 		set.add(e)
 		this.open.set(sourceKey, set)
@@ -781,6 +799,12 @@ export class TransmissionRegistry
 	private evict(e: Entry, ring: Map<string, Entry>): void {
 		ring.delete(e.id)
 		this.entries.delete(e.id)
+		const members = this.groups.get(e.groupId)
+		if (members) {
+			const at = members.indexOf(e.id)
+			if (at >= 0) members.splice(at, 1)
+			if (members.length === 0) this.groups.delete(e.groupId)
+		}
 		e.state = "evicted"
 		this.counters.evicted++
 		for (const kind of ALIAS_KINDS)

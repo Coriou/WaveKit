@@ -221,3 +221,7 @@ shed for its own loss with a retry, and waiting at a paused receiver, with
 the pager's VFO channel there, ADS-B decoding with a stray pager decode stored at 1090.062 MHz in the channel's
 `activity` (`expect.latest`: an ADS-B decode, never the page), a synthetic 466 MHz pager and DMR, a pager restarting on its own,
 an unknown frequency, a proven discovery), each built through the same summary.
+
+- Transmissions (`transmissions.ts`): `GET /api/transmissions/:ref` answers `rec:` and `evt:` refs from the
+  mock's recordings and Activity rows with `id` null (the mock mints no transmission ids); a `tx_` or `obs:`
+  ref is 404, a malformed one 400. A digital call lists its file only when its row links it.

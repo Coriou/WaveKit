@@ -179,10 +179,7 @@ import type {
 } from "./core/bandplans/contract.js"
 import { createOperatorDataCommitSink } from "./operator-data/broadcast-adapter.js"
 import { createBandPlansCommitSink } from "./api/websocket/bandplans-broadcast-adapter.js"
-import {
-	createDsdFmeDecoder,
-	DSD_FME_CAPS,
-} from "./decoders/builtin/dsd-fme.js"
+import { DSD_FME_CAPS } from "./decoders/builtin/dsd-fme.js"
 import {
 	createMultimonDecoder,
 	MULTIMON_CAPS,
@@ -252,6 +249,7 @@ import { createStationEstimator } from "./core/station-estimate/provider.js"
 import { openStationService } from "./core/station/station-service.js"
 import { resolveSpectrumBinsCap } from "./core/spectrum/bin-cap.js"
 import { createRecordingInventory } from "./core/recordings/inventory.js"
+import { composeTransmissions } from "./core/transmissions/compose.js"
 import { wireRecordingCatalogue } from "./core/recordings/catalogue-wiring.js"
 import {
 	wireRecordingLinks,
@@ -1904,8 +1902,27 @@ async function main(): Promise<void> {
 		runtimeChannelizer = channelizer
 		decoderManager.setChannelizer(channels)
 
+		// Transmission identity: one in-memory registry; every producer and the route get its
+		// ports from this one composition. Registered here, its shutdown stop runs after the
+		// trackers and decoders registered later stop (LIFO); own(95) on a failed startup.
+		const txComposition = composeTransmissions({ logger })
+		own(95, () => txComposition.stop())
+		// A lost source closes its transmissions (`source-lost`).
+		own(95, txComposition.bindSources(sourceManager))
+		shutdown.register({
+			name: "transmissions",
+			handler: async () => {
+				txComposition.stop()
+			},
+			timeout: 1000,
+		})
+
 		// Step 6: Register built-in decoders with capabilities
-		decoderRegistry.register("dsd-fme", createDsdFmeDecoder, DSD_FME_CAPS)
+		decoderRegistry.register(
+			"dsd-fme",
+			txComposition.dsdFmeFactory,
+			DSD_FME_CAPS,
+		)
 		decoderRegistry.register(
 			"multimon-ng",
 			createMultimonDecoder,
@@ -2190,6 +2207,7 @@ async function main(): Promise<void> {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
 				settings: scannerSettings,
+				...txComposition.scanner,
 				learnedState: (store, gated, writable) =>
 					receiverState.attach(store, gated, writable),
 				...(iqCapture ? { iqCapture } : {}),
@@ -2277,6 +2295,8 @@ async function main(): Promise<void> {
 			})
 			scannerConstructionSettled = true
 			receiverState.setSpectrum(scanner.spectrum)
+			// A new spectrum epoch closes the older epochs' scanner transmissions (`retune`).
+			own(95, txComposition.bindSpectrum(scanner.spectrum))
 			// tuningUnproven: why the engine labels its newest samples unverified on a proven tuning.
 			const labelSpectrum = scanner.spectrum
 			sourceManager.tuningUnproven.setEngineResolver(
@@ -2812,6 +2832,7 @@ async function main(): Promise<void> {
 		const apiServer = new ApiServer(
 			{
 				bandPlans,
+				...txComposition.api,
 				...(access ? { access } : {}),
 				activity: activity.api,
 				station: stationService.identity(),
@@ -3187,6 +3208,7 @@ async function main(): Promise<void> {
 		// close. own(7) does the same on a failed startup (Activity is own(8)).
 		const transmissions = wireAnalogTransmissions({
 			source: liveDemod,
+			...txComposition.liveDemod,
 			frequencyAt: analogFrequencyAt(
 				tunerController,
 				sourceManager.tuningLedger,

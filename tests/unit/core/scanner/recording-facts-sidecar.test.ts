@@ -20,7 +20,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { CtcssBank } from "../../../../src/core/audio-tones/ctcss.js"
-import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
+import {
+	createRecordingInventory,
+	RECORDINGS_ITEMS_OF_KEYS_MAX,
+} from "../../../../src/core/recordings/inventory.js"
 import type {
 	AnalogCommitExtra,
 	AnalogMetadataAdapter,
@@ -850,11 +853,31 @@ describe("transmission ids of a kept file", () => {
 		for (const id of [TX_1, TX_2, TX_3])
 			expect(h.inventory.keysOfTx?.(id)).toEqual([item.key])
 		expect(h.inventory.keysOfTx?.("tx_01JTESTTX44444444444444444")).toEqual([])
+		// A key reads the item exactly as the listing serves it; an unknown key reads nothing.
+		expect(h.inventory.itemsOfKeys?.([item.key!, "scan:nope~x.wav"])).toEqual([
+			page.items[0],
+		])
+		// At most RECORDINGS_ITEMS_OF_KEYS_MAX keys are read: the key at the bound's last place
+		// is, one past it is not.
+		const filler = (n: number) => new Array<string>(n).fill("scan:nope~x.wav")
+		expect(
+			h.inventory.itemsOfKeys?.([
+				...filler(RECORDINGS_ITEMS_OF_KEYS_MAX - 1),
+				item.key!,
+			]),
+		).toHaveLength(1)
+		expect(
+			h.inventory.itemsOfKeys?.([
+				...filler(RECORDINGS_ITEMS_OF_KEYS_MAX),
+				item.key!,
+			]),
+		).toEqual([])
 		// Removed with the item.
 		await h.evidence.removeDiscovery(h.discoveryId)
 		h.inventory.invalidate?.()
 		await h.inventory.list({ limit: "200" })
 		expect(h.inventory.keysOfTx?.(TX_1)).toEqual([])
+		expect(h.inventory.itemsOfKeys?.([item.key!])).toEqual([])
 	})
 
 	it("a file without a transmission writes no tx members and its item reads null", async () => {

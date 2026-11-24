@@ -5,7 +5,12 @@
 import type { Logger } from "../../utils/logger.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import { TransmissionRegistry } from "./registry.js"
-import type { TxDvPort, TxLiveDemodPort, TxScannerPort } from "./types.js"
+import type {
+	TxDvPort,
+	TxLiveDemodPort,
+	TxReadPort,
+	TxScannerPort,
+} from "./types.js"
 
 export interface TransmissionWiringOptions {
 	now?: () => number
@@ -20,6 +25,8 @@ export interface TransmissionWiring {
 	readonly liveDemod: TxLiveDemodPort
 	/** Digital-voice calls (dsd-fme options `transmissions`). */
 	readonly dv: TxDvPort
+	/** GET /api/transmissions/:ref (ApiServer `transmissions`). */
+	readonly route: TxReadPort
 	closeSource(
 		sourceId: string | null,
 		reason: "retune" | "source-lost",
@@ -41,6 +48,7 @@ export function wireTransmissions(
 		scanner: registry,
 		liveDemod: registry,
 		dv: registry,
+		route: registry,
 		closeSource(sourceId, reason, filter) {
 			const n = registry.closeSource(sourceId, reason, undefined, filter)
 			if (n > 0) log.debug({ closed: n, reason }, "Transmissions closed")

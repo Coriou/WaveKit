@@ -1114,16 +1114,25 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	/**
 	 * The transmission's claim at its announcement: a continuation's carried claim names this
-	 * part too (an `evt:` alias), anything else claims (a tone split never joins its held part).
+	 * part too (an `evt:` alias) while its transmission is still open; one the registry already
+	 * closed (TX_MAX_MS) is never named again: the part claims fresh, `continues` the old id (its
+	 * group). Anything else claims (a tone split never joins its held part).
 	 */
 	private claimTx(open: OpenTransmission): void {
 		const port = this.txPort
 		if (port === undefined) return
 		const alias = `evt:${open.transmissionId}` as const
 		try {
+			let continues: string | null = null
 			if (open.tx !== null) {
-				port.attach(open.tx.txId, alias)
-				return
+				const carried = open.tx
+				if (port.openTxOf(carried.txId) === carried.txId) {
+					port.attach(carried.txId, alias)
+					return
+				}
+				// Its claimant went with the close; ending it again is only a counted late write.
+				open.tx = null
+				continues = carried.txId
 			}
 			const hz = open.frequency?.hz
 			const res = port.claim({
@@ -1133,6 +1142,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 				...(hz !== undefined && Number.isFinite(hz) ? { hz } : {}),
 				halfWidthHz: open.bandwidthHz / 2,
 				...(open.txSplitFrom !== null ? { splitFrom: open.txSplitFrom } : {}),
+				...(continues !== null ? { continues } : {}),
 				atMs: open.startedAtMs,
 				alias,
 			})

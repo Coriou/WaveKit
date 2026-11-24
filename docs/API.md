@@ -7922,6 +7922,19 @@ query, on the list page and on the facets result. On the facets result it
 covers the whole snapshot, also when the counts are truncated (`truncated`
 true: rows past the scan cap still decide it).
 
+#### Transmission ids
+
+A row that belongs to a transmission names it (`tx_` and a 26-character ULID): a live
+demodulator `analog-transmission` record has `payload.txId`, a kept scanner recording's
+`recording-change` record has `payload.txId` (the transmission open at the file's first sample),
+`payload.moreTxIds` (1 to 7 others open while the file was, never `txId`) and `payload.startedAt`
+(the file's own first sample, ISO; the observation's start stays `observationStartedAt`), and a
+digital-voice call row has `refs.txId` in its envelope. Each id is also a `txId` ref, so
+`refs=txId:<id>` (and the same ref in `POST /api/activity/facets` and the WebSocket query) finds a
+transmission's rows; a value that is not a transmission id is 400 `ACTIVITY_QUERY_INVALID`. Rows
+stored before have none of these. The id is read from the record (`GET /api/activity/:eventId`),
+not the summary.
+
 ### GET /api/activity/trails
 
 Bulk position trails: one trail per entity, built from the stored decoder
@@ -8375,6 +8388,52 @@ These frames are not "Invalid message format". The CLI never sends
 `activity:subscribe`. A frame with `channel: "activity"` or a type starting
 with `activity:` is ignored there and does not increment its invalid-frame
 count.
+
+## Transmissions
+
+### GET /api/transmissions/:ref
+
+One transmission, read only. `ref` is a transmission id (`tx_<ULID>`) or an alias of one of its
+artefacts: `rec:<recording key>`, `evt:<Activity event id>` or `obs:<scanner observation id>`
+(at most 520 characters, no whitespace). URL-encode it. In protected mode it is behind the same
+admission as `GET /api/recordings`.
+
+- 400 `TRANSMISSION_REF_INVALID`: not one of those forms.
+- 404 `TRANSMISSION_NOT_FOUND`: nothing the core holds names it.
+- 503 `TRANSMISSIONS_UNAVAILABLE`: the read failed.
+
+The core looks in its in-memory transmission registry first (it holds open transmissions and the
+recently closed ones). An alias it does not hold is resolved through its artefact: a `rec:` key's
+catalogue item, an `evt:` row's stored record. For the id it then reads the Activity rows on the
+`txId` ref (at most 16, of which at most 4 records are read) and the catalogue's files whose facts
+name it. An `obs:` alias resolves only while the registry holds its transmission, and a `tx_` id
+only while the registry, an Activity row or a kept file names it.
+
+**Response** (200), a `TransmissionDto` (`packages/api-types/src/transmissions.ts`):
+
+- `id`: the transmission id; null for an artefact stored before ids (reached by its alias).
+- `refs`: `recordingKeys`, `eventIds`, `observationId` (the earliest observation), `discoveryId`,
+  `ownerDiscoveryId`, `operationId`.
+- `kind` (`voice-analog`, `voice-digital`, `unknown`), `recordingKind` (the first listed file's
+  catalogue kind), `protocol`, `sourceId`, `channel` (`hz` the channel, `measuredHz` the recorded
+  centre, `name` null).
+- `startedAt`, `endedAt`, `durationMs`: the registry's, else the stored record's own fields.
+  `close` (`{ reason, complete }`) while the registry holds it, else null. `part` from the file.
+- `tone` (analog only): `heard`, `none` (only from the recorder) or `not-measured` with a `why`;
+  the recorder's tone wins over the live demodulator's.
+- `identity` (digital: `talkgroup`, `radio`), `verdict` (`speech`, `keptBy`, `itemCut`),
+  `admission` (the facts' numbers).
+- `artefacts`: the audio files the recordings routes serve (none in legacy mode). A digital call
+  lists its file only when the decoder linked it to the call row (a call it proved clear).
+- `privacy`: null for analog; for a digital call `clear` (its file is linked), `encrypted` or
+  `unproven` (never proven clear: no audio is listed).
+- `noAudioReason`: why nothing was recorded when the registry noted it (`refused:slots`,
+  `refused:cpu`, `encrypted`, `unclean`, `noise`).
+- `group`: `{ id, heuristic: false, members }`, the transmissions of the same channel run that
+  the registry still holds (at most 64); null once it no longer holds it.
+- `gone`: `activity` (a named row is gone) and `audio` (a named file is no longer listed).
+- `raw`: the catalogue item, stored record and facts as read (Details only).
+- `signal`, `sameTime` and `channelSummary` are null: not computed yet.
 
 ## WebSocket API
 

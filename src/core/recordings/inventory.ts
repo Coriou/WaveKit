@@ -120,6 +120,11 @@ export const RECORDINGS_FOLDER_NAMES_FACTOR = 2
  * many names: a 100 000-name sort would hold the event loop for tens of milliseconds.
  */
 export const RECORDINGS_SORT_NAMES_MAX = 4_096
+/**
+ * itemsOfKeys reads at most this many keys: a transmission names at most 15 file parts (30 min
+ * at 120 s) plus its start file, so 16 (TRANSMISSION_ARTEFACTS_MAX).
+ */
+export const RECORDINGS_ITEMS_OF_KEYS_MAX = 16
 /** The paced reconcile re-checks a large folder in chunks of this many names, pausing between. */
 export const RECORDINGS_RECONCILE_CHUNK_NAMES = 256
 /**
@@ -296,6 +301,11 @@ export interface RecordingInventory {
 	 * one of `moreTxIds`), rebuilt from the facts on every load and refresh; empty when none.
 	 */
 	keysOfTx?(txId: string): readonly string[]
+	/**
+	 * Memory only: the listed items of these keep keys, as a listing serves them (at most
+	 * RECORDINGS_ITEMS_OF_KEYS_MAX keys read; a key not listed now is left out). Never throws.
+	 */
+	itemsOfKeys?(keys: readonly string[]): readonly RecordingInventoryItem[]
 	/** Writers: these discoveries' folders changed (finalize, delete, retention). */
 	touchDiscoveries?(ids: readonly string[]): Promise<void>
 	/** Writers: a dsd-fme call of `decoderId` ended (no id: every dsd-fme directory). */
@@ -922,7 +932,8 @@ export function createRecordingInventory(
 	}
 	const byId = new Map<string, IndexedEntry[]>()
 	/** Indexed copies per keep key (hasKey). */
-	const byKey = new Map<string, number>()
+	/** Indexed copies per keep key (every copy, listed or not). */
+	const byKey = new Map<string, Set<IndexedEntry>>()
 	/** Indexed scanner analog copies per receipt observation (roll-over parts). */
 	const byObservation = new Map<string, IndexedEntry[]>()
 	/**
@@ -1094,7 +1105,11 @@ export function createRecordingInventory(
 			set.add(e)
 			byTx.set(txId, set)
 		}
-		if (e.key !== null) byKey.set(e.key, (byKey.get(e.key) ?? 0) + 1)
+		if (e.key !== null) {
+			const copies = byKey.get(e.key) ?? new Set<IndexedEntry>()
+			copies.add(e)
+			byKey.set(e.key, copies)
+		}
 		const copies = byId.get(e.item.id) ?? []
 		const before = winnerOf(copies)
 		copies.push(e)
@@ -1126,9 +1141,9 @@ export function createRecordingInventory(
 		if (i >= 0) {
 			copies.splice(i, 1)
 			if (e.key !== null) {
-				const left = (byKey.get(e.key) ?? 1) - 1
-				if (left > 0) byKey.set(e.key, left)
-				else byKey.delete(e.key)
+				const left = byKey.get(e.key)
+				left?.delete(e)
+				if (left?.size === 0) byKey.delete(e.key)
 			}
 		}
 		if (copies.length === 0) byId.delete(e.item.id)
@@ -1823,11 +1838,13 @@ export function createRecordingInventory(
 		return view
 	}
 
-	function page(q: NormalisedQuery): RecordingInventoryPage {
-		const v = currentView()
+	/**
+	 * The listing's per-read helpers: owners cached per read, the protection answer, and the
+	 * listed item as a page serves it (roll-over parts computed once per observation).
+	 */
+	function itemReader(counts: Counts) {
 		const protection = options.protection
 		const eventIdOf = options.activityEventId
-		const counts = newCounts()
 		const owners = new Map<string, Owner | null>()
 		const ownerOf = (folderId: string): Owner | null => {
 			const known = owners.get(folderId)
@@ -1845,6 +1862,80 @@ export function createRecordingInventory(
 				return true
 			}
 		}
+		// Roll-over parts, per observation of a listed analog file: computed once per read.
+		const parts = new Map<string, Map<IndexedEntry, PartOf>>()
+		const partsOf = (e: IndexedEntry): PartOf | null => {
+			const observationId = e.receipt?.observationId ?? null
+			if (observationId === null) return null
+			let group = parts.get(observationId)
+			if (!group) {
+				const listed = (byObservation.get(observationId) ?? []).filter(
+					f => f.listed,
+				)
+				group = new Map<IndexedEntry, PartOf>()
+				for (const [f, at] of recordingParts(
+					listed.map(f => ({
+						mtimeMs: f.mtimeMs,
+						id: f.item.id,
+						cut: f.receipt?.cut ?? null,
+						f,
+					})),
+				))
+					group.set(f.f, at)
+				parts.set(observationId, group)
+			}
+			return group.get(e) ?? null
+		}
+		const itemOf = (
+			e: IndexedEntry,
+			kept: boolean | undefined,
+		): RecordingInventoryItem => {
+			const owner = e.discoveryId === null ? null : ownerOf(e.discoveryId)
+			const item: RecordingInventoryItem = {
+				...e.item,
+				// In whole Hz, rounded as the Activity row's channel is (activityChannelOf).
+				frequencyHz:
+					owner?.frequencyHz == null ? null : Math.round(owner.frequencyHz),
+				key: e.key ?? e.item.id,
+				ownerDiscoveryId: owner?.id ?? null,
+			}
+			if (e.item.kind === "scanner-analog") {
+				const at = partsOf(e)
+				item.cut = e.receipt?.cut ?? null
+				item.part = at?.part ?? null
+				item.parts = at?.parts ?? null
+			}
+			// What the recorder knew at the finish (the receipt), unknown for every other kind.
+			const receipt = e.item.kind === "scanner-analog" ? e.receipt : null
+			item.startedAt = receipt?.startedAt ?? null
+			item.observationId = receipt?.observationId ?? null
+			item.speech = receipt?.speech ?? "unchecked"
+			item.keptBy = receipt?.keptBy ?? null
+			item.facts = receipt?.facts ?? null
+			// The transmission open at the file's first sample (its facts); null: unknown.
+			if (e.item.kind === "scanner-analog")
+				item.txId = receipt?.facts?.txId ?? null
+			if (kept !== undefined) item.kept = kept
+			if (eventIdOf !== undefined) {
+				let eventId: string | null = null
+				try {
+					const found = eventIdOf(item.key ?? item.id)
+					eventId = typeof found === "string" ? found : null
+				} catch {
+					eventId = null
+				}
+				item.activityEventId = eventId
+			}
+			return item
+		}
+		return { ownerOf, keptOf, itemOf }
+	}
+
+	function page(q: NormalisedQuery): RecordingInventoryPage {
+		const v = currentView()
+		const protection = options.protection
+		const counts = newCounts()
+		const { ownerOf, keptOf, itemOf } = itemReader(counts)
 		const hzOf = (e: IndexedEntry): number | null =>
 			e.discoveryId === null
 				? null
@@ -1969,69 +2060,7 @@ export function createRecordingInventory(
 			}
 		}
 		const last = selected[selected.length - 1]
-		// Roll-over parts, per observation of a listed analog file: computed once per listing.
-		const parts = new Map<string, Map<IndexedEntry, PartOf>>()
-		const partsOf = (e: IndexedEntry): PartOf | null => {
-			const observationId = e.receipt?.observationId ?? null
-			if (observationId === null) return null
-			let group = parts.get(observationId)
-			if (!group) {
-				const listed = (byObservation.get(observationId) ?? []).filter(
-					f => f.listed,
-				)
-				group = new Map<IndexedEntry, PartOf>()
-				for (const [f, at] of recordingParts(
-					listed.map(f => ({
-						mtimeMs: f.mtimeMs,
-						id: f.item.id,
-						cut: f.receipt?.cut ?? null,
-						f,
-					})),
-				))
-					group.set(f.f, at)
-				parts.set(observationId, group)
-			}
-			return group.get(e) ?? null
-		}
-		const items = selected.map(({ e, kept }) => {
-			const owner = e.discoveryId === null ? null : ownerOf(e.discoveryId)
-			const item: RecordingInventoryItem = {
-				...e.item,
-				// In whole Hz, rounded as the Activity row's channel is (activityChannelOf).
-				frequencyHz:
-					owner?.frequencyHz == null ? null : Math.round(owner.frequencyHz),
-				key: e.key ?? e.item.id,
-				ownerDiscoveryId: owner?.id ?? null,
-			}
-			if (e.item.kind === "scanner-analog") {
-				const at = partsOf(e)
-				item.cut = e.receipt?.cut ?? null
-				item.part = at?.part ?? null
-				item.parts = at?.parts ?? null
-			}
-			// What the recorder knew at the finish (the receipt), unknown for every other kind.
-			const receipt = e.item.kind === "scanner-analog" ? e.receipt : null
-			item.startedAt = receipt?.startedAt ?? null
-			item.observationId = receipt?.observationId ?? null
-			item.speech = receipt?.speech ?? "unchecked"
-			item.keptBy = receipt?.keptBy ?? null
-			item.facts = receipt?.facts ?? null
-			// The transmission open at the file's first sample (its facts); null: unknown.
-			if (e.item.kind === "scanner-analog")
-				item.txId = receipt?.facts?.txId ?? null
-			if (kept !== undefined) item.kept = kept
-			if (eventIdOf !== undefined) {
-				let eventId: string | null = null
-				try {
-					const found = eventIdOf(item.key ?? item.id)
-					eventId = typeof found === "string" ? found : null
-				} catch {
-					eventId = null
-				}
-				item.activityEventId = eventId
-			}
-			return item
-		})
+		const items = selected.map(({ e, kept }) => itemOf(e, kept))
 		if (counts.lookupErrors > 0) logSkipped(counts)
 		return {
 			items,
@@ -2485,6 +2514,22 @@ export function createRecordingInventory(
 			return () => {
 				listeners.delete(listener)
 			}
+		},
+
+		itemsOfKeys(keys) {
+			const out: RecordingInventoryItem[] = []
+			const counts = newCounts()
+			const { keptOf, itemOf } = itemReader(counts)
+			for (const key of keys.slice(0, RECORDINGS_ITEMS_OF_KEYS_MAX)) {
+				for (const e of byKey.get(key) ?? []) {
+					// Only what a listing serves: the listed copy of its id.
+					if (!e.listed) continue
+					out.push(itemOf(e, keptOf(e)))
+					break
+				}
+			}
+			if (counts.lookupErrors > 0) logSkipped(counts)
+			return out
 		},
 
 		keysOfTx(txId) {

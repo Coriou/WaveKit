@@ -10,6 +10,7 @@ import type { ToneDetectorPort } from "../../../src/core/analog-transmission.js"
 import { toActivityPayload } from "../../../src/core/analog-transmission.js"
 import {
 	TX_ID,
+	TX_MAX_MS,
 	TransmissionRegistry,
 } from "../../../src/core/transmissions/index.js"
 import { hygieneHarness } from "./analog-transmission-hygiene-fakes.js"
@@ -134,6 +135,36 @@ describe("live demodulator transmission ids", () => {
 		expect(v.close).toBe("max-duration")
 		expect(registry.stats().claimants).toBe(0)
 		h.tracker.stop()
+	})
+
+	it("a continuation of a transmission the registry closed at TX_MAX_MS claims fresh, continuing the old id", () => {
+		const registry = new TransmissionRegistry()
+		const h = txHarness(registry, 2_000)
+		// The first part is open and announced; the sweep then passes the registry's own bound.
+		h.talk(1, 1_500, false)
+		const first = h.tracker.current()?.txId
+		expect(first).toMatch(TX_ID)
+		registry.sweep(h.now() + TX_MAX_MS)
+		const old = registry.get(first!)!
+		expect(old.state).toBe("closed")
+		expect(old.close).toBe("max-duration")
+		// The tracker's own max-duration close (2 s) opens a continuation on the carried claim.
+		h.talk(1, 2_000)
+		h.advance(5_000)
+		h.tracker.stop()
+		expect(h.rows.length).toBeGreaterThanOrEqual(2)
+		expect(h.rows[0]!.txId).toBe(first)
+		const next = h.rows[1]!.txId
+		expect(next).toMatch(TX_ID)
+		expect(next).not.toBe(first)
+		// the closed entry is frozen: the continuation's alias went to the fresh one
+		expect(registry.get(first!)!.aliases.evt).toEqual([
+			`evt:${h.rows[0]!.transmissionId}`,
+		])
+		const fresh = registry.get(next!)!
+		expect(fresh.aliases.evt).toContain(`evt:${h.rows[1]!.transmissionId}`)
+		expect(fresh.groupId).toBe(old.groupId)
+		expect(registry.stats().claimants).toBe(0)
 	})
 
 	it("a DCS code is noted on the entry as the heard live tone", () => {

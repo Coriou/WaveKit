@@ -25,6 +25,7 @@ import {
 import { parseDecimalInteger } from "../../core/activity/query/validate.js"
 import { withActivityClient } from "../../core/activity/query/service.js"
 import type { ActivityUnavailableState } from "../../core/activity/runtime.js"
+import { TX_ID } from "../../core/transmissions/types.js"
 import { errorResponseSchema, looseObjectSchema } from "./scanner-schemas.js"
 import {
 	validationMessage,
@@ -761,7 +762,8 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 			if (
 				colon <= 0 ||
 				!REF_TYPES.has(type as ActivityRefType) ||
-				value.length === 0
+				value.length === 0 ||
+				(type === "txId" && !TX_ID.test(value))
 			) {
 				throw new ActivityQueryError(
 					"refs entries must be type:value",

@@ -28,6 +28,8 @@ import {
 import type { RecordingInventory } from "../core/recordings/inventory.js"
 import type { RecordingKeepService } from "../core/recordings/contract.js"
 import { recordingRoutes } from "./routes/recordings.js"
+import { transmissionRoutes } from "./routes/transmissions.js"
+import type { TxReadPort } from "../core/transmissions/types.js"
 import type { DecoderSettingsService } from "../decoders/settings/contract.js"
 import { stationRoutes } from "./routes/station.js"
 import { stationEstimateRoutes } from "./routes/station-estimate.js"
@@ -65,7 +67,7 @@ import {
 	type ActivityRuntime,
 	type ActivityUnavailableState,
 } from "../core/activity/runtime.js"
-import { activityRoutes } from "./routes/activity.js"
+import { activityClientKey, activityRoutes } from "./routes/activity.js"
 import { createActivitySubscriptions } from "./activity-subscriptions.js"
 import type { ActivitySubscriptionHub } from "./activity-subscriptions.js"
 import {
@@ -289,6 +291,11 @@ export interface ApiServerDependencies {
 	audioConfig?: AudioConfig | undefined
 	/** Omitted means Activity is disabled: routes 404 and the socket says so. */
 	activity?: ActivityRuntime
+	/**
+	 * The transmission registry's read side: GET /api/transmissions/:ref mounts only with it.
+	 * Its audio artefacts are listed only where the recordings routes mount.
+	 */
+	transmissions?: TxReadPort | undefined
 }
 
 /**
@@ -307,6 +314,7 @@ export class ApiServer {
 	private readonly decoderSettings: DecoderSettingsService | undefined
 	private readonly recordingInventory: RecordingInventory | undefined
 	private readonly recordingKeeps: RecordingKeepService | undefined
+	private readonly transmissions: TxReadPort | undefined
 	private readonly getConfig: (() => Config) | undefined
 	private readonly storageReport: StorageReportProvider | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
@@ -387,6 +395,7 @@ export class ApiServer {
 		this.decoderSettings = dependencies.decoderSettings
 		this.recordingInventory = dependencies.recordingInventory
 		this.recordingKeeps = dependencies.recordingKeeps
+		this.transmissions = dependencies.transmissions
 		this.getConfig = dependencies.getConfig
 		this.storageReport = dependencies.storageReport
 		this.regionalRegistry = dependencies.regionalRegistry
@@ -1225,6 +1234,10 @@ export class ApiServer {
 						description: "Browser pairing, sessions and devices",
 					},
 					{ name: "recordings", description: "Recording inventory" },
+					{
+						name: "transmissions",
+						description: "One transmission by id or artefact alias",
+					},
 					{ name: "sources", description: "SDR source management" },
 					{ name: "decoders", description: "Decoder management" },
 					{ name: "aircraft", description: "Aircraft tracking endpoints" },
@@ -1811,6 +1824,37 @@ export class ApiServer {
 				? { stats: () => activityRuntime.stats() }
 				: {}),
 		})
+
+		// One transmission by id or alias: read only; behind the recordings admission when access
+		// is on; audio only where the recordings routes mount, Activity only while it is ready.
+		if (this.transmissions) {
+			const recordingsMounted =
+				this.recordingInventory !== undefined &&
+				this.accessController !== undefined &&
+				RECORDINGS_REQUIRES_ACCESS
+			await this.app.register(transmissionRoutes, {
+				transmissions: this.transmissions,
+				...(this.activityReady ? { activity: this.activityService } : {}),
+				activityClientKey: request =>
+					activityClientKey(
+						request,
+						this.accessController
+							? {
+									principalId: r => this.accessController?.principalOf(r)?.id,
+								}
+							: undefined,
+					),
+				...(recordingsMounted && this.recordingInventory
+					? { inventory: this.recordingInventory }
+					: {}),
+				...(this.accessController
+					? {
+							authorize: request =>
+								this.accessController!.authorizeMetadataMutation(request),
+						}
+					: {}),
+			})
+		}
 
 		// One compact read for agents, under root admission like the routes it summarizes
 		await this.app.register(agentStatusRoutes, {
