@@ -36,7 +36,9 @@ describe("WidebandAnalogRecorder", () => {
 		const op = h.ops[0]!
 		expect(op.cut).toBe("completed")
 		expect(op.outcome).toBe("finalized")
-		expect(Math.abs(op.frames - 8 * (300 + 2000 + 2000))).toBeLessThanOrEqual(
+		// The pre-roll is static before the carrier keys: the head trim (onset-trim.ts) keeps 150 ms
+		// of it before the onset (300 − 150 ms cut).
+		expect(Math.abs(op.frames - 8 * (150 + 2000 + 2000))).toBeLessThanOrEqual(
 			8 * 30,
 		)
 		expect(op.input.binding).toMatchObject({

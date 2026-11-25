@@ -292,6 +292,29 @@ describe("kept analog file: facts sidecar round-trip", () => {
 	})
 })
 
+describe("receipt headTrimmedMs (the recorder's onset trim)", () => {
+	it("2 000 ms (the search bound) is kept in the receipt, 2 001 ms is dropped and the finish still succeeds", async () => {
+		const h = await harness()
+		const trimmed = async (headTrimmedMs: number) => {
+			const op = h.evidence.beginAnalog({
+				discoveryId: h.discoveryId,
+				observationId: "o1",
+				binding: h.binding,
+			})
+			await op.ready
+			await op.push(new Int16Array(8000).fill(900))
+			return op.finish("completed", { keptBy: "prior-none", headTrimmedMs })
+		}
+		const kept = await trimmed(2_000)
+		expect(kept.outcome).toBe("finalized")
+		expect(kept.headTrimmedMs).toBe(2_000)
+		const dropped = await trimmed(2_001)
+		expect(dropped.outcome).toBe("finalized")
+		expect(dropped.keptBy).toBe("prior-none")
+		expect(dropped).not.toHaveProperty("headTrimmedMs")
+	})
+})
+
 describe("missing or malformed sidecar never breaks serving the WAV", () => {
 	it.each([
 		["missing", null],

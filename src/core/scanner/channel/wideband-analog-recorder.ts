@@ -116,6 +116,13 @@ import {
 	VOICE_WINDOW_BLOCKS,
 } from "./voice-activity.js"
 import { PcmQueue } from "./pcm-queue.js"
+import { NoiseEvidenceBudget } from "./noise-evidence.js"
+import {
+	fadeIn,
+	ONSET_FADE_SAMPLES,
+	onsetSearchSamples,
+	onsetTrim,
+} from "./onset-trim.js"
 import { RecorderDecisions, type ReceiptDetail } from "./recorder-decisions.js"
 import {
 	bindingKey,
@@ -152,6 +159,7 @@ import {
 	SPEECH_WINDOW_FRAMES,
 	SpeechContentMeter,
 	speechReadings,
+	ADMISSION_PROVEN_VOICE,
 	admissionNoise,
 	strongSpeech,
 } from "./speech-content.js"
@@ -1252,6 +1260,16 @@ interface FileState {
 	cut: AnalogCut
 	/** The ring did not reach the planned start: the pre-roll or onset is missing. */
 	headCut: boolean
+	/**
+	 * Static trimmed off the file's head before its first write (onset-trim.ts, trimHead), ms;
+	 * null until that first write. `startSample` moved past it, so the file's first written
+	 * sample is its start.
+	 */
+	headTrimmedMs: number | null
+	/** Input samples the head trim moved `startSample` by (0: none): its opening start is startSample − this. */
+	headTrimSamples: number
+	/** An input gap was filled with silence in it (gapTo): its head is never trimmed (gap frame indexes). */
+	inputGap: boolean
 	ready: boolean
 	failed: boolean
 	readonly queue: PcmQueue
@@ -1715,6 +1733,8 @@ export class WidebandAnalogRecorder {
 	private readonly refused = new Set<string>()
 	/** Decode- or channel-tier-backed digital classes seen per live discovery (bounded). */
 	private readonly digitalSeen = new DigitalClassLedger()
+	/** Noise files kept as evidence per discovery on proven-voice channels (noise-evidence.ts). */
+	private readonly noiseEvidence = new NoiseEvidenceBudget()
 	/** Provisional files (finishOrHold), oldest first, with their session and grace cancel. */
 	private readonly held = new Map<
 		FileState,
@@ -3704,6 +3724,9 @@ export class WidebandAnalogRecorder {
 			endSample: null,
 			cut: "completed",
 			headCut: false,
+			headTrimmedMs: null,
+			headTrimSamples: 0,
+			inputGap: false,
 			ready: false,
 			failed: false,
 			queue: new PcmQueue(),
@@ -4564,6 +4587,7 @@ export class WidebandAnalogRecorder {
 				file.headCut = true
 			return
 		}
+		file.inputGap = true
 		const gap: AnalogGap = {
 			cause: "input-gap",
 			inputSampleIndex: s.next,
@@ -4894,10 +4918,24 @@ export class WidebandAnalogRecorder {
 				? Number.POSITIVE_INFINITY
 				: this.framesAt(s, file, file.endSample),
 		)
-		const budget = Math.min(PUSH_FRAMES, allowed - written)
-		if (budget <= 0) return
+		if (Math.min(PUSH_FRAMES, allowed - written) <= 0) return
 		const handle = file.handle
 		if (handle === null) return
+		if (file.headTrimmedMs === null) {
+			// The trim reads its whole search window: the first write waits until the queue holds it
+			// (at most onsetSearchSamples − the 1 s holdback more, once per file) or the file ends.
+			if (
+				file.queue.length <
+					onsetSearchSamples(this.deps.settings().preRollMs) &&
+				file.endSample === null &&
+				!file.finishing
+			)
+				return
+			this.trimHead(s, file)
+			this.flush(s, file, until)
+			return
+		}
+		const budget = Math.min(PUSH_FRAMES, allowed - written)
 		const chunk = file.queue.take(budget)
 		file.speech.push(chunk)
 		file.writing = true
@@ -4921,6 +4959,58 @@ export class WidebandAnalogRecorder {
 				else handle.cancel("cancelled")
 			},
 		)
+	}
+
+	/**
+	 * Once per file, before its first write (onset-trim.ts): drops the open-squelch static before
+	 * the carrier quiets from its head, keeping at most 150 ms of it before the measured onset, and
+	 * fades the first 20 ms written in (also with no trim). A roll-over part (it continues a voice) is
+	 * neither trimmed nor faded; a file holding a filled input gap (gap frame indexes already given)
+	 * or one whose head the ring no longer held (headCut: its onset may be gone) is only faded. The
+	 * dropped frames leave the queue and, when not judged yet, `unjudged` (the gate and the tone
+	 * bank never hear them; what they already heard stays heard); the speech measure (`speech`) is
+	 * fed at the write, so it never hears them. `startSample` moves past them, so `startedAt`, the
+	 * copy fingerprint and its copy span (captured again here when the file already ended) are the
+	 * first written sample; the decode check and the snapshot class read the opening start. One
+	 * pass over at most ONSET_MAX_SEARCH_SAMPLES samples.
+	 */
+	private trimHead(s: Session, file: FileState): void {
+		let cut = 0
+		if (!file.rollOver && !file.inputGap && !file.headCut) {
+			const search = onsetSearchSamples(this.deps.settings().preRollMs)
+			cut = onsetTrim(file.queue.peek(search), search).cutSamples
+		}
+		if (cut > 0) {
+			file.queue.take(cut)
+			file.frames -= cut
+			let unjudged = cut - file.judged
+			file.judged = Math.max(0, file.judged - cut)
+			while (unjudged > 0 && file.unjudged.length > 0) {
+				const head = file.unjudged[0]!
+				const n = Math.min(head.pcm.length, unjudged)
+				if (n === head.pcm.length) file.unjudged.shift()
+				else
+					file.unjudged[0] = {
+						pcm: head.pcm.subarray(n),
+						tone: head.tone?.subarray(n) ?? null,
+						gap: head.gap === true,
+					}
+				unjudged -= n
+			}
+			const moved = (cut * s.fs) / ANALOG_AUDIO_RATE_HZ
+			file.startSample += moved
+			file.headTrimSamples = moved
+			// A file that ended before its first write had its copy span taken from where it opened:
+			// taken again from its first written sample, the fingerprint's start (noteKept).
+			if (file.copyEnd !== null) this.captureCopyEnd(s, file, file.copyEnd)
+		}
+		file.headTrimmedMs = Math.round((cut * 1000) / ANALOG_AUDIO_RATE_HZ)
+		// A roll-over part continues the voice of the part before it: no fade (no click to hide).
+		if (file.rollOver) return
+		const head = file.queue.take(
+			Math.min(ONSET_FADE_SAMPLES, file.queue.length),
+		)
+		file.queue.unshift(fadeIn(head))
 	}
 
 	/** The file reached its end sample: judge and write what belongs to it, then finish it. */
@@ -5280,11 +5370,13 @@ export class WidebandAnalogRecorder {
 		}
 		const [prior, backedClass, now] = this.priorOf(s.discoveryId)
 		const room = provisionalRoom(this.limitOn(s.sourceId, s.fs).limit)
+		// Where the file opened (before its head trim): a decode of the trimmed head is its own too.
+		const opened = file.startSample - file.headTrimSamples
 		const decodedOwn = fileDecodedOwn(
 			notVoiceDecode(this.deps.decodedLabel, s.discoveryId),
 			s.owner,
-			this.airStart(s.engine, s.fs, file.startSample),
-			this.wallAt(s.engine, s.fs, Math.max(s.onset, file.startSample)),
+			this.airStart(s.engine, s.fs, opened),
+			this.wallAt(s.engine, s.fs, Math.max(s.onset, opened)),
 		)
 		// A classed session's roll-over: only a no-voice channel's speech check (finishPath).
 		const speech = file.classTone === null ? file.speech.result() : null
@@ -5292,22 +5384,29 @@ export class WidebandAnalogRecorder {
 		const admission = {
 			enabled: this.deps.settings().admission?.enabled ?? true,
 			noise: speech === null ? null : admissionNoise(speech),
+			periodicShare: speech === null ? null : speech.periodicShare,
+			// The partial-window floor (47 frames), read only on a proven-voice channel (finishPath).
+			partialNoise:
+				speech === null ? null : admissionNoise(speech, ADMISSION_PROVEN_VOICE),
 		}
+		const clockNow = this.clock()
 		const path = this.deps.voicePrior
 			? finishPath({
 					prior,
 					backedClass,
 					ownTone: file.toneHz !== null || file.toneCarried,
+					// Where the file opened (before its head trim): when it opened decides, not its first write.
 					snapshotClassed:
 						s.classed &&
 						!s.toneOnly &&
-						file.startSample < s.strongFrom + s.vetoFrom - s.onset,
+						opened < s.strongFrom + s.vetoFrom - s.onset,
 					decodedOwn,
 					...joinedVoiceOf(s, file),
 					...speechReadings(speech),
 					rollOver: file.rollOver && s.classed,
 					ownObservationId: s.owner,
 					admission,
+					noiseEvidence: this.noiseEvidence.room(s.discoveryId, clockNow),
 					final: final || room === 0,
 					now,
 				})
@@ -5336,7 +5435,13 @@ export class WidebandAnalogRecorder {
 			const mine = [...this.held].filter(([, h]) => h.s.sourceId === s.sourceId)
 			if (mine.length > room) this.release(mine[0]![0])
 		} else {
-			if (path) this.log.info(keptLog(path, file, s), "Analog file kept")
+			if (path?.reason === "noise-evidence")
+				this.noiseEvidence.spend(s.discoveryId, clockNow)
+			if (path)
+				this.log.info(
+					{ ...keptLog(path, file, s), headTrimmedMs: file.headTrimmedMs ?? 0 },
+					"Analog file kept",
+				)
 			// The verdict it was kept on, for its receipt (read-only: nothing decides on it),
 			// computed before the finish is asked so nothing here can throw past it.
 			const startedAt = wallIso(this.wallAt(s.engine, s.fs, file.startSample))
@@ -5350,6 +5455,7 @@ export class WidebandAnalogRecorder {
 						? path.speechHeard
 						: speechReadings(speech).speechHeard,
 					...(startedAt === null ? {} : { startedAt }),
+					headTrimmedMs: file.headTrimmedMs ?? 0,
 					...(path !== null && speech !== null
 						? { admission: noiseFacts(path, speech, s) }
 						: {}),
@@ -5419,7 +5525,10 @@ export class WidebandAnalogRecorder {
 	 * opened inside it and nothing of it precedes the join, so it ends at its start and is dropped
 	 * as empty; when the joined signal had ended by then (or that is unknown), the file holds no
 	 * audio of it and ends now, judged as usual (a voice after a short digital burst is never lost).
-	 * Files before the current one are never touched.
+	 * Files before the current one are never touched. A trimmed file (trimHead) is compared from
+	 * its first written sample, not where it opened: a join inside the trimmed head comes before
+	 * every sample the file holds (its static was cut), so the file opened inside the joined signal
+	 * as far as its audio goes; an end there would precede its first written sample.
 	 */
 	private endSession(
 		s: Session,

@@ -91,10 +91,12 @@ describe("WidebandAnalogRecorder holding a pending retune", () => {
 		const op = h.ops[0]!
 		expect(op.outcome).toBe("finalized")
 		expect(op.cut).toBe("epoch-changed")
-		// Pre-roll 300 ms + 3 s of transmission, ended at the command: nothing of the settle.
+		// Pre-roll 300 ms + 3 s of transmission, ended at the command: nothing of the settle. The
+		// onset trim cuts the static pre-roll to its last 150 ms (1 200 frames).
 		const fileStart = onset - Math.round(0.3 * FS)
-		expect(op.frames).toBeLessThanOrEqual(frames(at - fileStart))
-		expect(op.frames).toBeGreaterThanOrEqual(frames(at - fileStart) - 8 * 60)
+		const want = frames(at - fileStart) - 1_200
+		expect(op.frames).toBeLessThanOrEqual(want)
+		expect(op.frames).toBeGreaterThanOrEqual(want - 8 * 60)
 	}, 120_000)
 
 	it(`a session caught up to the command is never ended by the hold cap: held past maxBacklog it stays open, and ends at the command when the retune starts`, async () => {

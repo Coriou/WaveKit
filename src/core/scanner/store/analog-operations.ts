@@ -19,6 +19,7 @@ import { dirname, join, resolve, sep } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
 import { isTxId } from "../../transmissions/types.js"
+import { ONSET_MAX_SEARCH_MS } from "../channel/onset-trim.js"
 import {
 	WavFileWriter,
 	wavHeader,
@@ -341,6 +342,12 @@ export const AnalogReceiptSchema = z
 		speechHeard: z.boolean().nullable().optional(),
 		/** Wall time of the file's first sample (ISO); absent when not given and on older receipts. */
 		startedAt: z.string().datetime().optional(),
+		/**
+		 * Static the recorder trimmed off the file's head before its first sample
+		 * (AnalogFinishFacts.headTrimmedMs, ms; onset-trim.ts bounds it under its 2 000 ms search);
+		 * absent when not given and on older receipts.
+		 */
+		headTrimmedMs: count.max(ONSET_MAX_SEARCH_MS).optional(),
 		closure: z.enum(["closed", "incomplete", "unknown"]),
 		outcome: z.enum(["finalized", "aborted", "failed"]),
 		artifact: z.string().max(512).nullable(),
@@ -524,6 +531,11 @@ export interface AnalogFinishFacts {
 	/** Wall time of the file's first sample, ISO. Receipt `startedAt`. */
 	readonly startedAt?: string
 	/**
+	 * Static trimmed off the file's head before that first sample (ms, the recorder's onset trim).
+	 * Receipt `headTrimmedMs`; a read-only pass-through, dropped when malformed.
+	 */
+	readonly headTrimmedMs?: number
+	/**
 	 * The recording admission's measured numbers (recording-verdict.ts noiseFacts, the same as a
 	 * noise file's quarantine sidecar). Written to the kept file's facts sidecar
 	 * (recording-facts.ts), never to the receipt; a read-only pass-through, dropped when malformed.
@@ -544,18 +556,22 @@ export interface AnalogFinishFacts {
 	 */
 	readonly txIds?: readonly string[]
 }
+/** The receipt's verdict members a first finish gives (verdictOf). */
+type AnalogVerdict = Pick<
+	AnalogReceipt,
+	"keptBy" | "speechHeard" | "startedAt" | "headTrimmedMs"
+>
 /**
  * The receipt's verdict members of finish facts: each one kept only when the receipt schema takes
  * it, so a malformed fact is left out (unknown) and never fails the finish.
  */
-function verdictOf(
-	facts: AnalogFinishFacts,
-): Pick<AnalogReceipt, "keptBy" | "speechHeard" | "startedAt"> {
+function verdictOf(facts: AnalogFinishFacts): AnalogVerdict {
 	const shape = AnalogReceiptSchema.innerType().shape
 	const out: {
 		keptBy?: string
 		speechHeard?: boolean | null
 		startedAt?: string
+		headTrimmedMs?: number
 	} = {}
 	if (
 		shape.keptBy.safeParse(facts.keptBy).success &&
@@ -572,6 +588,11 @@ function verdictOf(
 		facts.startedAt !== undefined
 	)
 		out.startedAt = facts.startedAt
+	if (
+		shape.headTrimmedMs.safeParse(facts.headTrimmedMs).success &&
+		facts.headTrimmedMs !== undefined
+	)
+		out.headTrimmedMs = facts.headTrimmedMs
 	return out
 }
 export interface AnalogHandle {
@@ -833,8 +854,8 @@ interface Operation {
 	noise: NoiseQuarantineFacts | null
 	/** The first finish's AnalogFinishFacts.cutActive; null: none given. */
 	cutActive: boolean | null
-	/** The first finish's verdict facts (keptBy, speechHeard, startedAt) as given and valid. */
-	verdict: Pick<AnalogReceipt, "keptBy" | "speechHeard" | "startedAt">
+	/** The first finish's verdict facts (keptBy, speechHeard, startedAt, headTrimmedMs) as given and valid. */
+	verdict: AnalogVerdict
 	/** The first finish's AnalogFinishFacts.admission as given (validated when the sidecar is written). */
 	admission: unknown
 	/** The first finish's AnalogFinishFacts.tone as given; undefined: none (validated on write). */

@@ -110,9 +110,9 @@ describe("WidebandAnalogRecorder on a congested event loop", () => {
 		expect(op.outcome).toBe("finalized")
 		expect(op.cut).toBe("completed")
 		expect(op.gaps).toBe(0)
-		// Pre-roll 300 ms + 28 s + hang 2 s at 8 frames per ms.
+		// Pre-roll (300 ms of static, trimmed to 150 ms) + 28 s + hang 2 s at 8 frames per ms.
 		expect(
-			Math.abs(op.frames - 8 * (300 + 28_000 + 2_000)),
+			Math.abs(op.frames - 8 * (150 + 28_000 + 2_000)),
 		).toBeLessThanOrEqual(8 * 30)
 	}, 120_000)
 

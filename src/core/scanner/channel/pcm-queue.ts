@@ -27,6 +27,24 @@ export class PcmQueue {
 		}
 		return out
 	}
+	/** A copy of the oldest `n` frames (at most `length`); the queue is unchanged. */
+	peek(n: number): Int16Array {
+		const out = new Int16Array(Math.max(0, Math.min(n, this.length)))
+		let o = 0
+		for (const part of this.parts) {
+			if (o >= out.length) break
+			const k = Math.min(part.length, out.length - o)
+			out.set(part.subarray(0, k), o)
+			o += k
+		}
+		return out
+	}
+	/** Puts `pcm` back at the head, before the oldest frames (a replacement of what `take` took). */
+	unshift(pcm: Int16Array): void {
+		if (pcm.length === 0) return
+		this.parts.unshift(pcm)
+		this.length += pcm.length
+	}
 	/** Removes the newest `n` frames, oldest first. */
 	takeTail(n: number): Int16Array[] {
 		const out: Int16Array[] = []
