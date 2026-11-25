@@ -35,6 +35,7 @@ import { openSqliteFile } from "../../../src/core/activity/storage/probe.js"
 import type { DecodeEnvelope } from "../../../src/core/activity/types.js"
 import type { RecordingKeepKey } from "../../../src/core/recordings/contract.js"
 import { createRecordingInventory } from "../../../src/core/recordings/inventory.js"
+import { RECORDING_KEEPS_MAX_ENTRIES } from "@wavekit/api-types"
 import type { RecordingInventory } from "../../../src/core/recordings/inventory.js"
 import { openRecordingKeepService } from "../../../src/core/recordings/keep-service.js"
 import type { OpenedRecordingKeepService } from "../../../src/core/recordings/keep-service.js"
@@ -511,6 +512,25 @@ describe("recordings keep: the one-time stamp of keeps made before the verdict",
 			status: 404,
 		})
 		expect((await keepFile(keepDir)).keeps[1]).not.toHaveProperty("callClear")
+	})
+
+	it("stamps a keep named deep in a links reset (past the keep cap), as a threaded writer sends it", async () => {
+		const dsd = await callDir()
+		const store = await openStore()
+		const keepDir = await tempDir()
+		await legacyKeeps(keepDir, [CLEAR])
+		const { keeps } = await mount(dsd, store, keepDir, true)
+		// A reset names every link, newest first: the old keep's link sits after
+		// RECORDING_KEEPS_MAX_ENTRIES other keys.
+		const reset = Array.from(
+			{ length: RECORDING_KEEPS_MAX_ENTRIES + 10 },
+			(_, i) => `dsd~other-${i}.wav`,
+		)
+		reset.push(`dsd~${CLEAR}`)
+		await expect(
+			keeps.stampCallClear?.(key => key === `dsd~${CLEAR}`, reset),
+		).resolves.toBe(1)
+		expect(keeps.isCallClearKept?.(`dsd~${CLEAR}`)).toBe(true)
 	})
 
 	it("stamps a keep whose clear link arrives later, and fails closed on a throwing gate", async () => {

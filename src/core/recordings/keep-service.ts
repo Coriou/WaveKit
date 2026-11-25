@@ -305,8 +305,13 @@ export async function openRecordingKeepService(
 		if (!ready() || unstamped.size === 0) return Promise.resolve(0)
 		const wanted: string[] = []
 		if (keys !== undefined) {
-			for (const key of keys.slice(0, RECORDING_KEEPS_MAX_ENTRIES))
+			// Every named key is looked at (a links reset names up to ACTIVITY_LINKS_MAX, newest
+			// first, and an old keep's link sits deep in it): one O(1) Set read each, stopping once
+			// every unstamped keep (at most RECORDING_KEEPS_MAX_ENTRIES) is wanted.
+			for (const key of keys) {
 				if (typeof key === "string" && unstamped.has(key)) wanted.push(key)
+				if (wanted.length >= unstamped.size) break
+			}
 			if (wanted.length === 0) return Promise.resolve(0)
 		}
 		stampAdmitted = admitted

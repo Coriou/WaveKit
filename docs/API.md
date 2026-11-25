@@ -8001,7 +8001,7 @@ unlinked (DMR files and files whose name says no known protocol) stay without
 backfill of older stores does not run again).
 Files dsd-fme already wrote stay on disk under the usual retention.
 No scanner probe call file is listed or served yet, whatever its protocol: a
-probe parks a call file that matches a clear call in its discovery's `dv`
+probe parks a call file that matches a call not known to be encrypted in its discovery's `dv`
 folder when it stops (on disk, under the scanner retention) and deletes the
 others, and a parked file, like one an older core moved into that folder, is
 not in `GET /api/recordings`, answers 404 from
