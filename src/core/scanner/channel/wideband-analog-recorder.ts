@@ -116,7 +116,7 @@ import {
 	VOICE_WINDOW_BLOCKS,
 } from "./voice-activity.js"
 import { PcmQueue } from "./pcm-queue.js"
-import { NoiseEvidenceBudget } from "./noise-evidence.js"
+import { DiscoveryNoiseRate, NoiseEvidenceBudget } from "./noise-evidence.js"
 import {
 	fadeIn,
 	ONSET_FADE_SAMPLES,
@@ -145,6 +145,7 @@ import {
 	LATE_VERDICT_GRACE_MS,
 	noiseFacts,
 	noiseLog,
+	noiseRuleJudges,
 	notVoiceDecode,
 	noteJoinedVoice,
 	provisionalRoom,
@@ -1268,6 +1269,11 @@ interface FileState {
 	headTrimmedMs: number | null
 	/** Input samples the head trim moved `startSample` by (0: none): its opening start is startSample − this. */
 	headTrimSamples: number
+	/**
+	 * Samples at the head of the queue `speech` already heard unfaded (trimHead): the writes skip
+	 * them, so the meter hears the untrimmed audio once and in order.
+	 */
+	speechSkip: number
 	/** An input gap was filled with silence in it (gapTo): its head is never trimmed (gap frame indexes). */
 	inputGap: boolean
 	ready: boolean
@@ -1287,6 +1293,13 @@ interface FileState {
 	finishAsked: boolean
 	/** A push of it was rejected: its receipt's decision is `discarded:write-failed`. */
 	pushFailed: boolean
+	/**
+	 * Noise-read files of its discovery in the hour before its first verdict (DiscoveryNoiseRate),
+	 * read and noted once: a held file released later keeps it. Null: not judged yet.
+	 */
+	noiseReadsBefore: number | null
+	/** Its discovery's noise gate was latched closed at that verdict (DiscoveryNoiseRate.latched). */
+	noiseLatchedBefore: boolean
 	/** This file's terminal decision was noted (each file gets exactly one; endFile). */
 	decided: boolean
 	/** Order it began waiting in (Session.waiting): the store's freed operations go oldest first. */
@@ -1735,6 +1748,8 @@ export class WidebandAnalogRecorder {
 	private readonly digitalSeen = new DigitalClassLedger()
 	/** Noise files kept as evidence per discovery on proven-voice channels (noise-evidence.ts). */
 	private readonly noiseEvidence = new NoiseEvidenceBudget()
+	/** Noise-read files per discovery in the rolling hour and its 24 h latch: the proven-channel noise gate (noise-evidence.ts). */
+	private readonly noiseRate = new DiscoveryNoiseRate()
 	/** Provisional files (finishOrHold), oldest first, with their session and grace cancel. */
 	private readonly held = new Map<
 		FileState,
@@ -3677,7 +3692,8 @@ export class WidebandAnalogRecorder {
 				env: e.env,
 				voiced: e.voiced,
 				frames: e.frames,
-				startSample: file.startSample,
+				// The meter heard the file from where it opened (trimHead feeds it the cut head too).
+				startSample: file.startSample - file.headTrimSamples,
 				samplesPerFrame: (COPY_FRAME_SAMPLES * s.fs) / ANALOG_AUDIO_RATE_HZ,
 			}
 			copies.kept(fp, handle.settled)
@@ -3704,6 +3720,7 @@ export class WidebandAnalogRecorder {
 			toneClass: new ToneClassEvidence(),
 			speech: new SpeechContentMeter({
 				envelope: this.deps.copies !== undefined,
+				quieting: true,
 			}),
 			peakSnrDb: Number.NEGATIVE_INFINITY,
 			peakDbfs: Number.NEGATIVE_INFINITY,
@@ -3726,6 +3743,7 @@ export class WidebandAnalogRecorder {
 			headCut: false,
 			headTrimmedMs: null,
 			headTrimSamples: 0,
+			speechSkip: 0,
 			inputGap: false,
 			ready: false,
 			failed: false,
@@ -3742,6 +3760,8 @@ export class WidebandAnalogRecorder {
 			waitSeq: 0,
 			continuation: false,
 			storeSince: null,
+			noiseReadsBefore: null,
+			noiseLatchedBefore: false,
 		}
 		s.file = file
 		s.files.add(file)
@@ -4937,7 +4957,10 @@ export class WidebandAnalogRecorder {
 		}
 		const budget = Math.min(PUSH_FRAMES, allowed - written)
 		const chunk = file.queue.take(budget)
-		file.speech.push(chunk)
+		// The trim's faded head was heard unfaded (trimHead): the meter skips it here.
+		const skip = Math.min(file.speechSkip, chunk.length)
+		file.speechSkip -= skip
+		file.speech.push(skip === 0 ? chunk : chunk.subarray(skip))
 		file.writing = true
 		handle.push(chunk).then(
 			() => {
@@ -4968,11 +4991,13 @@ export class WidebandAnalogRecorder {
 	 * neither trimmed nor faded; a file holding a filled input gap (gap frame indexes already given)
 	 * or one whose head the ring no longer held (headCut: its onset may be gone) is only faded. The
 	 * dropped frames leave the queue and, when not judged yet, `unjudged` (the gate and the tone
-	 * bank never hear them; what they already heard stays heard); the speech measure (`speech`) is
-	 * fed at the write, so it never hears them. `startSample` moves past them, so `startedAt`, the
-	 * copy fingerprint and its copy span (captured again here when the file already ended) are the
-	 * first written sample; the decode check and the snapshot class read the opening start. One
-	 * pass over at most ONSET_MAX_SEARCH_SAMPLES samples.
+	 * bank never hear them; what they already heard stays heard). The speech measure (`speech`)
+	 * hears them here, and the head unfaded (its write skips it, `speechSkip`): it measures the
+	 * untrimmed audio, so no verdict or reading depends on the trim, and the copy fingerprint (its
+	 * envelope) starts where the file opened. `startSample` moves past them, so `startedAt` and the
+	 * copy span (captured again here when the file already ended) are the first written sample;
+	 * the decode check, the snapshot class and the fingerprint read the opening start. One pass
+	 * over at most ONSET_MAX_SEARCH_SAMPLES samples.
 	 */
 	private trimHead(s: Session, file: FileState): void {
 		let cut = 0
@@ -4981,7 +5006,8 @@ export class WidebandAnalogRecorder {
 			cut = onsetTrim(file.queue.peek(search), search).cutSamples
 		}
 		if (cut > 0) {
-			file.queue.take(cut)
+			// The meter hears what is cut (the verdict never depends on the trim).
+			file.speech.push(file.queue.take(cut))
 			file.frames -= cut
 			let unjudged = cut - file.judged
 			file.judged = Math.max(0, file.judged - cut)
@@ -5010,6 +5036,9 @@ export class WidebandAnalogRecorder {
 		const head = file.queue.take(
 			Math.min(ONSET_FADE_SAMPLES, file.queue.length),
 		)
+		// The meter hears the head unfaded, now; its write skips it (flush).
+		file.speech.push(head)
+		file.speechSkip = head.length
 		file.queue.unshift(fadeIn(head))
 	}
 
@@ -5388,8 +5417,20 @@ export class WidebandAnalogRecorder {
 			// The partial-window floor (47 frames), read only on a proven-voice channel (finishPath).
 			partialNoise:
 				speech === null ? null : admissionNoise(speech, ADMISSION_PROVEN_VOICE),
+			// Read on a proven-voice channel only (finishPath): the carrier quieting, untrimmed audio.
+			quieting: speech === null ? null : file.speech.quieting(),
 		}
 		const clockNow = this.clock()
+		const decodedTone = toneFactOf(file.toneHz, file.toneCoverage).tone
+		const toned = decodedTone !== undefined && decodedTone !== null
+		// The discovery's noise-read rate before this file, read and noted once per file (a held
+		// file's release reuses it): the proven-channel noise gate (DISCOVERY_NOISE_GATE).
+		if (file.noiseReadsBefore === null) {
+			file.noiseReadsBefore = this.noiseRate.before(s.discoveryId, clockNow)
+			file.noiseLatchedBefore = this.noiseRate.latched(s.discoveryId, clockNow)
+			if (noiseRuleJudges(admission, toned))
+				this.noiseRate.note(s.discoveryId, clockNow)
+		}
 		const path = this.deps.voicePrior
 			? finishPath({
 					prior,
@@ -5406,7 +5447,11 @@ export class WidebandAnalogRecorder {
 					rollOver: file.rollOver && s.classed,
 					ownObservationId: s.owner,
 					admission,
+					// A decoded CTCSS or DCS tone (the facts' tone object): never noise.
+					decodedTone: toned,
 					noiseEvidence: this.noiseEvidence.room(s.discoveryId, clockNow),
+					discoveryNoiseReads: file.noiseReadsBefore,
+					discoveryNoiseLatched: file.noiseLatchedBefore,
 					final: final || room === 0,
 					now,
 				})
@@ -5455,7 +5500,6 @@ export class WidebandAnalogRecorder {
 						? path.speechHeard
 						: speechReadings(speech).speechHeard,
 					...(startedAt === null ? {} : { startedAt }),
-					headTrimmedMs: file.headTrimmedMs ?? 0,
 					...(path !== null && speech !== null
 						? { admission: noiseFacts(path, speech, s) }
 						: {}),

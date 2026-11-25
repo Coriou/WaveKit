@@ -56,6 +56,7 @@
  * it writes).
  */
 import { Fft } from "../../spectrum/fft.js"
+import { QuietingMeter, type QuietingReading } from "./quieting.js"
 import {
 	COPY_MAX_FRAMES,
 	COPY_MAX_ZEROS,
@@ -310,13 +311,24 @@ export class SpeechContentMeter {
 	 */
 	private readonly env: Uint8Array | null
 	private readonly voiced: Uint8Array | null
+	/** The carrier quieting measure (quieting.ts), only when asked for (`quieting: true`). */
+	private readonly quiet: QuietingMeter | null
 
-	constructor(options?: { readonly envelope?: boolean }) {
+	constructor(options?: {
+		readonly envelope?: boolean
+		readonly quieting?: boolean
+	}) {
 		const capture = options?.envelope === true
 		this.env = capture ? new Uint8Array(COPY_MAX_FRAMES) : null
 		this.voiced = capture
 			? new Uint8Array(Math.ceil(COPY_MAX_FRAMES / 8))
 			: null
+		this.quiet = options?.quieting === true ? new QuietingMeter() : null
+	}
+
+	/** The carrier quieting reading so far (quieting.ts); null when not asked for or nothing heard. */
+	quieting(): QuietingReading | null {
+		return this.quiet?.reading() ?? null
 	}
 
 	/** The copy fingerprint's envelope so far (views, not copies); null when not captured. */
@@ -335,8 +347,10 @@ export class SpeechContentMeter {
 	}
 
 	push(pcm: Int16Array): void {
+		const quiet = this.quiet
 		for (let i = 0; i < pcm.length; i++) {
 			this.frame[this.fill++] = pcm[i]!
+			quiet?.sample(pcm[i]!)
 			if (this.fill === SPEECH_FRAME_SAMPLES) {
 				this.fill = 0
 				this.measureFrame()
@@ -390,8 +404,9 @@ export class SpeechContentMeter {
 			(this.heard - SPEECH_WINDOW_FRAMES) % SPEECH_WINDOW_HOP === 0
 		)
 			this.measureWindow()
-		if (this.frameZeroHeavy) return
 		const pitched = peak >= SPEECH_PERIODIC_MIN_CORRELATION
+		this.quiet?.frame(pitched, this.frameZeroHeavy)
+		if (this.frameZeroHeavy) return
 		if (pitched) this.periodic++
 		const slot = this.levelHeard % SPEECH_WINDOW_FRAMES
 		this.levelRing[slot] = this.frameLevel

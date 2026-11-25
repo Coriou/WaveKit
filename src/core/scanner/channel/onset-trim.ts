@@ -12,7 +12,9 @@
  * second-difference energy in dB; the lead is the median of the first ONSET_LEAD_BLOCKS (60 ms);
  * the onset is the first block whose level is at least ONSET_DROP_DB (10 dB) under the lead and
  * that stays so for ONSET_HOLD_BLOCKS blocks (100 ms) in a row. The cut keeps ONSET_KEEP_SAMPLES
- * (150 ms) before the onset: cut = max(0, onset − 150 ms), so the first syllable is never cut.
+ * (150 ms) before the first quieted block (at least 10 dB under the lead) after the static prefix,
+ * which is the onset or earlier: cut = max(0, quiet − 150 ms), so a sound between a first quieting
+ * and the held onset (a fricative, a quieting broken by a word) keeps its start.
  * Static guard: static is stationary, voice is not. The static prefix is the leading blocks within
  * ONSET_STATIC_SPREAD_DB of the lead; a cut needs a prefix of at least ONSET_MIN_STATIC_BLOCKS
  * (200 ms) that ends at most ONSET_TRANSITION_BLOCKS (200 ms, the carrier rising) before the onset,
@@ -78,7 +80,8 @@ export interface OnsetTrim {
 
 /**
  * The head trim of `head` (the file's first samples, 8 kHz; only the first `searchSamples` are
- * read). 0 ≤ cutSamples ≤ max(0, onsetSamples − ONSET_KEEP_SAMPLES) < searchSamples, and
+ * read). 0 ≤ cutSamples ≤ max(0, q − ONSET_KEEP_SAMPLES) ≤ max(0, onsetSamples −
+ * ONSET_KEEP_SAMPLES) < searchSamples (q: the first quieted block after the static prefix), and
  * cutSamples never passes the static prefix.
  */
 export function onsetTrim(head: Int16Array, searchSamples: number): OnsetTrim {
@@ -126,10 +129,17 @@ export function onsetTrim(head: Int16Array, searchSamples: number): OnsetTrim {
 				first - prefix > ONSET_TRANSITION_BLOCKS
 			)
 				return { cutSamples: 0, onsetSamples: onset }
+			// The pre-roll is measured back from the first quieted block after the static (a quieting
+			// that does not hold yet, or a sound between it and the onset, keeps its start).
+			let quiet = prefix
+			while (quiet < first && db[quiet]! > floor) quiet++
 			return {
 				cutSamples: Math.max(
 					0,
-					Math.min(onset - ONSET_KEEP_SAMPLES, prefix * ONSET_BLOCK_SAMPLES),
+					Math.min(
+						quiet * ONSET_BLOCK_SAMPLES - ONSET_KEEP_SAMPLES,
+						prefix * ONSET_BLOCK_SAMPLES,
+					),
 				),
 				onsetSamples: onset,
 			}

@@ -25,14 +25,19 @@ import {
 	createRecordingInventory,
 	RECORDINGS_ITEMS_OF_KEYS_MAX,
 } from "../../../../src/core/recordings/inventory.js"
-import type {
-	AnalogCommitExtra,
-	AnalogMetadataAdapter,
+import { SCANNER_RECORDER_ERRORS } from "@wavekit/api-types"
+import { z } from "zod"
+import {
+	MAX_ANALOG_FILE_BYTES,
+	type AnalogCommitExtra,
+	type AnalogFinishFacts,
+	type AnalogMetadataAdapter,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
 import {
 	NOISE_QUARANTINE_DIR,
+	NoiseQuarantineFactsSchema,
 	type NoiseQuarantineFacts,
 } from "../../../../src/core/scanner/store/noise-quarantine.js"
 import {
@@ -40,6 +45,7 @@ import {
 	RECORDING_FACTS_FILE,
 	RECORDING_FACTS_MAX_BYTES,
 	RecordingFactsSchema,
+	RecordingToneSchema,
 	DCS_MEASURED_MIN_SAMPLES,
 	DCS_CHANCE_HIT_SECONDS,
 	DCS_LONE_HIT_SECONDS,
@@ -59,6 +65,11 @@ import {
 } from "../../../../src/core/scanner/store/recording-facts.js"
 import {
 	MAX_OPERATION_METADATA_BYTES,
+	RecordingBindingSchema,
+	RecordingIdentitySchema,
+	UUIDSchema,
+	recordingAlias,
+	recordingArtifact,
 	type RecordingBinding,
 } from "../../../../src/core/scanner/store/recording-operation.js"
 import { createLogger } from "../../../../src/utils/logger.js"
@@ -292,10 +303,196 @@ describe("kept analog file: facts sidecar round-trip", () => {
 	})
 })
 
-describe("receipt headTrimmedMs (the recorder's onset trim)", () => {
-	it("2 000 ms (the search bound) is kept in the receipt, 2 001 ms is dropped and the finish still succeeds", async () => {
-		const h = await harness()
-		const trimmed = async (headTrimmedMs: number) => {
+/**
+ * The base (9b7591ec3) receipt and facts schemas, copied as they were: a core rolled back to it
+ * must read every receipt and facts sidecar this code writes (both objects are `.strict()`, so
+ * a new member would fail them and the file would be quarantined). Sub-schemas unchanged since
+ * then (binding, identity, UUID, alias, artifact, the admission facts, the tone) are imported.
+ */
+const BASE_CUT = z.enum([
+	"completed",
+	"duration-limit",
+	"track-ended",
+	"cancelled",
+	"discovery-deleted",
+	"source-lost",
+	"epoch-changed",
+	"stream-changed",
+	"channel-invalidated",
+	"engine-failed",
+	"shutdown",
+])
+const baseCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
+const BaseAnalogReceiptSchema = z
+	.object({
+		version: z.literal(1),
+		operationId: UUIDSchema,
+		producerRecordingId: UUIDSchema,
+		producerId: z.literal("scanner-analog"),
+		producerRunId: UUIDSchema,
+		producerStoreId: z.null(),
+		discoveryId: RecordingIdentitySchema.nullable(),
+		observationId: RecordingIdentitySchema.nullable(),
+		alias: z.string().max(256).nullable(),
+		binding: RecordingBindingSchema,
+		output: z
+			.object({
+				format: z.literal("s16le-wav").nullable(),
+				sampleRateHz: z.literal(8000).nullable(),
+				channelCount: z.literal(1).nullable(),
+				outputFrames: baseCount.max(960_000).nullable(),
+				fileBytes: baseCount.max(MAX_ANALOG_FILE_BYTES).nullable(),
+			})
+			.strict(),
+		gaps: z
+			.array(
+				z
+					.object({
+						cause: z.enum([
+							"input-gap",
+							"queue-overflow",
+							"writer-backpressure",
+							"source-gap",
+							"unknown",
+						]),
+						inputSampleIndex: baseCount.nullable(),
+						droppedInputSamples: baseCount.nullable(),
+						outputFrameIndex: baseCount.nullable(),
+					})
+					.strict(),
+			)
+			.max(64),
+		omittedGapCount: baseCount,
+		cutReason: BASE_CUT.nullable(),
+		cutActive: z.boolean().optional(),
+		keptBy: z
+			.string()
+			.regex(/^[a-z][a-z-]{0,31}$/)
+			.optional(),
+		speechHeard: z.boolean().nullable().optional(),
+		startedAt: z.string().datetime().optional(),
+		closure: z.enum(["closed", "incomplete", "unknown"]),
+		outcome: z.enum(["finalized", "aborted", "failed"]),
+		artifact: z.string().max(512).nullable(),
+		cleanup: z.enum(["complete", "pending"]),
+		residueBytes: baseCount.nullable(),
+		errorCode: z.enum(SCANNER_RECORDER_ERRORS).nullable(),
+		failure: z
+			.enum([
+				"cancelled",
+				"authority-unhealthy",
+				"discovery-removed",
+				"association-lost",
+				"binding-unusable",
+				"binding-not-live",
+				"commit-plan-stale",
+			])
+			.optional(),
+		durability: z
+			.object({
+				mediaFileSync: z.enum(["synced", "not-acknowledged"]),
+				metadata: z.enum(["journal-append-prepared-link", "not-acknowledged"]),
+				metadataPowerLossDurable: z.literal(false),
+				finalMarkerFileSync: z.enum(["synced", "not-acknowledged"]),
+				finalMarkerDirectorySync: z.literal("not-attempted"),
+			})
+			.strict(),
+	})
+	.strict()
+	.superRefine((r, ctx) => {
+		if (
+			r.operationId !== r.producerRecordingId ||
+			(r.outcome === "finalized" &&
+				(r.discoveryId === null ||
+					r.observationId === null ||
+					r.alias !== recordingAlias(r.discoveryId, r.operationId) ||
+					r.artifact !== recordingArtifact(r.discoveryId, r.operationId) ||
+					r.output.format !== "s16le-wav" ||
+					r.output.sampleRateHz !== 8000 ||
+					r.output.channelCount !== 1 ||
+					r.output.outputFrames === null ||
+					r.output.fileBytes === null ||
+					r.output.fileBytes !== 44 + 2 * (r.output.outputFrames ?? -1) ||
+					r.closure !== "closed" ||
+					r.cutReason === null ||
+					r.errorCode !== null ||
+					r.durability.mediaFileSync !== "synced" ||
+					r.durability.metadata !== "journal-append-prepared-link" ||
+					r.durability.finalMarkerFileSync !== "synced"))
+		)
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: "Invalid analog receipt identity/output",
+			})
+	})
+const BASE_CODE = /^[a-z][a-z-]{0,31}$/
+const baseIso = z.string().datetime()
+const baseFinite = z.number().finite()
+const BaseRecordingFactsSchema = z
+	.object({
+		version: z.literal(1),
+		operationId: z
+			.string()
+			.regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
+		discoveryId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+		observationId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+		frequencyHz: baseFinite.nonnegative().nullable(),
+		startedAt: baseIso.nullable(),
+		endedAt: baseIso.nullable(),
+		keptAt: baseIso,
+		durationMs: baseFinite.nonnegative().nullable(),
+		finish: z
+			.object({
+				cut: z.string().regex(BASE_CODE),
+				keptBy: z.string().regex(BASE_CODE).nullable(),
+				speechHeard: z.boolean().nullable(),
+				cutActive: z.boolean().nullable(),
+			})
+			.strict(),
+		admission: NoiseQuarantineFactsSchema.nullable(),
+		tone: RecordingToneSchema.nullable().optional(),
+		txId: z
+			.string()
+			.regex(/^tx_[0-9A-HJKMNP-TV-Z]{26}$/)
+			.optional(),
+		moreTxIds: z
+			.array(z.string().regex(/^tx_[0-9A-HJKMNP-TV-Z]{26}$/))
+			.min(1)
+			.max(7)
+			.optional(),
+	})
+	.strict()
+
+describe("rollback: every receipt and facts sidecar written parses with the base (9b7591ec3) schemas", () => {
+	const tx = (n: number): string => `tx_${String(n).padStart(26, "0")}`
+	const variants: [string, AnalogFinishFacts][] = [
+		[
+			"every fact the recorder gives",
+			{
+				keptBy: "noise-evidence",
+				speechHeard: true,
+				startedAt: new Date(NOW - 5_000).toISOString(),
+				cutActive: false,
+				admission,
+				tone: { kind: "ctcss", hz: 67 },
+				txIds: [tx(1), tx(2), tx(3)],
+			},
+		],
+		[
+			"a DCS tone, no admission",
+			{
+				keptBy: "prior-none",
+				speechHeard: null,
+				startedAt: new Date(NOW - 5_000).toISOString(),
+				tone: { kind: "dcs", code: "023", polarity: "normal" },
+			},
+		],
+		["no facts at all", {}],
+	]
+	it.each(variants)(
+		"%s, and a stray headTrimmedMs (the 387700dda member) is never written",
+		async (_name, facts) => {
+			const h = await harness()
 			const op = h.evidence.beginAnalog({
 				discoveryId: h.discoveryId,
 				observationId: "o1",
@@ -303,16 +500,28 @@ describe("receipt headTrimmedMs (the recorder's onset trim)", () => {
 			})
 			await op.ready
 			await op.push(new Int16Array(8000).fill(900))
-			return op.finish("completed", { keptBy: "prior-none", headTrimmedMs })
-		}
-		const kept = await trimmed(2_000)
-		expect(kept.outcome).toBe("finalized")
-		expect(kept.headTrimmedMs).toBe(2_000)
-		const dropped = await trimmed(2_001)
-		expect(dropped.outcome).toBe("finalized")
-		expect(dropped.keptBy).toBe("prior-none")
-		expect(dropped).not.toHaveProperty("headTrimmedMs")
-	})
+			// What a 387700dda recorder handed the store: the member must not reach any file.
+			const stray: Record<string, unknown> = { headTrimmedMs: 950 }
+			const receipt = await op.finish("completed", {
+				...facts,
+				...stray,
+			} as AnalogFinishFacts)
+			expect(receipt.outcome).toBe("finalized")
+			expect(receipt).not.toHaveProperty("headTrimmedMs")
+			const dir = join(h.root, ".analog-operations", op.operationId)
+			const onDisk: unknown = JSON.parse(
+				await readFile(join(dir, "receipt.json"), "utf8"),
+			)
+			expect(onDisk).not.toHaveProperty("headTrimmedMs")
+			expect(BaseAnalogReceiptSchema.safeParse(onDisk).success).toBe(true)
+			expect(BaseAnalogReceiptSchema.safeParse(receipt).success).toBe(true)
+			const sidecar: unknown = JSON.parse(
+				await readFile(factsPath(h, op.operationId), "utf8"),
+			)
+			expect(BaseRecordingFactsSchema.safeParse(sidecar).success).toBe(true)
+			expect(JSON.stringify(sidecar)).not.toContain("headTrimmedMs")
+		},
+	)
 })
 
 describe("missing or malformed sidecar never breaks serving the WAV", () => {

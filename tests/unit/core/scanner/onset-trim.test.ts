@@ -224,6 +224,25 @@ describe("onset trim", () => {
 				12 * 160,
 			)
 		})
+
+		it("the pre-roll is measured back from the first quieted block, not the held onset: a sound between them keeps its start", () => {
+			// Static 12 blocks, a 40 ms quieting that does not hold, 100 ms of a sound 6 dB under
+			// the static (a fricative), then the held quieting at block 19.
+			const t = trim([
+				...run(12, 0),
+				...run(2, QUIET),
+				...run(5, MID),
+				...run(40, QUIET),
+			])
+			// The onset stays the held one; the cut keeps 150 ms before block 12 (12 × 160 − 1 200 =
+			// 720), not before the onset (19 × 160 − 1 200 = 1 840).
+			expect(t).toEqual({
+				cutSamples: 12 * 160 - ONSET_KEEP_SAMPLES,
+				onsetSamples: 19 * 160,
+			})
+			// The fricative (blocks 14 to 18) and the quieting before it are all kept.
+			expect(t.cutSamples).toBeLessThan(12 * 160)
+		})
 	})
 
 	it("RESIDUAL LIMIT: a static-level fricative (250 ms of HF noise) right before the voiced onset keeps only its last 150 ms", () => {

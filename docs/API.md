@@ -7149,8 +7149,7 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   file, read from its receipt. `startedAt` is the file's first sample (ISO,
   UTC; since 2026-11-25 the first sample written after the recorder's onset
   trim, which cuts open-squelch static to at most 150 ms before the carrier
-  quiets and records the cut as `headTrimmedMs` in the file's receipt, not yet in
-  this listing); `observationId` the scanner observation it recorded (the roll-over
+  quiets; the cut is logged, not stored in the receipt); `observationId` the scanner observation it recorded (the roll-over
   parts of one transmission share it); `speech` the file's own speech reading,
   `heard`, `not-heard` or `unchecked` (not measured: a file classed by its
   tone, a receipt written before the field, any other kind); `keptBy` the
@@ -7158,8 +7157,10 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   report it (`prior-none`: no digital prior, kept at once; `own-tone`: its
   audio carried a CTCSS tone; `joined-decode`; `final`: kept at the end of its
   provisional hold; `noise-evidence` (since 2026-11-25): the recording admission
-  measured it as unpitched noise on a channel with proven analog voice, where such
-  a file is otherwise discarded, and it was kept as one of the 2 such files per
+  measured it as unpitched noise on a channel with proven analog voice whose
+  discovery made 15 or more such files in the hour before it (or did so in the
+  last 24 hours: the gate latch, see SCANNER.md), where such a file is
+  otherwise discarded, and it was kept as one of the 2 such files per
   discovery per rolling hour so a listener can check the noise rule by ear; its
   audio is noise, not a voice). Unknown values read `unchecked` and null, never guessed;
   other kinds read null, `unchecked`, null, null. Nothing here changes what the

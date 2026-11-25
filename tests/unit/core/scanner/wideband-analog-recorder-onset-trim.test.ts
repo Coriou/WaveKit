@@ -3,13 +3,14 @@
  * `preRollMs` (300) before its track, and the detector reports the track before the carrier
  * quiets; the open-squelch static before the onset is trimmed to at most 150 ms before it, the
  * first 20 ms written are faded in, `startedAt` is the wall time of the first written sample and
- * `headTrimmedMs` reaches the receipt facts and the kept log line. A file with no static head (a
- * data buzz, or a voice already on the air at the file's start) loses nothing and is still faded.
- * All signals are modelled (synthetic NFM through the recorder's own chain).
+ * `headTrimmedMs` reaches the kept log line only (never the receipt facts). A file with no static
+ * head (a data buzz, or a voice already on the air at the file's start) loses nothing and is still
+ * faded. The speech measure hears the untrimmed audio: a trimmed file reads exactly as the same
+ * audio untrimmed. All signals are modelled (synthetic NFM through the recorder's own chain).
  */
 import { Writable } from "node:stream"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import type { DecodedLabel } from "../../../../src/core/scanner/channel/voice-veto.js"
 import type {
@@ -26,6 +27,7 @@ import {
 	ONSET_KEEP_SAMPLES,
 	onsetTrim,
 } from "../../../../src/core/scanner/channel/onset-trim.js"
+import type * as OnsetTrimModuleNs from "../../../../src/core/scanner/channel/onset-trim.js"
 import {
 	HARNESS_T0,
 	LOW_FS,
@@ -35,6 +37,29 @@ import {
 	snapshot,
 } from "./wideband-recorder-harness.js"
 import { FskSource } from "./wideband-nfm-fixtures.js"
+import {
+	DISCOVERY_NOISE_GATE,
+	DISCOVERY_NOISE_LATCH_MS,
+	type DiscoveryNoiseRate,
+} from "../../../../src/core/scanner/channel/noise-evidence.js"
+
+type OnsetTrimModule = typeof OnsetTrimModuleNs
+
+/** The A/B switch of the trim-independence test: true turns the recorder's onset trim off. */
+const trimOff = vi.hoisted(() => ({ on: false }))
+vi.mock(
+	"../../../../src/core/scanner/channel/onset-trim.js",
+	async importOriginal => {
+		const actual = await importOriginal<OnsetTrimModule>()
+		return {
+			...actual,
+			onsetTrim: (head: Int16Array, search: number) =>
+				trimOff.on
+					? { cutSamples: 0, onsetSamples: null }
+					: actual.onsetTrim(head, search),
+		}
+	},
+)
 
 type Harness = ReturnType<typeof harness>
 const LOW = { centreHz: 100_000_000 + LOW_OFFSET }
@@ -183,6 +208,12 @@ async function over(
 	return trackStart
 }
 
+/** The `headTrimmedMs` of each "Analog file kept" log line, in keep order. */
+const keptTrims = (lines: Record<string, unknown>[]): unknown[] =>
+	lines
+		.filter(l => l["msg"] === "Analog file kept")
+		.map(l => l["headTrimmedMs"])
+
 /** The wall ISO time of input sample `sample` under the harness's live clock. */
 const wallOf = (sample: number): string | null =>
 	wallIso(HARNESS_T0 + (sample * 1000) / LOW_FS)
@@ -193,7 +224,9 @@ describe("the recorder's head trim (modelled)", () => {
 		const trackStart = await over(h, { leadS: 0.8, voiceS: 4 })
 		expect(h.ops.map(op => op.outcome)).toEqual(["finalized"])
 		const w = written[0]!
-		const trimmed = w.facts?.headTrimmedMs
+		// The receipt facts never carry the trim (a receipt the base schema reads): the log line does.
+		expect(w.facts).not.toHaveProperty("headTrimmedMs")
+		const trimmed = keptTrims(lines)[0] as number | undefined
 		expect(trimmed).toBeDefined()
 		// 300 ms pre-roll + 800 ms lead = 1 100 ms of static; 150 ms kept: about 950 ms cut.
 		expect(trimmed!).toBeGreaterThanOrEqual(950 - 60)
@@ -207,12 +240,10 @@ describe("the recorder's head trim (modelled)", () => {
 		// startedAt is the first written sample: the file's opening start plus the cut.
 		const opened = trackStart - 0.3 * LOW_FS
 		expect(w.facts?.startedAt).toBe(wallOf(opened + (trimmed! * LOW_FS) / 1000))
-		const kept = lines.find(l => l["msg"] === "Analog file kept")
-		expect(kept?.["headTrimmedMs"]).toBe(trimmed)
 	}, 120_000)
 
 	it("a voice already on the air at the file's start loses nothing (no trim), and is faded", async () => {
-		const { h, written } = recorder()
+		const { h, written, lines } = recorder()
 		const trackStart = await over(h, {
 			leadS: 0,
 			voiceS: 4,
@@ -220,13 +251,13 @@ describe("the recorder's head trim (modelled)", () => {
 		})
 		expect(h.ops.map(op => op.outcome)).toEqual(["finalized"])
 		const w = written[0]!
-		expect(w.facts?.headTrimmedMs).toBe(0)
+		expect(keptTrims(lines)).toEqual([0])
 		expect(joined(w.pcm)[0]).toBe(0)
 		expect(w.facts?.startedAt).toBe(wallOf(trackStart - 0.3 * LOW_FS))
 	}, 120_000)
 
 	it("a data buzz with no static head is not trimmed but faded (admission off: kept)", async () => {
-		const { h, written } = recorder({ admission: false })
+		const { h, written, lines } = recorder({ admission: false })
 		const trackStart = await over(h, {
 			leadS: 0,
 			voiceS: 6,
@@ -235,45 +266,98 @@ describe("the recorder's head trim (modelled)", () => {
 		})
 		expect(h.ops.map(op => op.outcome)).toEqual(["finalized"])
 		const w = written[0]!
-		expect(w.facts?.headTrimmedMs).toBe(0)
+		expect(keptTrims(lines)).toEqual([0])
 		expect(joined(w.pcm)[0]).toBe(0)
 		expect(w.facts?.startedAt).toBe(wallOf(trackStart - 0.3 * LOW_FS))
 	}, 120_000)
+
+	it("the verdict never depends on the trim: the same audio with and without a trim reads the same (speechHeard, admission numbers, keptBy)", async () => {
+		const run = async (off: boolean) => {
+			trimOff.on = off
+			try {
+				const { h, written, lines } = recorder()
+				await over(h, { leadS: 0.8, voiceS: 4 })
+				expect(h.ops.map(op => op.outcome)).toEqual(["finalized"])
+				return { w: written[0]!, trim: keptTrims(lines)[0] as number }
+			} finally {
+				trimOff.on = false
+			}
+		}
+		const trimmed = await run(false)
+		const untrimmed = await run(true)
+		expect(trimmed.trim).toBeGreaterThan(800)
+		expect(untrimmed.trim).toBe(0)
+		// Different files written (one lost its static head) ...
+		expect(joined(untrimmed.w.pcm).length - joined(trimmed.w.pcm).length).toBe(
+			(trimmed.trim * 8_000) / 1000,
+		)
+		// ... the same readings.
+		expect(trimmed.w.facts?.admission).toBeDefined()
+		expect(trimmed.w.facts?.admission).toEqual(untrimmed.w.facts?.admission)
+		expect(trimmed.w.facts?.speechHeard).toBe(untrimmed.w.facts?.speechHeard)
+		expect(trimmed.w.facts?.keptBy).toBe(untrimmed.w.facts?.keptBy)
+	}, 240_000)
 })
 
 describe("the recorder's noise evidence budget on a channel with proven analog voice (modelled)", () => {
-	it("data buzz overs: the 1st and 2nd in the hour kept as noise-evidence, the 3rd discarded:noise, kept again after the hour", async () => {
+	it("data buzz overs: kept while the discovery made under 15 noise reads in the hour; at 15 the 1st and 2nd kept as noise-evidence, the 3rd discarded:noise; the latch holds the gate past the hour and opens it 24 h after it was reached", async () => {
 		let clock = 0
 		const { h, written } = recorder({
 			prior: { ...analogFm, analogVoice: () => true },
 			clock: () => clock,
 		})
-		for (const id of ["a", "b", "c"])
+		// 14 earlier noise reads of the discovery at clock 0 (white box: as many earlier buzz overs).
+		const rate = (h.rec as unknown as { noiseRate: DiscoveryNoiseRate })
+			.noiseRate
+		for (let i = 0; i < DISCOVERY_NOISE_GATE - 1; i++) rate.note("d_1", 0)
+		clock = 1_000
+		// "a": 14 reads before it, kept as before the rule, and counted (15 now).
+		for (const id of ["a", "b", "c", "d"])
 			await over(h, { leadS: 0, voiceS: 6, keyedBefore: true, buzz: true, id })
-		// The clock moves past the first keep's hour (3 600 000 ms): one slot frees.
+		expect(rate.before("d_1", clock)).toBe(DISCOVERY_NOISE_GATE + 1)
+		// "a" reached the gate at 1 000 (its note left 15 reads): the latch closes it for 24 h.
+		expect(rate.latched("d_1", clock)).toBe(true)
+		// The seeded reads leave the hour (3 600 000 ms): 4 reads remain, under the gate, but the
+		// latch holds it closed and the evidence budget (b and c, under the hour) has no room.
 		clock = 3_600_000
+		expect(rate.before("d_1", clock)).toBe(4)
 		await over(h, {
 			leadS: 0,
 			voiceS: 6,
 			keyedBefore: true,
 			buzz: true,
-			id: "d",
+			id: "e",
+		})
+		// 24 h after the gate was last reached ("e" left 5 reads: no refresh), it opens.
+		clock = 1_000 + DISCOVERY_NOISE_LATCH_MS
+		expect(rate.latched("d_1", clock)).toBe(false)
+		await over(h, {
+			leadS: 0,
+			voiceS: 6,
+			keyedBefore: true,
+			buzz: true,
+			id: "f",
 		})
 		expect(h.ops.map(op => op.outcome)).toEqual([
 			"finalized",
 			"finalized",
+			"finalized",
+			"aborted",
 			"aborted",
 			"finalized",
 		])
 		expect(written.map(w => w.facts?.keptBy)).toEqual([
+			"prior-none",
 			"noise-evidence",
 			"noise-evidence",
 			undefined,
-			"noise-evidence",
+			undefined,
+			"prior-none",
 		])
-		// The discarded one goes to the noise quarantine with its facts.
-		expect(h.ops[2]!.noise).toMatchObject({ reason: "noise" })
-		expect(h.rec.diagnostics().counts["discarded:noise"]).toBe(1)
+		// The discarded ones go to the noise quarantine with their facts.
+		expect(h.ops[3]!.noise).toMatchObject({ reason: "noise" })
+		expect(h.ops[4]!.noise).toMatchObject({ reason: "noise" })
+		expect(h.rec.diagnostics().counts["discarded:noise"]).toBe(2)
 	}, 240_000)
 })
 
@@ -321,7 +405,7 @@ describe("the head trim and where the file opened (modelled)", () => {
 	] as const)
 		it(`a non-voice decode of the held file's own observation landing in its grace, made ${name}`, async () => {
 			const box: { label: DecodedLabel | null } = { label: null }
-			const { h, written } = recorder({
+			const { h, lines } = recorder({
 				prior: suspect,
 				decodedLabel: () => box.label,
 			})
@@ -338,11 +422,11 @@ describe("the head trim and where the file opened (modelled)", () => {
 				expect(codes).toContain("discarded:late-non-voice")
 			} else {
 				expect(codes).not.toContain("discarded:late-non-voice")
-				expect(written[0]!.facts?.headTrimmedMs).toBeGreaterThan(800)
+				expect(keptTrims(lines)[0]).toBeGreaterThan(800)
 			}
 		}, 120_000)
 
-	it("a file that ended before its first write: the copy span is taken again from its first written sample, the fingerprint's start", async () => {
+	it("a file that ended before its first write: the copy span is taken again from its first written sample; the fingerprint starts where the file opened (its meter heard the untrimmed audio)", async () => {
 		const kept: CopyFingerprint[] = []
 		const copies = {
 			kept: (fp: CopyFingerprint) => kept.push(fp),
@@ -353,7 +437,7 @@ describe("the head trim and where the file opened (modelled)", () => {
 		const readyHold = new Promise<void>(r => {
 			release = r
 		})
-		const { h, written } = recorder({ copies, readyHold })
+		const { h, lines } = recorder({ copies, readyHold })
 		const starts: number[] = []
 		const r = h.rec as unknown as {
 			captureCopyEnd(s: unknown, f: { startSample: number }, e: number): void
@@ -374,11 +458,14 @@ describe("the head trim and where the file opened (modelled)", () => {
 			},
 		})
 		expect(h.ops.map(op => op.outcome)).toEqual(["finalized"])
-		expect(written[0]!.facts?.headTrimmedMs).toBeGreaterThan(800)
+		const trimmed = keptTrims(lines)[0] as number
+		expect(trimmed).toBeGreaterThan(800)
 		expect(kept).toHaveLength(1)
 		expect(starts).toHaveLength(2)
-		expect(starts[0]!).toBeLessThan(kept[0]!.startSample)
-		expect(starts[1]).toBe(kept[0]!.startSample)
+		// The copy span: from where the file opened, then again from its first written sample.
+		expect(starts[1]! - starts[0]!).toBe((trimmed * LOW_FS) / 1000)
+		// The fingerprint's envelope is the meter's: from where the file opened.
+		expect(kept[0]!.startSample).toBe(starts[0])
 	}, 120_000)
 
 	for (const [name, joinedOn, outcome] of [
@@ -433,26 +520,26 @@ describe("the head trim and where the file opened (modelled)", () => {
 
 describe("files the head trim leaves alone (modelled)", () => {
 	it("an input gap filled before the first write: not trimmed", async () => {
-		const { h, written } = recorder()
+		const { h, lines } = recorder()
 		await over(h, { leadS: 0.8, voiceS: 4, skipAtS: 0.2 })
 		expect(h.ops.map(op => op.outcome)).toEqual(["finalized"])
 		expect(h.ops[0]!.gaps).toBeGreaterThanOrEqual(1)
-		expect(written[0]!.facts?.headTrimmedMs).toBe(0)
+		expect(keptTrims(lines)).toEqual([0])
 	}, 120_000)
 
 	it("a head cut (the ring no longer held the planned start): not trimmed, kept as source-lost", async () => {
-		const { h, written } = recorder()
+		const { h, lines } = recorder()
 		// First reported 4 s after the track's start (past the 3 s ring); the carrier keys 1.8 s in,
 		// so the file's head (from the ring's oldest sample) holds about 0.8 s of static.
 		await over(h, { leadS: 1.8, voiceS: 4.2, reportFromS: 4 })
 		expect(h.ops.map(op => [op.cut, op.outcome])).toEqual([
 			["source-lost", "finalized"],
 		])
-		expect(written[0]!.facts?.headTrimmedMs).toBe(0)
+		expect(keptTrims(lines)).toEqual([0])
 	}, 120_000)
 
 	it("a roll-over part opening on static before the voice resumes: neither trimmed nor faded", async () => {
-		const { h, written } = recorder()
+		const { h, written, lines } = recorder()
 		// The file opens 0.3 s before the track and rolls over 120 s later (119.7 s into the track):
 		// static over [119.1, 120.3) s, so part 2 opens on 0.6 s of static and then the voice.
 		await over(h, {
@@ -464,8 +551,9 @@ describe("files the head trim leaves alone (modelled)", () => {
 			["duration-limit", "finalized"],
 			["completed", "finalized"],
 		])
-		expect(written[0]!.facts?.headTrimmedMs).toBeGreaterThan(800)
-		expect(written[1]!.facts?.headTrimmedMs).toBe(0)
+		const trims = keptTrims(lines)
+		expect(trims[0]).toBeGreaterThan(800)
+		expect(trims[1]).toBe(0)
 		const part2 = joined(written[1]!.pcm)
 		// Static from its first sample: a fade would hold the first 20 ms near 0.
 		expect(meanAbs(part2, 0, 40)).toBeGreaterThan(
