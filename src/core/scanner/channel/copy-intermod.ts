@@ -22,13 +22,21 @@
  * per-epoch ring of recent track spans (TrackSpans): a parent whose observation closed long
  * before the keep (a provisional hold of up to 26 s) still counts.
  *
+ * The evidence names the frequencies it ties the file to (`roots`): a copy is only ever of one
+ * of them (copy-detector.ts reads the root's centre against them within `tolHz`). Rule A ties
+ * the file to both parents of every pair that lands on it, Rule B to the strong parent fa of
+ * every mirror (its unseen partner fb is never heard). On a band with several strong carriers a
+ * weaker real recording can land on some product of two unrelated ones by chance: that evidence
+ * names neither of the recording's simulcast twins, so it never makes it their copy.
+ *
  * Bounds (arithmetic): Rule A checks 16 × 15 = 240 ordered pairs; Rule B 16 parents × at most
- * TRACK_SPANS_MAX others = 4 096 checks (subtractions only). TrackSpans holds at most
- * TRACK_SPANS_MAX = 256 spans per source (oldest dropped first) and forgets spans that ended more
- * than COPY_HORIZON_MS before the newest one heard on that source. Each span keeps a centre
- * sampler of at most SPAN_HZ_SAMPLES_MAX = 16 values (a partner's raster fit reads its median,
- * not its latest snapshot): 256 × 16 = 4 096 numbers (32 KiB) per source, and spansOf sorts at
- * most 16 values per span (256 × 16 = 4 096 values, once per file end).
+ * TRACK_SPANS_MAX others = 16 × 1 024 = 16 384 checks (subtractions only), every pair visited
+ * (the roots are all the matches); `roots` holds at most the 16 parents. TrackSpans holds at
+ * most TRACK_SPANS_MAX = 1 024 spans per source (least recently heard dropped first) and forgets
+ * spans that ended more than COPY_HORIZON_MS before the newest one heard on that source. Each
+ * span keeps a centre sampler of at most SPAN_HZ_SAMPLES_MAX = 16 values (a partner's raster fit
+ * reads its median, not its latest snapshot): 1 024 × 16 = 16 384 numbers (128 KiB) per source,
+ * and spansOf sorts at most 16 values per span (16 384 values, once per file end).
  */
 
 import { rasterToleranceHz } from "../bandplan/index.js"
@@ -52,8 +60,23 @@ export const INTERMOD_TOL_BINS = 4
  * longest file (120 s) + the late-verdict grace (26 s), the copy horizon.
  */
 export const COPY_HORIZON_MS = 146_000
-/** Spans held per source (oldest dropped). */
-export const TRACK_SPANS_MAX = 256
+/**
+ * Open tracks a source's tracker holds at once: the spectrum engine's track cap
+ * (buildPipelineConfig `maxTracks` 512, fixed: no config key sets it). TrackSpans mirrors that
+ * tracker's tracks.
+ */
+export const TRACK_SPANS_OPEN_MAX = 512
+/**
+ * Spans held per source (least recently heard dropped): every open track the tracker can hold
+ * (TRACK_SPANS_OPEN_MAX = 512) plus as many ended ones inside the copy horizon, 2 × 512 = 1 024.
+ * The former 256 was half the open cap: on a busy band (more than 256 tracks heard within the
+ * horizon, live diagnostics counted 1 124 drops in 30 min, about 0.6 a second) it dropped spans
+ * still inside the horizon, among them ended parents a later file end still needs, and a live
+ * track dropped and heard again restarted its span (its overlap with the file cut short). With
+ * 1 024, a live track is dropped only after 1 024 other tracks were heard since its own last
+ * snapshot, and at most 511 of those can be open with it.
+ */
+export const TRACK_SPANS_MAX = 2 * TRACK_SPANS_OPEN_MAX
 
 /** Centres a span's sampler keeps (its median: the partner's raster fit). */
 export const SPAN_HZ_SAMPLES_MAX = 16
@@ -137,8 +160,23 @@ export function medianHz(c: HzSampler): number | null {
 }
 
 export interface IntermodEvidence {
+	/** The first match (diagnostics): Rule A before Rule B. */
 	readonly rule: "2f1-f2" | "symmetric"
 	readonly parents: readonly { readonly hz: number }[]
+	/**
+	 * The frequencies a copy may be of (Hz, at most INTERMOD_PARENTS_MAX): both parents of every
+	 * Rule A pair, fa of every Rule B mirror. Never empty.
+	 */
+	readonly roots: readonly number[]
+	/** The tolerance the evidence was matched with (intermodTolerance of the file's bins). */
+	readonly tolHz: number
+}
+
+/** Whether `ev` ties its file to a root at `rootHz`: |rootHz − root| ≤ ev.tolHz for one of them. */
+export function intermodTiedTo(ev: IntermodEvidence, rootHz: number): boolean {
+	if (!Number.isFinite(rootHz)) return false
+	for (const hz of ev.roots) if (Math.abs(rootHz - hz) <= ev.tolHz) return true
+	return false
 }
 
 /** One track as the evidence reads it (a span on its source's sample clock). */
@@ -214,14 +252,21 @@ export function intermodEvidenceOf(
 		)
 		.sort((a, b) => b.peakDbfs - a.peakDbfs)
 		.slice(0, INTERMOD_PARENTS_MAX)
+	let first: Pick<IntermodEvidence, "rule" | "parents"> | null = null
+	// The parents a copy may be of (each at most once: they are `parents`' own entries).
+	const roots = new Set<TrackSpan>()
 	for (const f1 of parents)
 		for (const f2 of parents) {
 			if (f1 === f2) continue
-			if (Math.abs(2 * f1.hz - f2.hz - file.hz) <= tol)
-				return { rule: "2f1-f2", parents: [{ hz: f1.hz }, { hz: f2.hz }] }
+			if (Math.abs(2 * f1.hz - f2.hz - file.hz) > tol) continue
+			first ??= { rule: "2f1-f2", parents: [{ hz: f1.hz }, { hz: f2.hz }] }
+			roots.add(f1)
+			roots.add(f2)
 		}
 	const fileRaster = rasterOf(file.hz, file.obwHz ?? null)
-	for (const fa of parents)
+	for (const fa of parents) {
+		// fa already ties the file (a Rule A pair): a mirror of it adds nothing.
+		if (roots.has(fa)) continue
 		for (const other of concurrent) {
 			if (other === fa) continue
 			// The mirror must be a real signal: a parent's SNR floor (its overlap is `concurrent`'s).
@@ -232,13 +277,18 @@ export function intermodEvidenceOf(
 				fileRaster === "off" ||
 				rasterOf(other.medianHz ?? other.hz, other.obwHz ?? null) === "off" ||
 				Math.abs(file.hz - fa.hz) >= INTERMOD_WIDE_HZ
-			)
-				return {
+			) {
+				first ??= {
 					rule: "symmetric",
 					parents: [{ hz: fa.hz }, { hz: other.hz }],
 				}
+				roots.add(fa)
+				break
+			}
 		}
-	return null
+	}
+	if (first === null) return null
+	return { ...first, roots: [...roots].map(t => t.hz), tolHz: tol }
 }
 
 interface SpanEntry {
@@ -252,17 +302,32 @@ interface SpanEntry {
 	centres: HzSampler
 }
 
+interface SourceSpans {
+	epoch: number
+	fs: number
+	newest: number
+	/** By track id, in the order last heard (a note moves its span to the end). */
+	spans: Map<string, SpanEntry>
+}
+
 /**
  * Recent track spans per source and epoch (the evidence's input): every snapshot the recorder
  * hears, its close included, by track id. A new epoch on a source starts its ring afresh (a
- * retune moves every frequency). Spans whose end is older than COPY_HORIZON_MS before the
- * newest end heard on the source are forgotten; at most TRACK_SPANS_MAX per source.
+ * retune moves every frequency); a snapshot of an OLDER epoch (a late close after the retune)
+ * is ignored, so it never wipes the current ring. Spans whose end is older than COPY_HORIZON_MS
+ * before the newest end heard on the source are forgotten; at most TRACK_SPANS_MAX per source.
+ *
+ * Cost per snapshot (arithmetic): O(1) amortised, no allocation for a track already held. The
+ * map is kept in the order spans were last heard, so expired spans sit at its front: a note
+ * prunes from the front while the front span is past the horizon and stops at the first one
+ * inside it, so each span is pruned once (O(1) amortised over its notes), and the count bound
+ * drops at most one front span per note. Before: every snapshot allocated a fresh entry and
+ * walked all spans (up to 256). A span heard in a different order than its end (snapshots of two
+ * tracks a few samples apart) can outlive the horizon at the front's back until the front ages
+ * out; spansOf filters by the horizon, so what it returns is exact.
  */
 export class TrackSpans {
-	private readonly sources = new Map<
-		string,
-		{ epoch: number; fs: number; newest: number; spans: Map<string, SpanEntry> }
-	>()
+	private readonly sources = new Map<string, SourceSpans>()
 	/** Spans dropped by the count bound (diagnostics). */
 	overflow = 0
 
@@ -288,6 +353,8 @@ export class TrackSpans {
 		)
 			return
 		let src = this.sources.get(sourceId)
+		// A late snapshot of an older epoch never resets the current ring.
+		if (src !== undefined && track.epoch < src.epoch) return
 		if (src === undefined || src.epoch !== track.epoch) {
 			src = {
 				epoch: track.epoch,
@@ -298,40 +365,48 @@ export class TrackSpans {
 			this.sources.set(sourceId, src)
 		}
 		const prev = src.spans.get(track.trackId)
-		const entry: SpanEntry = {
-			hz: track.centreHz,
-			startSample: Math.min(
-				prev?.startSample ?? track.startSample,
-				track.startSample,
-			),
-			lastSample: Math.max(
-				prev?.lastSample ?? track.lastSample,
-				track.lastSample,
-			),
-			snrDb: Math.max(prev?.snrDb ?? Number.NEGATIVE_INFINITY, track.snrDb),
-			peakDbfs: Math.max(
-				prev?.peakDbfs ?? Number.NEGATIVE_INFINITY,
-				track.peakDbfs,
-			),
-			binHz:
-				typeof track.binHz === "number" && Number.isFinite(track.binHz)
-					? track.binHz
-					: (prev?.binHz ?? null),
-			obwHz:
-				typeof track.obwHz === "number" && Number.isFinite(track.obwHz)
-					? track.obwHz
-					: (prev?.obwHz ?? null),
-			centres: prev?.centres ?? newHzSampler(),
+		const binHz =
+			typeof track.binHz === "number" && Number.isFinite(track.binHz)
+				? track.binHz
+				: null
+		const obwHz =
+			typeof track.obwHz === "number" && Number.isFinite(track.obwHz)
+				? track.obwHz
+				: null
+		let entry: SpanEntry
+		if (prev === undefined) {
+			entry = {
+				hz: track.centreHz,
+				startSample: track.startSample,
+				lastSample: track.lastSample,
+				snrDb: track.snrDb,
+				peakDbfs: track.peakDbfs,
+				binHz,
+				obwHz,
+				centres: newHzSampler(),
+			}
+		} else {
+			entry = prev
+			entry.hz = track.centreHz
+			entry.startSample = Math.min(entry.startSample, track.startSample)
+			entry.lastSample = Math.max(entry.lastSample, track.lastSample)
+			entry.snrDb = Math.max(entry.snrDb, track.snrDb)
+			entry.peakDbfs = Math.max(entry.peakDbfs, track.peakDbfs)
+			if (binHz !== null) entry.binHz = binHz
+			if (obwHz !== null) entry.obwHz = obwHz
+			// Moved to the end: the map stays in the order spans were last heard.
+			src.spans.delete(track.trackId)
 		}
 		sampleHz(entry.centres, track.centreHz, SPAN_HZ_SAMPLES_MAX)
-		src.spans.delete(track.trackId)
 		src.spans.set(track.trackId, entry)
-		const horizon = (COPY_HORIZON_MS * src.fs) / 1000
-		// At most TRACK_SPANS_MAX spans walked per snapshot.
-		const newest = Math.max(entry.lastSample, src.newest)
-		src.newest = newest
-		for (const [id, s] of src.spans)
-			if (s.lastSample < newest - horizon) src.spans.delete(id)
+		if (entry.lastSample > src.newest) src.newest = entry.lastSample
+		const cutoff = src.newest - (COPY_HORIZON_MS * src.fs) / 1000
+		// From the front only, stopping at the first span inside the horizon (O(1) amortised).
+		for (const [id, s] of src.spans) {
+			if (s.lastSample >= cutoff) break
+			src.spans.delete(id)
+		}
+		// At most one over the bound per note (one span added).
 		while (src.spans.size > TRACK_SPANS_MAX) {
 			const oldest = src.spans.keys().next()
 			if (oldest.done === true) break
@@ -340,13 +415,16 @@ export class TrackSpans {
 		}
 	}
 
-	/** The spans of `sourceId` in `epoch` (empty for another epoch). */
+	/** The spans of `sourceId` in `epoch` inside the horizon (empty for another epoch). */
 	spansOf(sourceId: string, epoch: number): TrackSpan[] {
 		const src = this.sources.get(sourceId)
 		if (src === undefined || src.epoch !== epoch) return []
-		return [...src.spans.values()].map(e => {
+		const cutoff = src.newest - (COPY_HORIZON_MS * src.fs) / 1000
+		const out: TrackSpan[] = []
+		for (const e of src.spans.values()) {
+			if (e.lastSample < cutoff) continue
 			const median = medianHz(e.centres)
-			return {
+			out.push({
 				hz: e.hz,
 				startSample: e.startSample,
 				lastSample: e.lastSample,
@@ -355,8 +433,9 @@ export class TrackSpans {
 				binHz: e.binHz,
 				obwHz: e.obwHz,
 				...(median === null ? {} : { medianHz: median }),
-			}
-		})
+			})
+		}
+		return out
 	}
 
 	forgetSource(sourceId: string): void {

@@ -4,8 +4,10 @@
  * per source, and the one group record of which file is a copy of which root.
  *
  * pass(A, B): same source and epoch, the overlap rule, the same audio (sameAudio), and the WEAKER
- * of the two (total order below) carries evidence of its own: intermod evidence, or a frequency
- * off its band's raster. Level difference is never evidence (it only ranks), and an unknown
+ * of the two (total order below) carries evidence of its own: intermod evidence TIED TO THE
+ * STRONGER (one of the evidence's roots within its tolerance of the stronger's centre:
+ * copy-intermod.ts intermodTiedTo; a product of two unrelated carriers says nothing about this
+ * pair), or a frequency off its band's raster. Level difference is never evidence (it only ranks), and an unknown
  * raster (no scan range covers the file) gives none: same audio without evidence changes
  * nothing (copySameAudioNoEvidence).
  *
@@ -40,7 +42,12 @@
  * A fingerprint enters the ring only once its operation settled `finalized` (a discarded,
  * aborted or failed file never does, and nothing is written for it). Writes (`write`) go to the
  * store, which writes or removes the file's copy.json under its lock; a skipped or failed write
- * leaves the file served as before.
+ * leaves the file served as before. The detector sets a file's copy state before the store
+ * answers: a mark the store skips (or a failed write) turns the file back into a root in the ring
+ * (copyWriteSkipped), unless a later job changed its state meanwhile; a root has no members, so
+ * nothing is orphaned. A skipped REMOVAL (null) changes nothing: the store skips it when there is
+ * no mark to remove, and a mark it could not remove names a root that is now a copy or gone,
+ * which the catalogue reads as no copy.
  */
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import {
@@ -52,6 +59,7 @@ import {
 } from "./copy-fingerprint.js"
 import {
 	COPY_HORIZON_MS,
+	intermodTiedTo,
 	type IntermodEvidence,
 	type RasterFit,
 } from "./copy-intermod.js"
@@ -97,7 +105,10 @@ export interface CopySettled {
 }
 
 export interface CopyDetectorDeps {
-	/** Writes (`copy`) or removes (null) the operation's copy.json; never throws synchronously. */
+	/**
+	 * Writes (`copy`) or removes (null) the operation's copy.json; never throws synchronously.
+	 * Resolving "skipped" (or rejecting) means nothing was written.
+	 */
 	write(operationId: string, copy: CopyRecord | null): Promise<unknown>
 	logger: Logger
 	/** Next-turn scheduler; default setImmediate. */
@@ -115,6 +126,8 @@ export interface CopyCounters {
 	copyUnlinked: number
 	copyRingOverflow: number
 	copyQueueDropped: number
+	/** Copy marks the store skipped or failed to write: the file was turned back into a root. */
+	copyWriteSkipped: number
 	copyComparisonMsMax: number
 }
 
@@ -143,10 +156,17 @@ interface Passed {
 }
 type PassResult = Passed | { readonly ok: false }
 
-/** The file's own evidence of being a copy: intermod and/or off its raster. */
-export function evidenceOf(fp: CopyFingerprint): CopyEvidence[] {
+/**
+ * The file's own evidence of being a copy of `root`: intermod tied to the root (one of its roots
+ * within its tolerance of the root's centre) and/or off its raster.
+ */
+export function evidenceOf(
+	fp: CopyFingerprint,
+	root: { readonly hz: number },
+): CopyEvidence[] {
 	const out: CopyEvidence[] = []
-	if (fp.intermod !== null) out.push("intermod")
+	if (fp.intermod !== null && intermodTiedTo(fp.intermod, root.hz))
+		out.push("intermod")
 	if (fp.raster === "off") out.push("off-raster")
 	return out
 }
@@ -218,6 +238,7 @@ export class CopyDetector {
 		copyUnlinked: 0,
 		copyRingOverflow: 0,
 		copyQueueDropped: 0,
+		copyWriteSkipped: 0,
 		copyComparisonMsMax: 0,
 	}
 	/** Resolves when the queue is empty (tests and stop). */
@@ -328,8 +349,8 @@ export class CopyDetector {
 			return { ok: false }
 		}
 		if (!sameAudio(c)) return { ok: false }
-		const weaker = strongerThan(a, b) ? b : a
-		const evidence = evidenceOf(weaker.fp)
+		const [weaker, stronger] = strongerThan(a, b) ? [b, a] : [a, b]
+		const evidence = evidenceOf(weaker.fp, stronger.fp)
 		if (evidence.length === 0) {
 			this.counters.copySameAudioNoEvidence++
 			this.log.debug(
@@ -373,9 +394,33 @@ export class CopyDetector {
 		ring.splice(i, 1)
 	}
 
+	/**
+	 * Asks the store for `e`'s mark (`copy`, e.state already set to it) or its removal (null). A
+	 * mark the store skips or fails turns `e` back into a root, when its state is still the one
+	 * this write set.
+	 */
 	private write(e: Entry, copy: CopyRecord | null): void {
-		if (copy !== null) this.counters.copyMarked++
-		void this.deps.write(e.fp.operationId, copy).catch(() => undefined)
+		if (copy === null) {
+			void this.deps.write(e.fp.operationId, null).catch(() => undefined)
+			return
+		}
+		this.counters.copyMarked++
+		const set = e.state
+		const refused = (): void => {
+			this.counters.copyWriteSkipped++
+			if (e.state === set) e.state = { kind: "root" }
+		}
+		let pending: Promise<unknown>
+		try {
+			pending = this.deps.write(e.fp.operationId, copy)
+		} catch (cause) {
+			// A writer breaking its contract: the mark is reverted and the job fails (logged).
+			refused()
+			throw cause
+		}
+		void pending.then(outcome => {
+			if (outcome === "skipped") refused()
+		}, refused)
 	}
 
 	private recordOf(of: Entry, r: Passed): CopyRecord {

@@ -69,6 +69,7 @@ function fakeCopies() {
 			copyUnlinked: 0,
 			copyRingOverflow: 0,
 			copyQueueDropped: 0,
+			copyWriteSkipped: 0,
 			copyComparisonMsMax: 0,
 		}),
 	}
@@ -154,6 +155,8 @@ describe("WidebandAnalogRecorder: copy detection", () => {
 		expect(fp.intermod).toEqual({
 			rule: "2f1-f2",
 			parents: [{ hz: F1 }, { hz: F2 }],
+			roots: [F1, F2],
+			tolHz: 4_000,
 		})
 		expect(fp.raster).toBe("off")
 		expect(fp.hz).toBe(FC)
