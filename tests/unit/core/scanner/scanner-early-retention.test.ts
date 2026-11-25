@@ -44,6 +44,7 @@ interface Internals {
 	evidence: {
 		beginAnalog(input: AnalogInput): AnalogHandle
 		recordingsQuotaExceeded: RecordingsQuotaExceeded | null
+		recordingsQuotaInventoryChanged: boolean
 		operationsHeldFull: boolean
 	}
 }
@@ -146,6 +147,71 @@ describe("early retention after a storage-cap refusal", () => {
 			await settle()
 		}
 		expect(passes).toBe(2)
+	})
+})
+
+describe("early retention while the quota is exceeded (B2)", () => {
+	function exceeded() {
+		let now = 40_000_000
+		const h = serviceHarness({ now: () => now })
+		const svc = h.service as unknown as Internals
+		svc.evidence.beginAnalog = () =>
+			({
+				ready: Promise.reject(
+					new AnalogStorageBytesError("Recording storage cap"),
+				),
+			}) as unknown as AnalogHandle
+		const quota: RecordingsQuotaExceeded = {
+			capBytes: 1,
+			usedBytes: 2,
+			overBytes: 1,
+		}
+		Object.defineProperty(svc.evidence, "recordingsQuotaExceeded", {
+			get: () => quota,
+		})
+		let changed = false
+		Object.defineProperty(svc.evidence, "recordingsQuotaInventoryChanged", {
+			get: () => changed,
+		})
+		const refuse = async (): Promise<boolean> => {
+			svc.lastMaintenanceAt = now
+			await svc
+				.beginAnalogRecording({} as AnalogInput)
+				.ready.catch(() => undefined)
+			await settle()
+			return now - svc.lastMaintenanceAt >= MAINTENANCE_EVERY_MS
+		}
+		return {
+			refuse,
+			advance: (ms: number) => {
+				now += ms
+			},
+			setChanged: (v: boolean) => {
+				changed = v
+			},
+		}
+	}
+
+	it("exceeded with the inventory changed since that pass: an early pass, at most once per 30 s", async () => {
+		const t = exceeded()
+		t.setChanged(true)
+		expect(await t.refuse()).toBe(true)
+		// Within the 30 s debounce: not again (the bound is unchanged while exceeded).
+		t.advance(EARLY_RETENTION_EVERY_MS - 1)
+		expect(await t.refuse()).toBe(false)
+		// At exactly 30 s: again.
+		t.advance(1)
+		expect(await t.refuse()).toBe(true)
+	})
+
+	it("exceeded with the inventory unchanged since that pass: no early pass (the 5 min cadence retries)", async () => {
+		const t = exceeded()
+		t.setChanged(false)
+		expect(await t.refuse()).toBe(false)
+		t.advance(EARLY_RETENTION_EVERY_MS)
+		expect(await t.refuse()).toBe(false)
+		t.advance(10 * EARLY_RETENTION_EVERY_MS)
+		expect(await t.refuse()).toBe(false)
 	})
 })
 

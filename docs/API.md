@@ -965,7 +965,12 @@ applies) says why, each with a closed `code`, fixed `message` text and the `fix`
   (`refused:tuning`, `refused:cpu`, `refused:slots`, `refused:no-iq`, `refused:store`,
   `refused:start-failed`, `discarded:store-backlog`, `discarded:write-failed`,
   `discarded:buffer-full`), no two of them in a row more than 5 minutes apart and the newest at
-  most 5 minutes old. `refused:tuning` counts only while its source's tuning is unproven
+  most 5 minutes old. `refused:store` is the store's refusal of the recording (its receipt error
+  says why); for `storage-cap` (the recordings quota) the admission has already removed what it
+  could (up to 8 removable finished analog recordings), so the quota holds only protected
+  recordings, a removal failed, more was needed than 8 recordings free at once, or recordings in
+  flight took the room it freed.
+  `refused:tuning` counts only while its source's tuning is unproven
   (`tuningUnproven` on [`GET /api/sources`](#get-apisources)): the recorder also refuses a
   snapshot from before a retune with it. `refused:slots` counts only while no recording runs on
   its source (no `recorder.sessions` entry with that `sourceId` on `GET /api/scanner`): with one
@@ -4365,8 +4370,16 @@ are left does not show it; another pass runs within 30 s instead.
 space reserved by recordings in flight plus that room, less `capBytes` (cores before 2026-11-23:
 `usedBytes - capBytes`):
 `{ "state": "exceeded", "reason": "storage-cap", "capBytes": 536870912, "usedBytes": 601882624, "overBytes": 68884568 }`.
-Meanwhile new analog recordings are refused with the receipt error `storage-cap`; other writes
-stop only at the free-disk threshold (`disk-low`). It is absent within the quota and from older
+Meanwhile new analog recordings are refused with the receipt error `storage-cap`, each after
+removing what became removable itself: an analog admission short of room removes up to 8
+removable finished analog recordings (never digital voice, probe or other recordings), noise-like
+first, then other, then voice-like, under retention's rules and the operator's Keep as it is at
+that moment, and none before the first retention pass after a start. The receipt error stays
+`storage-cap` whatever the store's reason: `no-removable` (none was left), `evict-failed` (one
+failed to go), `insufficient` (8 were not enough) or `raced` (the files it removed freed what it
+was short of, but recordings in flight took that room before its second check). Other writes stop
+only at the free-disk threshold (`disk-low`). A recording being written holds only its own files,
+not its discovery's older ones. It is absent within the quota and from older
 cores. One warning line names `storage-cap` with the same numbers when it starts, and one info
 line when it clears.
 

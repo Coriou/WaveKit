@@ -469,6 +469,8 @@ export class EvidenceStore {
 	/** Only in-flight removals are retained; the discovery store supplies lasting authority. */
 	private readonly removals = new Map<string, Promise<void>>()
 	private readonly isDiscoveryLive: (id: string) => boolean
+	/** The operator keeps the discovery now (analog admission eviction's live keep); absent: none. */
+	private readonly isDiscoveryKept: ((id: string) => boolean) | undefined
 	private analog: AnalogOperations | null = null
 	private readonly analogIo: AnalogOperationIo | undefined
 	/** WG9 req 2.5: the deletion decision; absent keeps today's behaviour. */
@@ -490,6 +492,8 @@ export class EvidenceStore {
 	private unknownHeldFiles = 0
 	/** The recordings quota the last retention pass left exceeded; null within it. */
 	private quotaExceeded: RecordingsQuotaExceeded | null = null
+	/** The analog inventory epoch (AnalogOperations.inventoryEpoch) when the quota was last found exceeded. */
+	private quotaExceededEpoch: number | null = null
 	/** noteOperationsHeld: the full-of-held state was last logged as entered. */
 	private operationsHeldLogged = false
 	/**
@@ -520,6 +524,11 @@ export class EvidenceStore {
 		statfs?: (p: string) => Promise<{ freeBytes: number }>
 		/** Required by production producers; standalone stores may own admission themselves. */
 		isDiscoveryLive?: (id: string) => boolean
+		/**
+		 * True while the operator keeps the discovery (the keep retention reads): an analog
+		 * admission's eviction also holds the files of a discovery kept since the last pass.
+		 */
+		isDiscoveryKept?: (id: string) => boolean
 		analogIo?: AnalogOperationIo
 		/** WG9 req 2.5: kept recordings survive retention and block discovery removal. */
 		protection?: RecordingProtection
@@ -542,6 +551,7 @@ export class EvidenceStore {
 		this.now = opts.now
 		this.statfs = opts.statfs ?? defaultStatfs
 		this.isDiscoveryLive = opts.isDiscoveryLive ?? (() => true)
+		this.isDiscoveryKept = opts.isDiscoveryKept
 		this.analogIo = opts.analogIo
 		this.protection = opts.protection
 		this.recordingDeleteFs = opts.recordingDeleteFs
@@ -702,6 +712,57 @@ export class EvidenceStore {
 	}
 
 	/**
+	 * The quota is exceeded and the analog inventory changed since the pass that found it so
+	 * (AnalogOperations.inventoryEpoch: a file finalized, a scan applied, an operation published):
+	 * files may have become removable, so an early pass may run while exceeded (B2). False within
+	 * the quota and without analog operations.
+	 */
+	get recordingsQuotaInventoryChanged(): boolean {
+		return (
+			this.quotaExceeded !== null &&
+			this.quotaExceededEpoch !== null &&
+			this.analog !== null &&
+			this.analog.inventoryEpoch !== this.quotaExceededEpoch
+		)
+	}
+
+	/**
+	 * Subscribes to the recordings an analog admission's eviction removed (root-relative paths,
+	 * as retention's `deleted`; AnalogOperations B3); returns the unsubscribe.
+	 */
+	onRecordingsEvicted(
+		listener: (artifacts: readonly string[]) => void,
+	): () => void {
+		this.evictedListeners.add(listener)
+		return () => {
+			this.evictedListeners.delete(listener)
+		}
+	}
+	private readonly evictedListeners = new Set<
+		(artifacts: readonly string[]) => void
+	>()
+	/**
+	 * After an analog admission's eviction, as after a retention pass: the folders it emptied
+	 * are removed (removeEmptyDirs, only those holding a file it deleted), the folder index is
+	 * listed again, then the listeners hear the artifacts. Never rejects; a listener's throw is
+	 * its own.
+	 */
+	private async afterEviction(artifacts: readonly string[]): Promise<void> {
+		try {
+			await this.removeEmptyDirs(new Set(), artifacts)
+			await this.loadFolderIndex()
+		} catch (err: unknown) {
+			this.log.debug({ err }, "Scanner folder listing failed")
+		}
+		for (const l of [...this.evictedListeners])
+			try {
+				l(artifacts)
+			} catch (err: unknown) {
+				this.log.warn({ err }, "Evicted recordings listener failed")
+			}
+	}
+
+	/**
 	 * The last retention pass found the analog operation inventory full with the operations it
 	 * may not remove alone filling it (AnalogOperations.operationsHeldFull): admission refuses
 	 * with `storage-cap` (the inventory limit) until some of them are released or deleted.
@@ -813,6 +874,15 @@ export class EvidenceStore {
 			notice: n => {
 				for (const l of [...this.analogNoticeListeners]) l(n)
 			},
+			evicted: artifacts => {
+				void this.afterEviction(artifacts)
+			},
+			...(this.isDiscoveryKept ? { discoveryKept: this.isDiscoveryKept } : {}),
+			evictionLogged: counts =>
+				this.log.debug(
+					counts,
+					"Scanner analog admission removed recordings to make room",
+				),
 			setAsideLogged: counts =>
 				this.log.warn(
 					counts,
@@ -1879,6 +1949,8 @@ export class EvidenceStore {
 				"Scanner recordings quota no longer exceeded; analog recordings are admitted again",
 			)
 		this.quotaExceeded = next
+		this.quotaExceededEpoch =
+			next === null ? null : (this.analog?.inventoryEpoch ?? null)
 		return again
 	}
 

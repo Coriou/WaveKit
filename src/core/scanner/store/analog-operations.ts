@@ -55,6 +55,7 @@ import {
 	RECORDING_FACTS_TEMP,
 	factsFitFolder,
 	recordingFactsBytes,
+	recordingFactsOf,
 } from "./recording-facts.js"
 import {
 	COPY_MARKS_DIR,
@@ -179,9 +180,128 @@ export interface LegacyRetention {
  * this class tells it apart (isStorageBytesRefusal).
  */
 export class AnalogStorageBytesError extends WaveKitError {
-	constructor(message: string) {
+	/**
+	 * Why the bytes could not be found (admission eviction, B3): `no-removable` no file the
+	 * retention policy lets go was left (or no retention pass has run yet, so its keep set is
+	 * unknown), `evict-failed` removing a chosen file failed, `insufficient` the files removed
+	 * (at most ANALOG_EVICT_MAX_VICTIMS) did not free enough, `raced` they freed the bytes the
+	 * first check was short of but the re-check was still short (other recordings in flight
+	 * reserved or wrote meanwhile).
+	 */
+	readonly reason: AnalogBytesRefusalReason
+	constructor(
+		message: string,
+		reason: AnalogBytesRefusalReason = "no-removable",
+	) {
 		super(message, "SCANNER_ANALOG_STORAGE_CAP")
+		this.reason = reason
 	}
+}
+export type AnalogBytesRefusalReason =
+	| "no-removable"
+	| "evict-failed"
+	| "insufficient"
+	| "raced"
+/**
+ * Files one admission may remove to find its bytes (B3): 8. A normal shortfall is about one
+ * RESERVATION (1,936,428 B), one or two finalized files; 8 retires (each one serialise turn and
+ * one exclusive turn with a few unlinks and fsyncs) bound how long `ready` can wait. Past 8 the
+ * admission is refused (`insufficient`) and the next one evicts the next 8. Retires that remove
+ * nothing (the file was kept, became uncertain or was already gone in its own turn) count apart,
+ * at most ANALOG_EVICT_MAX_VICTIMS more: at most 2 × 8 = 16 retire attempts per admission.
+ */
+export const ANALOG_EVICT_MAX_VICTIMS = 8
+/**
+ * The periodic share (noise-quarantine.ts NoiseQuarantineFacts.periodicShare) from which a kept
+ * file reads voice-like for admission eviction: 0.10, i.e. a tenth of its admission frames
+ * pitched. Under it a file kept by `prior-none` reads noise-like.
+ */
+export const EVICT_VOICE_PERIODIC_SHARE = 0.1
+/** Admission eviction order (B3): noise-like files go first, then other unkept, then voice-like. */
+export type AnalogEvictClass = 0 | 1 | 2
+/**
+ * What else a file's class reads (analogEvictClassOf): its speech reading at the finish
+ * (receipt or sidecar `speechHeard`) and whether its receipt predates the verdict members
+ * (`legacy`: no `keptBy`, `speechHeard` or `startedAt`, all first written together, and no facts
+ * sidecar), so a missing `keptBy` means an old file, not a recorder that gave none.
+ */
+export interface AnalogEvictExtra {
+	readonly speechHeard?: boolean | null | undefined
+	readonly legacy?: boolean
+}
+/**
+ * A finalized file's admission eviction class from its receipt's `keptBy` and its facts sidecar
+ * (recording-facts.ts): voice-like (2) when it was kept for its own tone, a tone was heard
+ * (an object), or its periodic share is at least EVICT_VOICE_PERIODIC_SHARE; noise-like (0) when
+ * it was kept as noise evidence (`noise-evidence`), kept at once (`prior-none`) with admission
+ * facts whose periodic share is under it and no speech heard (`speechHeard` not true), or its
+ * receipt predates `keptBy` and it has no admission facts (`legacy`: the oldest files); every
+ * other file is other (1), a newer file without a `keptBy` or facts included. Pure.
+ */
+export function analogEvictClassOf(
+	keptBy: string | null | undefined,
+	admission: { readonly periodicShare: number } | null | undefined,
+	tone: unknown,
+	extra: AnalogEvictExtra = {},
+): AnalogEvictClass {
+	const periodic = admission?.periodicShare
+	const toned = typeof tone === "object" && tone !== null
+	if (
+		keptBy === "own-tone" ||
+		toned ||
+		(periodic !== undefined && periodic >= EVICT_VOICE_PERIODIC_SHARE)
+	)
+		return 2
+	if (keptBy === "noise-evidence") return 0
+	if (
+		keptBy === "prior-none" &&
+		periodic !== undefined &&
+		extra.speechHeard !== true
+	)
+		return 0
+	if (
+		(keptBy === undefined || keptBy === null) &&
+		!admission &&
+		extra.legacy === true
+	)
+		return 0
+	return 1
+}
+/** One evictable row of the admission eviction index (Inventory.evict). */
+export interface AnalogEvictRow {
+	readonly id: string
+	readonly cls: AnalogEvictClass
+	/** Epoch ms of the keep (sidecar keptAt), else the first sample (receipt startedAt), else +∞. */
+	readonly ageMs: number
+	readonly bytes: number
+}
+/**
+ * Admission eviction's choice (B3, invariant I3): from `rows` (already filtered to the eligible
+ * ones), lexicographically by (cls, ageMs, id), the shortest prefix whose bytes reach
+ * `needBytes`, at most `max` rows (ANALOG_EVICT_MAX_VICTIMS). Pure, O(n log n), n ≤
+ * MAX_RECOVERY_OPERATIONS (4096). A need of 0 or less chooses none.
+ */
+export function chooseEvictVictims(
+	rows: readonly AnalogEvictRow[],
+	needBytes: number,
+	max = ANALOG_EVICT_MAX_VICTIMS,
+): AnalogEvictRow[] {
+	if (!(needBytes > 0)) return []
+	const sorted = [...rows].sort(compareEvictRows)
+	const out: AnalogEvictRow[] = []
+	let freed = 0
+	for (const row of sorted) {
+		if (out.length >= max || freed >= needBytes) break
+		out.push(row)
+		freed += row.bytes
+	}
+	return out
+}
+/** The (cls, ageMs, id) order of admission eviction. */
+export function compareEvictRows(a: AnalogEvictRow, b: AnalogEvictRow): number {
+	if (a.cls !== b.cls) return a.cls - b.cls
+	if (a.ageMs !== b.ageMs) return a.ageMs < b.ageMs ? -1 : 1
+	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
 }
 /**
  * The refusal for the operation inventory (intents + unpublished at MAX_RECOVERY_OPERATIONS),
@@ -701,6 +821,16 @@ interface Context {
 	}) => void
 	/** Store notices (copy-changed, copies-loaded, removed); never throws into the store. */
 	notice?: (n: AnalogNotice) => void
+	/** Artifacts (root-relative) an admission's eviction removed (B3), as retention reports `deleted`. */
+	evicted?: (artifacts: readonly string[]) => void
+	/** Counts of one admission eviction (debug log, numbers only). */
+	evictionLogged?: (counts: { victims: number; freedBytes: number }) => void
+	/**
+	 * True while the operator keeps `discoveryId` now (the keep the next retention pass reads):
+	 * admission eviction checks it beside the last pass's keep set, at the choice and again in
+	 * the unlink turn, so a Keep since that pass holds its files. A throw counts as kept.
+	 */
+	discoveryKept?: (discoveryId: string) => boolean
 	/**
 	 * The noise quarantine (noise-quarantine.ts NoiseQuarantine.admit): moves a cancelled noise
 	 * file's `payload.wav.part` out; true when moved, false (never throws) when the caller deletes it.
@@ -722,6 +852,18 @@ interface Inventory {
 	opMetadata: Map<string, number>
 	/** Artifact (root-relative path) to its operation id: ownsArtifact without a walk. */
 	artifacts: Map<string, string>
+	/**
+	 * Finalized operations (a parsed finalized receipt) with their admission eviction class and
+	 * age (B3): the in-memory index admission chooses victims from without any I/O.
+	 */
+	evict: Map<string, { cls: AnalogEvictClass; ageMs: number }>
+}
+/** A keep set as retention reads it (only membership): a pass's set, or admission's live view. */
+type KeepView = Pick<ReadonlySet<string>, "has">
+/** Admission eviction's plan (B3): the bytes short at round 0 and the eligible rows in order. */
+interface EvictPlan {
+	need: number
+	order: readonly AnalogEvictRow[]
 }
 /** Which of an operation id's three names (cleanup marker, staging folder, folder) exist. */
 interface Presence {
@@ -746,6 +888,8 @@ interface OperationScan {
 	cleanup: boolean
 	/** Verified crash residue to move aside (staging folder, folder). */
 	residue: { name: string; id: string; reason: AnalogSetAsideReason }[]
+	/** Its admission eviction row (finalized receipt read), else null: never an eviction victim. */
+	evict: { cls: AnalogEvictClass; ageMs: number } | null
 }
 function emptyInventory(): Inventory {
 	return {
@@ -757,6 +901,7 @@ function emptyInventory(): Inventory {
 		opBytes: new Map(),
 		opMetadata: new Map(),
 		artifacts: new Map(),
+		evict: new Map(),
 	}
 }
 /** Removes `id`'s share from the totals and indexes (the inverse of addOperation). */
@@ -770,6 +915,7 @@ function dropOperation(inventory: Inventory, id: string): void {
 		inventory.artifacts.delete(intent.artifact)
 	inventory.intents.delete(id)
 	inventory.cleanup.delete(id)
+	inventory.evict.delete(id)
 }
 /** Adds a scanned id's share (after dropOperation of the same id, or into a fresh inventory). */
 function addOperation(inventory: Inventory, scan: OperationScan): void {
@@ -786,6 +932,7 @@ function addOperation(inventory: Inventory, scan: OperationScan): void {
 	if (scan.intent) {
 		inventory.intents.set(scan.id, scan.intent)
 		inventory.artifacts.set(scan.intent.artifact, scan.id)
+		if (scan.evict) inventory.evict.set(scan.id, scan.evict)
 	}
 }
 /**
@@ -995,6 +1142,22 @@ export class AnalogOperations {
 		tried: ReadonlySet<string>
 		legacyUntried: number
 	} | null = null
+	/**
+	 * The keep set of the last retention pass that completed (B3): admission eviction applies its
+	 * policy. Null until one completed (no eviction before the first pass: fail closed); unlike
+	 * lastPass it is not cleared while a pass runs.
+	 */
+	private evictKeep: ReadonlySet<string> | null = null
+	/** Victims an admission chose and has not finished retiring, to the admitting operation id. */
+	private readonly evicting = new Map<string, string>()
+	/** Bytes an admission's own evictions freed, to its operation id, until its re-check. */
+	private readonly earmarked = new Map<string, number>()
+	/**
+	 * Counts inventory changes that may make bytes removable (B2): every applied scan, full scan,
+	 * published intent and settled operation (active.delete). The scanner compares it with the
+	 * value the quota-exceeded pass saw before asking an early pass while exceeded.
+	 */
+	private epoch = 0
 	/** Why the last recovery quarantined each operation it did not admit (closed reasons). */
 	private readonly quarantine = new Map<string, AnalogQuarantine>()
 	/** Artifacts the last retention pass kept because their owner is unknown (table full). */
@@ -1060,9 +1223,10 @@ export class AnalogOperations {
 		return this.shortfallWith(legacy, ADMISSION_HEADROOM)
 	}
 	/**
-	 * managed + `legacy` + outstanding reservations + `headroom` − the cap: quotaShortfall with
-	 * ADMISSION_HEADROOM (the trigger), retention's stop test with EVICTION_TARGET_HEADROOM.
-	 * Null while the inventory is unknown.
+	 * managed + `legacy` + outstanding reservations + bytes admissions freed for themselves and
+	 * have not reserved yet (earmarked, B3: as good as used) + `headroom` − the cap: quotaShortfall
+	 * with ADMISSION_HEADROOM (the trigger), retention's stop test with EVICTION_TARGET_HEADROOM
+	 * (and so the exceeded state's overBytes). Null while the inventory is unknown.
 	 */
 	private shortfallWith(legacy: number, headroom: number): number | null {
 		if (this.inventory.unknown) return null
@@ -1071,6 +1235,7 @@ export class AnalogOperations {
 			legacy +
 			this.reservedUnused() +
 			this.uncertainUnused() +
+			this.earmarkedExcept(null) +
 			headroom -
 			this.context.limits().maxBytes
 		)
@@ -1084,6 +1249,17 @@ export class AnalogOperations {
 			this.inventory.intents.size + this.unpublished() >=
 			MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM
 		)
+	}
+	/**
+	 * A finalized operation's admission eviction class (B3, Inventory.evict), memory only; null
+	 * when it is not in the index (not finalized, unreadable receipt, unknown id).
+	 */
+	evictionClass(operationId: string): AnalogEvictClass | null {
+		return this.inventory.evict.get(operationId)?.cls ?? null
+	}
+	/** The inventory change counter (B2, see `epoch`). */
+	get inventoryEpoch(): number {
+		return this.epoch
 	}
 	get managedBytes(): number | null {
 		return this.inventory.unknown
@@ -1280,10 +1456,12 @@ export class AnalogOperations {
 	 * lock, so concurrent admissions never share free space. The measurements it compares (free
 	 * disk, the other recordings' bytes) are taken before it, and the operation's folder is built
 	 * after it: an admitted, active operation's files are its own (every scan counts an active
-	 * id's folders as owned, retention and deletion leave its discovery alone), so no other step
-	 * needs the lock to exclude them. The inventory is kept current by every change this process
-	 * makes (refresh) and by the audit for outside ones: no scan here, so admission costs the same
-	 * at any store size.
+	 * id's folders as owned, retention leaves its own files alone, deletion its discovery), so no
+	 * other step needs the lock to exclude them. The inventory is kept current by every change
+	 * this process makes (refresh) and by the audit for outside ones: no scan here, so admission
+	 * costs the same at any store size. Short of bytes, it removes up to ANALOG_EVICT_MAX_VICTIMS
+	 * (8) removable files itself (B3: evictOrder, evictFor) and re-checks once, so a recording is
+	 * refused for bytes only when no removable bytes remain (or 8 files were not enough).
 	 */
 	private async admit(op: Operation): Promise<void> {
 		const unavailable = (): WaveKitError =>
@@ -1304,42 +1482,32 @@ export class AnalogOperations {
 			throw coded("disk-unavailable", "Invalid free disk measurement")
 		const legacy = await this.context.legacyBytes()
 		this.valid(op)
-		await this.exclusive(async () => {
-			if (!this.ready) throw unavailable()
-			if (this.inventory.unknown)
-				throw coded("recovery-incomplete", "Unknown recording inventory")
-			if (
-				this.inventory.intents.size + this.unpublished() >=
-				MAX_RECOVERY_OPERATIONS
-			)
-				throw new AnalogStorageCountError("Operation inventory limit")
-			this.valid(op)
-			// Space reserved and not yet written: free disk measured before the lock has not seen
-			// it, so it is subtracted here (writes since only make the check stricter).
-			const outstanding = this.reservedUnused() + this.uncertainUnused()
-			if (free - outstanding - RESERVATION < this.context.limits().minFreeBytes)
-				throw coded("disk-low", "Insufficient reserved free disk")
-			if (
-				this.inventory.bytes + legacy + outstanding + RESERVATION >
-				this.context.limits().maxBytes
-			) {
-				throw new AnalogStorageBytesError("Recording storage cap")
+		const id = op.intent.operationId
+		// Round 0 reserves, or (bytes short) chooses and marks victims and returns them; the
+		// victims are retired outside the lock (each in its own serialise + exclusive turns) and
+		// round 1 re-checks once. Exactly one eviction round per admission: no loop, no spin.
+		const reserve = (
+			round: 0 | 1,
+			reason: AnalogBytesRefusalReason,
+		): Promise<EvictPlan | null> =>
+			this.exclusive(async () => {
+				try {
+					return this.reserveLocked(op, free, legacy, round, reason)
+				} finally {
+					// Earmark and marks end in the same synchronous step as the re-check, whatever its result.
+					if (round === 1) this.releaseEviction(id)
+				}
+			})
+		const plan = await reserve(0, "no-removable")
+		if (plan !== null) {
+			try {
+				const reason = await this.evictFor(op, plan)
+				this.valid(op)
+				await reserve(1, reason)
+			} finally {
+				this.releaseEviction(id)
 			}
-			op.reservation = true
-			// What this admission left: less than one more RESERVATION of bytes under the cap, or
-			// fewer than OPERATION_HEADROOM operations under the bound (this one counted, it is
-			// reserved and unpublished). Both are states retention evicts for (quotaShortfall > 0,
-			// operationsFull), so an early pass asked on them can act.
-			const roomBytes =
-				this.context.limits().maxBytes -
-				(this.inventory.bytes + legacy + outstanding + RESERVATION)
-			const roomCount =
-				MAX_RECOVERY_OPERATIONS -
-				(this.inventory.intents.size + this.unpublished())
-			const bytes = roomBytes < RESERVATION
-			const count = roomCount < OPERATION_HEADROOM
-			op.roomShort = bytes || count ? { bytes, count } : null
-		})
+		}
 		this.valid(op)
 		await this.safeDirectory(
 			dirname(this.opDir(op.intent.operationId)),
@@ -1348,7 +1516,6 @@ export class AnalogOperations {
 		)
 		// Built under a staging name, published by one rename once intent.json is synced: a
 		// crash anywhere before leaves a folder recovery recognises as residue (no media).
-		const id = op.intent.operationId
 		const staging = this.stagingDir(id)
 		await mkdir(staging)
 		op.ownedDirectory = true
@@ -1377,6 +1544,7 @@ export class AnalogOperations {
 		// Published: its intent counts toward the operation bound from here (the bytes are
 		// within its reservation). The settlement's refresh replaces this with what is on disk.
 		this.auditTouched?.add(id)
+		this.epoch++
 		dropOperation(this.inventory, id)
 		addOperation(this.inventory, {
 			id,
@@ -1386,6 +1554,7 @@ export class AnalogOperations {
 			intent: op.intent,
 			cleanup: false,
 			residue: [],
+			evict: null,
 		})
 		await this.syncDirectory(dirname(this.opDir(id)), "operations")
 		this.valid(op)
@@ -1397,6 +1566,230 @@ export class AnalogOperations {
 		this.valid(op)
 		await this.checkpoint("stage", op.intent.operationId)
 		this.valid(op)
+	}
+	/**
+	 * admit's check-and-reserve step (call under the lock; synchronous). Refuses, reserves (null),
+	 * or, on round 0 short of bytes only, marks the first victims evicting and returns the plan.
+	 * I1: at every reservation used + legacy + reservedUnused + uncertainUnused + earmarked(others)
+	 * + RESERVATION ≤ cap; bytes being evicted are never subtracted before they are gone.
+	 */
+	private reserveLocked(
+		op: Operation,
+		free: number,
+		legacy: number,
+		round: 0 | 1,
+		reason: AnalogBytesRefusalReason,
+	): EvictPlan | null {
+		const id = op.intent.operationId
+		if (!this.ready)
+			throw coded(
+				"recovery-incomplete",
+				"Analog inventory/authority unavailable",
+			)
+		if (this.inventory.unknown)
+			throw coded("recovery-incomplete", "Unknown recording inventory")
+		if (
+			this.inventory.intents.size + this.unpublished() >=
+			MAX_RECOVERY_OPERATIONS
+		)
+			throw new AnalogStorageCountError("Operation inventory limit")
+		this.valid(op)
+		// Space reserved and not yet written: free disk measured before the lock has not seen
+		// it, so it is subtracted here (writes since only make the check stricter).
+		const outstanding = this.reservedUnused() + this.uncertainUnused()
+		if (free - outstanding - RESERVATION < this.context.limits().minFreeBytes)
+			throw coded("disk-low", "Insufficient reserved free disk")
+		// Bytes other admissions freed for themselves and have not reserved yet count as used.
+		const used =
+			this.inventory.bytes +
+			legacy +
+			outstanding +
+			this.earmarkedExcept(id) +
+			RESERVATION
+		const over = used - this.context.limits().maxBytes
+		if (over > 0) {
+			if (round === 1)
+				throw new AnalogStorageBytesError("Recording storage cap", reason)
+			const order = this.evictOrder()
+			const first = chooseEvictVictims(order, over)
+			if (first.length === 0)
+				throw new AnalogStorageBytesError(
+					"Recording storage cap",
+					"no-removable",
+				)
+			for (const row of first) this.evicting.set(row.id, id)
+			return { need: over, order }
+		}
+		op.reservation = true
+		this.earmarked.delete(id)
+		// What this admission left: less than one more RESERVATION of bytes under the cap, or
+		// fewer than OPERATION_HEADROOM operations under the bound (this one counted, it is
+		// reserved and unpublished). Both are states retention evicts for (quotaShortfall > 0,
+		// operationsFull), so an early pass asked on them can act.
+		const roomBytes = -over
+		const roomCount =
+			MAX_RECOVERY_OPERATIONS -
+			(this.inventory.intents.size + this.unpublished())
+		const bytes = roomBytes < RESERVATION
+		const count = roomCount < OPERATION_HEADROOM
+		op.roomShort = bytes || count ? { bytes, count } : null
+		return null
+	}
+	/**
+	 * The keep admission eviction applies now (M-2): the last completed retention pass's keep set
+	 * united with the operator's live keeps (context.discoveryKept), so a Keep since that pass
+	 * holds its files; null before the first pass (fail closed). Read again at every check.
+	 */
+	private evictKeepNow(): KeepView | null {
+		const last = this.evictKeep
+		if (last === null) return null
+		const live = this.context.discoveryKept
+		if (!live) return last
+		return {
+			has: id => {
+				if (last.has(id)) return true
+				try {
+					return live(id)
+				} catch {
+					return true
+				}
+			},
+		}
+	}
+	/** Bytes earmarked for admissions other than `id` (all with null; freed by their own evictions, not reserved yet). */
+	private earmarkedExcept(id: string | null): number {
+		let bytes = 0
+		for (const [owner, freed] of this.earmarked)
+			if (owner !== id) bytes += freed
+		return bytes
+	}
+	/** Ends `owner`'s eviction: its earmark and every victim mark it still holds. */
+	private releaseEviction(owner: string): void {
+		this.earmarked.delete(owner)
+		for (const [victim, by] of [...this.evicting])
+			if (by === owner) this.evicting.delete(victim)
+	}
+	/**
+	 * May admission eviction remove `intent` now (synchronous, no I/O): the last retention pass's
+	 * policy lets it go (retentionHold false: not active, kept, quarantined, closure-uncertain,
+	 * unresolved or of an unknown lister), it is finalized (in the eviction index), not held by an
+	 * unknown folder owner and no cleanup or other eviction is under way for it.
+	 */
+	private evictEligible(intent: Intent, keep: KeepView): boolean {
+		const id = intent.operationId
+		return (
+			this.inventory.evict.has(id) &&
+			!this.retiring.has(id) &&
+			!this.heldUnknown(intent.discoveryId) &&
+			this.retentionHold(intent, keep) === false
+		)
+	}
+	/**
+	 * The eligible victims in eviction order (cls, ageMs, id): one synchronous pass over the
+	 * eviction index (at most MAX_RECOVERY_OPERATIONS rows), no I/O. Empty before the first
+	 * retention pass (its keep set is unknown: fail closed) and for rows another admission marked.
+	 */
+	private evictOrder(): AnalogEvictRow[] {
+		const keep = this.evictKeepNow()
+		if (keep === null) return []
+		const rows: AnalogEvictRow[] = []
+		for (const [id, row] of this.inventory.evict) {
+			if (this.evicting.has(id)) continue
+			const intent = this.inventory.intents.get(id)
+			if (!intent || !this.evictEligible(intent, keep)) continue
+			rows.push({
+				id,
+				cls: row.cls,
+				ageMs: row.ageMs,
+				bytes: this.inventory.opBytes.get(id) ?? 0,
+			})
+		}
+		return rows.sort(compareEvictRows)
+	}
+	/**
+	 * Retires `plan`'s victims in order outside the lock (retire: serialise(discovery) then
+	 * exclusive, its cleanup-marker protocol and in-turn re-checks unchanged) until the freed bytes
+	 * reach the need, ANALOG_EVICT_MAX_VICTIMS were removed or as many retires removed nothing
+	 * (kept, uncertain or gone in their own turn): at most 16 retires. A victim kept meanwhile is
+	 * skipped and the next one in order is used; the keep is read live at each check
+	 * (evictKeepNow). The bytes freed are earmarked for `op` (other admissions count them as used)
+	 * until its re-check. What was removed is reported even when the admission is cancelled or a
+	 * retire throws. Returns the refusal reason should that re-check fail.
+	 */
+	private async evictFor(
+		op: Operation,
+		plan: EvictPlan,
+	): Promise<AnalogBytesRefusalReason> {
+		const owner = op.intent.operationId
+		if (this.evictKeepNow() === null) return "no-removable"
+		let freed = 0
+		let removed = 0
+		let skipped = 0
+		let failed = false
+		const deleted: string[] = []
+		try {
+			for (const row of plan.order) {
+				if (
+					removed >= ANALOG_EVICT_MAX_VICTIMS ||
+					skipped >= ANALOG_EVICT_MAX_VICTIMS ||
+					freed >= plan.need
+				)
+					break
+				const intent = this.inventory.intents.get(row.id)
+				const by = this.evicting.get(row.id)
+				if (by !== undefined && by !== owner) continue
+				const keep = this.evictKeepNow()
+				if (keep === null) break
+				if (!intent || !this.evictEligible(intent, keep)) {
+					this.evicting.delete(row.id)
+					continue
+				}
+				this.evicting.set(row.id, owner)
+				const before = this.inventory.opBytes.get(row.id) ?? 0
+				const count = deleted.length
+				// In the unlink turn too: the live keep, not the one read at the choice.
+				const stillRetirable = (): boolean => {
+					const now = this.evictKeepNow()
+					return now !== null && this.retentionHold(intent, now) === false
+				}
+				// The freed bytes are earmarked in the same synchronous step that drops them from the
+				// inventory (retire's refresh, under the lock): another admission's check never sees
+				// them free and unclaimed.
+				const claim = (): void => {
+					const after = this.inventory.intents.has(row.id)
+						? (this.inventory.opBytes.get(row.id) ?? 0)
+						: 0
+					freed += Math.max(0, before - after)
+					this.earmarked.set(owner, freed)
+				}
+				try {
+					await this.retire(intent, deleted, stillRetirable, claim)
+				} catch (cause) {
+					// Kept meanwhile (the in-turn re-check): skipped, the next one is used.
+					if (!(cause instanceof ScannerApiError)) failed = true
+				} finally {
+					this.evicting.delete(row.id)
+				}
+				if (failed) break
+				if (deleted.length > count) removed++
+				else skipped++
+				this.valid(op)
+			}
+		} finally {
+			// Observers never throw into the admission; a cancelled admission still reports.
+			try {
+				if (deleted.length > 0) this.context.evicted?.([...deleted])
+				this.context.evictionLogged?.({
+					victims: deleted.length,
+					freedBytes: freed,
+				})
+			} catch {
+				/* an observer's failure is not the admission's */
+			}
+		}
+		if (failed) return "evict-failed"
+		if (removed === 0) return "no-removable"
+		return freed >= plan.need ? "raced" : "insufficient"
 	}
 	/** Reserved operations whose intent is not inventoried yet (their folder is being built). */
 	private unpublished(): number {
@@ -1844,13 +2237,14 @@ export class AnalogOperations {
 			} catch {
 				/* retained and inventoried */
 			}
-			// Still active (retention and deletion leave its discovery alone) while the sidecar is
+			// Still active (retention leaves its own files alone, deletion its discovery) while the sidecar is
 			// written, so the inventory settles with it.
 			await this.writeFacts(op, op.decision)
 			await this.settleInventory(op)
 		}
 		const result = op.decision!
 		this.active.delete(op.intent.operationId)
+		this.epoch++
 		op.resolve(result)
 		return result
 	}
@@ -2456,6 +2850,7 @@ export class AnalogOperations {
 				intent: null,
 				cleanup: false,
 				residue: [],
+				evict: null,
 			}
 		}
 	}
@@ -2471,6 +2866,7 @@ export class AnalogOperations {
 			intent: null,
 			cleanup: false,
 			residue: [],
+			evict: null,
 		}
 		const inodes = new Set<string>()
 		const account = async (path: string, metadata: boolean): Promise<void> => {
@@ -2615,6 +3011,11 @@ export class AnalogOperations {
 			out.intent = intent
 			await this.safeDirectory(dirname(this.finalPath(intent)))
 			await account(this.finalPath(intent), false)
+			if (!cleanup && directoryNames.includes("receipt.json"))
+				out.evict = await this.evictRowOf(
+					id,
+					directoryNames.includes(RECORDING_FACTS_FILE),
+				)
 		} catch (cause) {
 			if (nativeCode(cause) === "ENOENT" && cleanup) {
 				// Transferred authority only permits a known empty leftover directory.
@@ -2650,6 +3051,51 @@ export class AnalogOperations {
 			if (reason) out.residue.push({ name: id, id, reason })
 			else out.unknown = true
 		}
+	}
+	/**
+	 * A finalized operation's admission eviction class and age (B3): its receipt.json (parsed,
+	 * finalized only) and, when present, its facts sidecar, each one bounded read
+	 * (MAX_OPERATION_METADATA_BYTES). Never throws: an unreadable or unfinalized receipt is no row
+	 * (never a victim), an unreadable sidecar no facts.
+	 */
+	private async evictRowOf(
+		id: string,
+		hasFacts: boolean,
+	): Promise<{ cls: AnalogEvictClass; ageMs: number } | null> {
+		const dir = this.opDir(id)
+		let receipt: z.infer<typeof AnalogReceiptSchema>
+		try {
+			const parsed = AnalogReceiptSchema.safeParse(
+				await this.readJson(join(dir, "receipt.json")),
+			)
+			if (!parsed.success || parsed.data.outcome !== "finalized") return null
+			receipt = parsed.data
+		} catch {
+			return null
+		}
+		let facts: ReturnType<typeof recordingFactsOf> = null
+		if (hasFacts)
+			try {
+				facts = recordingFactsOf(
+					await this.readJson(join(dir, RECORDING_FACTS_FILE)),
+					id,
+				)
+			} catch {
+				facts = null
+			}
+		const keptBy = facts?.finish.keptBy ?? receipt.keptBy
+		const legacy =
+			facts === null &&
+			!hasFacts &&
+			receipt.keptBy === undefined &&
+			receipt.speechHeard === undefined &&
+			receipt.startedAt === undefined
+		const cls = analogEvictClassOf(keptBy, facts?.admission, facts?.tone, {
+			speechHeard: facts?.finish.speechHeard ?? receipt.speechHeard,
+			legacy,
+		})
+		const at = Date.parse(facts?.keptAt ?? receipt.startedAt ?? "")
+		return { cls, ageMs: Number.isFinite(at) ? at : Number.POSITIVE_INFINITY }
 	}
 	/**
 	 * The full scan: every operation id listed, SCAN_CONCURRENCY at once (reads only), then the
@@ -2696,6 +3142,7 @@ export class AnalogOperations {
 			for (const id of [...this.quarantine.keys()])
 				if (!next.intents.has(id)) this.quarantine.delete(id)
 		this.inventory = next
+		this.epoch++
 	}
 	/** Forgets media searches of ids no longer listed. */
 	private pruneSearches(listed: ReadonlyMap<string, Presence>): void {
@@ -2726,6 +3173,7 @@ export class AnalogOperations {
 				intent: null,
 				cleanup: false,
 				residue: [],
+				evict: null,
 			} satisfies OperationScan
 		})
 		return this.unconfirmedReads.size ? null : scans
@@ -2736,6 +3184,7 @@ export class AnalogOperations {
 	 * found here stays counted until a full scan sets it aside.
 	 */
 	private applyScans(scans: readonly OperationScan[]): void {
+		if (scans.length > 0) this.epoch++
 		for (const scan of scans) {
 			this.auditTouched?.add(scan.id)
 			dropOperation(this.inventory, scan.id)
@@ -3865,6 +4314,7 @@ export class AnalogOperations {
 		this.unknownHeldRetained = unknownHeld
 		this.quarantinedRetained = quarantined
 		this.lastPass = { keep, tried, legacyUntried }
+		this.evictKeep = keep
 		return deleted
 	}
 	/**
@@ -3898,15 +4348,20 @@ export class AnalogOperations {
 	 */
 	private retentionHold(
 		intent: Intent,
-		keep: ReadonlySet<string>,
+		keep: KeepView,
 	): "quarantined" | "unknown" | "unresolved" | boolean {
 		const listers = this.listersOf(intent)
 		if (listers === null) return "unknown"
 		if (this.quarantine.has(intent.operationId)) return "quarantined"
 		if (!this.context.admits(intent.discoveryId)) return "unresolved"
+		// Only the active operation's own files are held (B1): its finalized siblings in the same
+		// discovery are retention's to remove like any other file (the active op's commit plan is
+		// built and checked inside serialise(discovery), where retire runs too, so a sibling's
+		// inverse never lands inside it). The discovery-wide hold stays for hasCleanup, discovery
+		// deletion, folder removal and the legacy pool (protectedDiscovery).
 		if (
 			this.closureUncertain(intent.operationId) ||
-			this.protectedDiscovery(intent.discoveryId) ||
+			this.active.has(intent.operationId) ||
 			this.keptArtifact(intent)
 		)
 			return true
@@ -3917,10 +4372,11 @@ export class AnalogOperations {
 		intent: Intent,
 		deleted: string[],
 		stillRetirable: () => boolean,
+		refreshed?: () => void,
 	): Promise<void> {
 		await this.context.serialise(intent.discoveryId, async () => {
 			if (
-				this.protectedDiscovery(intent.discoveryId) ||
+				this.active.has(intent.operationId) ||
 				this.closureUncertain(intent.operationId) ||
 				this.keptArtifact(intent) ||
 				this.heldUnknown(intent.discoveryId)
@@ -3946,7 +4402,12 @@ export class AnalogOperations {
 					deleted.push(intent.artifact)
 				} finally {
 					// What is on disk now, whether the cleanup ended or stopped part-way.
-					await this.refresh([intent.operationId])
+					try {
+						await this.refresh([intent.operationId])
+					} finally {
+						// In this exclusive turn: no admission's check runs between the refresh and it.
+						refreshed?.()
+					}
 				}
 			})
 		})
