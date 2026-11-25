@@ -22,6 +22,7 @@ import { IdentifyStore } from "./identify-store.ts"
 import { NearDiscoveryStore } from "./near-discovery-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
 import { DigitalVoiceStore } from "./digital-voice-store.ts"
+import { recordingReadiness } from "./recording-readiness.ts"
 import { PreferencesStore } from "./preferences-store.ts"
 import { ReceiverStore } from "./receiver-store.ts"
 import { RecordingsStore } from "./recordings-store.ts"
@@ -268,6 +269,8 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		})
 		if (session === null) {
 			devices.clear()
+			// what this browser saw as just linked belongs to the session that ended
+			recordingReadiness.reset()
 			if (!ended) remember(null)
 			return
 		}
@@ -364,6 +367,8 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		},
 		async pair(input) {
 			setSession(await api.pair(input))
+			// a new pairing starts from what its reload reads
+			recordingReadiness.reset()
 			// the socket opened before pairing had no cookie: reopen it, then reload with the session
 			events.disconnect()
 			events.connect()

@@ -22,6 +22,7 @@ import type { ApiClient, QueryValue } from "./api-client.ts"
 import { errorMessage, validated } from "./api-client.ts"
 import type { EventsClient } from "./events-client.ts"
 import { FEED_BUSY_MS, FEED_RETRY_MS, FEED_STALL_MS } from "./paged-feed.ts"
+import { recordingReadiness } from "./recording-readiness.ts"
 import { Store } from "./store.ts"
 
 export type ActivityResetReason =
@@ -633,11 +634,18 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 				query: q,
 				timeoutMs: this.timeoutMs,
 			})
-			.then(body => validated(pageSchema, body, "GET", "/api/activity"))
+			.then(body => {
+				const page = validated(pageSchema, body, "GET", "/api/activity")
+				// a link on a row this young may name a file the core does not serve yet
+				recordingReadiness.note(page.items)
+				return page
+			})
 	}
 
 	private receive(items: readonly ActivitySummary[]): void {
 		if (items.length === 0) return
+		// live rows were just produced: their links get a retry window whatever the core's clock says
+		recordingReadiness.note(items, { live: true })
 		this.inbox.push(...items)
 		if (this.timer === null)
 			this.timer = setTimeout(() => this.flush(), this.flushMs)

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import { readFileSync } from "node:fs"
-import type { LiveAudioStatus } from "@wavekit/api-types"
+import type { ActivitySummary, LiveAudioStatus } from "@wavekit/api-types"
 
 import type { LiveAudioStore } from "../../src/data/index.ts"
 import { listenAfterTune } from "../../src/features/listen/after-tune.ts"
@@ -27,6 +27,8 @@ import type {
 } from "../../src/features/playback/service.ts"
 import { synthWav } from "../../mock/recordings.ts"
 import { ApiClient, ApiError } from "../../src/data/api-client.ts"
+import { RecordingReadiness } from "../../src/data/recording-readiness.ts"
+import { RecordingsStore } from "../../src/data/recordings-store.ts"
 
 class FakeAudio implements AudioLike {
 	src = ""
@@ -569,6 +571,39 @@ describe("PlaybackService: stop, forget, dispose", () => {
 		expect(s.fetchFile).toHaveBeenCalledTimes(2)
 	})
 
+	it("forget aborting a waveform read keeps no flat waveform: an Undo loads it anew", async () => {
+		const blob = new Blob([new Uint8Array(synthWav(2, 1))])
+		let calls = 0
+		const fetchFile = vi.fn(
+			(_id: string, signal?: AbortSignal) =>
+				new Promise<Blob>((resolve, reject) => {
+					calls++
+					if (calls > 1) {
+						resolve(blob)
+						return
+					}
+					signal?.addEventListener("abort", () =>
+						reject(new DOMException("aborted", "AbortError")),
+					)
+				}),
+		)
+		const p = new PlaybackService({
+			fetchFile,
+			holdLive: () => {},
+			createAudio: () => new FakeAudio(),
+			createUrl: () => "blob:1",
+			revokeUrl: () => {},
+			storage: memoryStorage(),
+		})
+		const first = p.loadPeaks("x")
+		p.forget("x")
+		await first
+		expect(p.peaks.get().has("x")).toBe(false)
+		await p.loadPeaks("x")
+		expect(fetchFile).toHaveBeenCalledTimes(2)
+		expect(p.peaks.get().get("x")).not.toBe("none")
+	})
+
 	it("Delete then Undo while the shared fetch is in flight: a new play fetches anew and plays", async () => {
 		const s = setup({ hold: true })
 		s.p.play("x", Q("x"))
@@ -580,6 +615,71 @@ describe("PlaybackService: stop, forget, dispose", () => {
 		await s.land("x")
 		expect(s.p.get()).toMatchObject({ id: "x", phase: "playing", error: null })
 		expect(s.p.peaks.get().has("x")).toBe(true)
+	})
+
+	it("a superseded or stopped start aborts its fetch; one still waited for elsewhere goes on", async () => {
+		const s = setup({ hold: true })
+		const signalOf = (n: number) =>
+			(s.fetchFile.mock.calls[n] as unknown as [string, AbortSignal])[1]
+		s.p.play("a", Q("a", "b"))
+		s.p.play("b", Q("a", "b"))
+		expect(signalOf(0).aborted).toBe(true)
+		expect(signalOf(1).aborted).toBe(false)
+		s.p.stop()
+		expect(signalOf(1).aborted).toBe(true)
+		// a waveform read (no signal) keeps the shared fetch going when the play is superseded
+		void s.p.loadPeaks("c")
+		s.p.play("c")
+		s.p.play("a")
+		expect(signalOf(2).aborted).toBe(false)
+		s.p.forget("c")
+		expect(signalOf(2).aborted).toBe(true)
+		s.p.dispose()
+		expect(signalOf(3).aborted).toBe(true)
+	})
+
+	it("a superseded start stops the store's retry loop for a file still being saved", async () => {
+		vi.useFakeTimers()
+		try {
+			const readiness = new RecordingReadiness()
+			readiness.note([
+				{
+					eventId: "evt_a",
+					producedAt: new Date().toISOString(),
+					recording: { id: "a", durationMs: 1000 },
+				} as ActivitySummary,
+			])
+			let calls = 0
+			const api = new ApiClient({
+				fetch: () => {
+					calls += 1
+					return Promise.resolve(
+						new Response(
+							JSON.stringify({ code: "RECORDING_NOT_FOUND", message: "x" }),
+							{ status: 404 },
+						),
+					)
+				},
+			})
+			const store = new RecordingsStore(api, null, {}, readiness)
+			const p = new PlaybackService({
+				fetchFile: (id, signal) => store.file(id, signal),
+				holdLive: () => undefined,
+				createAudio: () => new FakeAudio(),
+				storage: null,
+			})
+			p.play("a")
+			await vi.advanceTimersByTimeAsync(0)
+			expect(calls).toBe(1)
+			p.play("b")
+			await vi.advanceTimersByTimeAsync(60_000)
+			// "b" is not linked here: one try; "a" was never tried again
+			expect(calls).toBe(2)
+			p.dispose()
+			store.dispose()
+		} finally {
+			vi.useRealTimers()
+		}
 	})
 
 	it("a fetch landing after dispose creates and caches no object URL", async () => {

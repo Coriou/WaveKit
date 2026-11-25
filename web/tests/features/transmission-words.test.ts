@@ -279,13 +279,18 @@ describe("formatting", () => {
 		expect(signalText(null)).toBeNull()
 	})
 
-	it("gives the measured centre in whole Hz as an offset", () => {
+	it("gives the measured centre in MHz with its offset, never repeating the word measured", () => {
 		expect(measuredText(145_562_753.4, 145_562_500)).toBe(
-			"measured 145 562 753 Hz (+253 Hz)",
+			"145.562753 MHz (+253 Hz)",
 		)
 		expect(measuredText(145_562_300, 145_562_500)).toBe(
-			"measured 145 562 300 Hz (−200 Hz)",
+			"145.5623 MHz (−200 Hz)",
 		)
+		expect(measuredText(446_047_637, 446_006_250)).toBe(
+			"446.047637 MHz (+41.4 kHz)",
+		)
+		expect(measuredText(446_047_637, null)).toBe("446.047637 MHz")
+		expect(measuredText(446_047_637, 446_047_637)).not.toMatch(/measured/i)
 	})
 
 	it("dates a recording row by the start of its audio, not its keep time", () => {

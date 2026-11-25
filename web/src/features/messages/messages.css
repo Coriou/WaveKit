@@ -263,12 +263,22 @@
 		font-weight: 700;
 		color: var(--wk-text-2);
 	}
+	/* "JSON · 6 lines · 83 B" on one line; it gives way (ellipsis) before the buttons leave the row */
+	.wkd-json-head {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
 	.wkd-json-meta {
-		margin-left: 6px;
 		font-size: var(--wk-fs-xs);
 		color: var(--wk-text-4);
 		font-variant-numeric: tabular-nums;
-		white-space: nowrap;
+		white-space: pre;
+	}
+	.wkd-json-bar > .wkd-json-btn,
+	.wkd-json-bar > .wkd-copy {
+		flex: none;
 	}
 	.wkd-json-btn {
 		padding: 0 8px;

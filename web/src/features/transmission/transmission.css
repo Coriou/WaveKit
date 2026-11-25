@@ -108,6 +108,10 @@
 		align-items: center;
 		gap: 8px;
 	}
+	/* the channel's doors: one row, or a tidy wrap of whole buttons (never a broken label) */
+	.wkt-door-row > .wk-btn {
+		white-space: nowrap;
+	}
 	.wkt-conv-list {
 		margin: 4px 0 0;
 		padding: 4px;
@@ -166,15 +170,54 @@
 		flex-direction: column;
 		gap: 10px;
 	}
-	.wkt-ids {
+	.wkt-facts {
 		margin: 8px 0 0;
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: 6px;
+	}
+	.wkt-fact-row {
+		display: grid;
+		grid-template-columns: 112px minmax(0, 1fr);
+		gap: 10px;
+		font-size: var(--wk-fs-sm);
+	}
+	.wkt-fact-row dt {
+		color: var(--wk-text-3);
+	}
+	.wkt-fact-row dd {
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		min-width: 0;
+		font-variant-numeric: tabular-nums;
+		overflow-wrap: break-word;
+	}
+	.wkt-sublabel {
+		margin: 4px 0 0;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-text-2);
+	}
+	/* Identifiers: collapsed under Details; each id wraps between its tokens, its copy button keeps its width */
+	.wkt-idents summary {
+		cursor: pointer;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-text-2);
+	}
+	.wkt-raw-json {
+		margin-top: 6px;
+	}
+	.wkt-ids {
+		margin: 6px 0 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
 	}
 	.wkt-id-row {
 		display: grid;
 		grid-template-columns: 112px minmax(0, 1fr);
+		align-items: center;
 		gap: 10px;
 		font-size: var(--wk-fs-sm);
 	}
@@ -183,31 +226,17 @@
 	}
 	.wkt-id-row dd {
 		margin: 0;
-		display: flex;
-		gap: 8px;
-		align-items: baseline;
+		min-width: 0;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 10px;
+	}
+	.wkt-id {
+		font-size: var(--wk-fs-xs);
 		overflow-wrap: anywhere;
-		font-variant-numeric: tabular-nums;
 	}
-	.wkt-id-row code {
-		overflow-wrap: anywhere;
-	}
-	.wkt-admission {
-		font-size: var(--wk-fs-sm);
-		border-collapse: collapse;
-	}
-	.wkt-admission caption {
-		text-align: left;
-		color: var(--wk-text-3);
-		padding-bottom: 4px;
-	}
-	.wkt-admission th {
-		text-align: left;
-		font-weight: 400;
-		color: var(--wk-text-3);
-		padding: 1px 12px 1px 0;
-	}
-	.wkt-admission td {
-		font-variant-numeric: tabular-nums;
+	.wkt-copy {
+		flex: none;
 	}
 }

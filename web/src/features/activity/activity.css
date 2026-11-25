@@ -370,19 +370,66 @@
 	}
 	/* a stack: the row, then its count and span; the toggle expands the folded earlier rows in place */
 	.wka-item[data-stacked],
-	.wka-item[data-disc] {
+	.wka-item[data-col] {
 		display: flex;
 		align-items: flex-start;
 		gap: 2px;
 	}
 	.wka-item[data-stacked] > .wka-row,
-	.wka-item[data-disc] > .wka-row {
+	.wka-item[data-col] > .wka-row {
 		flex: 1;
 		min-width: 0;
 	}
-	/* a row with audio: its play disc (playback.css) beside the row, before the stack count */
+	/* the play disc's column (playback.css), last at the item's right edge after the stack count: the disc, its
+	   Saving place, or an empty slot of the same width on a row without audio, so discs line up row to row
+	   and every row's time and stack count sit in one column */
 	.wka-disc {
 		align-self: flex-start;
+		flex: none;
+		width: 52px;
+	}
+	/* a card's inline disc: one fixed width, so "Saving" and "0:08" never move the stack count beside it */
+	.wkp-disc.wka-disc[data-inline] {
+		width: 84px;
+		justify-content: flex-start;
+	}
+	.wka-disc-slot {
+		display: block;
+	}
+	.wka-disc-slot[data-inline] {
+		width: 84px;
+	}
+	/* the disc's place while the core saves its file: same footprint, nothing to press */
+	.wkp-disc[data-saving] {
+		cursor: default;
+		color: var(--wk-text-3);
+	}
+	.wkp-disc[data-saving]:hover .wkp-disc-face {
+		background: none;
+	}
+	.wkp-disc-face.wka-saving-face {
+		box-sizing: border-box;
+		border-style: dashed;
+		border-color: var(--wk-text-3);
+		opacity: 0.6;
+	}
+	/* the waveform's place while the core saves the file: the same well and height, so nothing moves when it
+	   turns into the waveform */
+	.wka-saving-wave {
+		flex: 1;
+		min-width: 0;
+	}
+	.wka-saving-wave .wkp-wave {
+		display: grid;
+		place-items: center;
+		padding: 0 12px;
+		cursor: default;
+	}
+	.wka-saving-wave .wkp-wave > p {
+		margin: 0;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-text-3);
+		text-align: center;
 	}
 	/* the detail's Recording block: disc and waveform (a seek view of the dock's player), then Keep */
 	.wka-rec {
@@ -567,6 +614,12 @@
 		font-size: var(--wk-fs-md);
 		font-variant-numeric: tabular-nums;
 		overflow-wrap: anywhere;
+	}
+	/* a time's same instant in UTC, under it */
+	.wka-field-hint {
+		display: block;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
 	}
 	.wka-related {
 		display: flex;

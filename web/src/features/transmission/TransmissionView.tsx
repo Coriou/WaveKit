@@ -2,17 +2,24 @@ import "./transmission.css"
 
 // The Transmission view: one transmission, pushed into the drawer the user is in, in the order a listener asks
 // about it: Listen; What we know (Who, Tone, Signal, Ended, Kept); its copies (Copy of / Also heard on); the Conversation, oldest first with Play all;
-// the channel's doors (History, Open in Scanner, Tune); and, collapsed, the expert Details with every id and raw
-// number. It renders only the Transmission DTO (loadTransmission); Back and Esc return to the origin in one step.
+// the channel's doors (History, Open in Scanner, Tune); and, collapsed, the expert Details: the facts in words
+// and rounded units, the important first, then, collapsed again, the Identifiers, each with a copy button. It renders only the Transmission DTO (loadTransmission); Back and Esc return to the origin in one step.
 import type { JsonValue } from "@wavekit/api-types"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState } from "react"
 import { z } from "zod"
 
 import { useServices } from "../../app/context.ts"
 import { errorMessage } from "../../data/index.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { Button } from "../../ui/Button.tsx"
+import { Icon } from "../../ui/Icon.tsx"
+import { IconButton } from "../../ui/IconButton.tsx"
 import { Label } from "../../ui/Label.tsx"
+import {
+	SavingDisc,
+	SavingWave,
+	useRecordingSaving,
+} from "../activity/ActivityPlayback.tsx"
 import { useDisplay } from "../display.ts"
 import { JsonView } from "../messages/JsonView.tsx"
 import {
@@ -41,14 +48,22 @@ import {
 	replaceTransmission,
 } from "./nav.ts"
 import {
+	admissionRows,
 	alsoHeardText,
 	channelText,
+	codeText,
 	copyOfText,
 	moreCopiesText,
 	CLOSE_WORDS,
 	ctcssText,
+	dateTimeText,
+	dbfsText,
+	dbText,
 	durationWords,
 	FINISH_CUT_WORDS,
+	FLAG_WORDS,
+	GONE_WORDS,
+	idSegments,
 	ITEM_CUT_WORDS,
 	KEPT_BY_WORDS,
 	measuredText,
@@ -56,8 +71,10 @@ import {
 	signalText,
 	SPEECH_WORDS,
 	startText,
+	TONE_FROM_WORDS,
 	toneRow,
 	TRANSMISSION_STARTED,
+	utcText,
 	wordsFor,
 } from "./words.ts"
 
@@ -325,6 +342,8 @@ export function TransmissionView({
 	const host = open.origin.host
 	const audioId =
 		state.status === "ready" ? (state.t.artefacts[0]?.id ?? null) : null
+	// a file the core still saves is not listed yet: a Keep then would be refused
+	const audioSaving = useRecordingSaving(audioId)
 
 	// the player's Next, Prev, Auto-next or Play all moved on from the recording shown here: the view follows
 	// (its content replaced, its origin kept)
@@ -354,7 +373,7 @@ export function TransmissionView({
 					‹ {open.origin.label}
 				</Button>
 				<span className="wkt-gap" />
-				{audioId !== null && state.status === "ready" && (
+				{audioId !== null && !audioSaving && state.status === "ready" && (
 					<KeepButton
 						id={audioId}
 						title={transmissionHeading(state.t)}
@@ -409,6 +428,7 @@ function Ready({
 	const services = useServices()
 	const title = transmissionHeading(t)
 	const audio = t.artefacts.find(a => a.kind === "audio") ?? null
+	const saving = useRecordingSaving(audio?.id ?? null)
 	const queue = useMemo(
 		() => conversationQueue(t, host, title),
 		[t, host, title],
@@ -470,7 +490,13 @@ function Ready({
 			</header>
 
 			<section className="wkt-listen" aria-label="Listen">
-				{audio !== null ? (
+				{audio !== null && saving ? (
+					<div className="wkt-listen-row">
+						<SavingDisc />
+						{/* the waveform's height, held: the swap to Play moves nothing */}
+						<SavingWave />
+					</div>
+				) : audio !== null ? (
 					<div className="wkt-listen-row">
 						<PlayDisc
 							id={audio.id}
@@ -733,17 +759,118 @@ function ChannelDoors({ t }: { t: TransmissionDto }) {
 	)
 }
 
-function Details({
-	t,
-	fileUrl,
-}: {
-	t: TransmissionDto
-	fileUrl: string | null
-}) {
-	const [open, setOpen] = useState(readDetailsOpen)
+/** One fact of Details: its value, and (for a time) the same instant in UTC under it and in its tooltip. */
+export interface DetailFact {
+	term: string
+	value: string
+	hint: string | null
+	/** A time's ISO instant (the <time> element's dateTime). */
+	iso: string | null
+}
+
+function timeFact(term: string, iso: string | null): DetailFact | null {
+	const value = dateTimeText(iso)
+	if (value === "" || iso === null) return null
+	const utc = utcText(iso)
+	// on the UTC clock (Settings › Display) the value already is UTC: no second line
+	return { term, value, hint: value.endsWith("Z") ? null : utc, iso }
+}
+
+function fact(
+	term: string,
+	value: string | null,
+	hint: string | null = null,
+): DetailFact | null {
+	return value === null || value === ""
+		? null
+		: { term, value, hint, iso: null }
+}
+
+/**
+ * Details' facts, the important first (when, where, how long, speech, tone, why kept, copy of), then how it
+ * ended, the signal and the file: every code as words (its readable form when no sentence is known), dB to one
+ * decimal, frequencies in MHz, times local with UTC under them. Ids are not here: detailIds.
+ */
+export function detailFacts(
+	t: TransmissionDto,
+	fileBytes: number | null = null,
+): DetailFact[] {
+	const hz = t.channel.hz
+	const ended = codeText(t.close?.reason, FINISH_CUT_WORDS, CLOSE_WORDS)
+	const cut = codeText(t.verdict.itemCut, ITEM_CUT_WORDS)
+	const tone = t.tone !== null ? toneRow(t.tone) : null
+	const copies = t.copy?.copiesTotal ?? 0
+	const facts: (DetailFact | null)[] = [
+		timeFact("Started", t.startedAt),
+		timeFact("Ended", t.endedAt),
+		fact("Channel", channelText(hz)),
+		fact(
+			"Measured",
+			t.channel.measuredHz !== null
+				? measuredText(t.channel.measuredHz, hz !== null ? rasterHz(hz) : null)
+				: null,
+			t.channel.measuredHz !== null && hz !== null
+				? "offset from the channel"
+				: null,
+		),
+		fact(
+			"Duration",
+			durationWords(t.durationMs),
+			t.part ? `Part ${t.part.index} of ${t.part.of}` : null,
+		),
+		fact("Speech", codeText(t.verdict.speech, SPEECH_WORDS)),
+		tone === null
+			? null
+			: fact(
+					"Tone",
+					tone.value,
+					tone.hint ?? wordsFor(TONE_FROM_WORDS, t.tone?.from),
+				),
+		fact("Why kept", codeText(t.verdict.keptBy, KEPT_BY_WORDS)),
+		fact("Copy of", t.copy?.of ? copyOfText(t.copy.of.hz) : null),
+		fact(
+			"Copies",
+			copies > 0
+				? `${copies} on other ${copies === 1 ? "frequency" : "frequencies"}`
+				: null,
+		),
+		fact("How it ended", ended ?? cut),
+		fact("Cut", ended !== null && cut !== null && cut !== ended ? cut : null),
+		fact(
+			"Signal",
+			dbText(t.signal?.snrDb),
+			t.signal?.snrDb != null ? "over the noise" : null,
+		),
+		fact("Peak level", dbfsText(t.signal?.peakDbfs)),
+		fact(
+			"Flags",
+			t.signal && t.signal.flags.length > 0
+				? t.signal.flags.map(f => codeText(f, FLAG_WORDS)).join(" · ")
+				: null,
+		),
+		fact(
+			"File",
+			fileBytes !== null
+				? `${fileBytes > 0 ? formatBytes(fileBytes) : "size unknown"} · WAV`
+				: null,
+		),
+		fact(
+			"No longer readable",
+			t.gone.length > 0
+				? t.gone.map(g => codeText(g, GONE_WORDS)).join(", ")
+				: null,
+		),
+	]
+	return facts.filter((f): f is DetailFact => f !== null)
+}
+
+/** Details' identifiers, in a fixed order: every id the transmission is known by, for copying. */
+export function detailIds(
+	t: TransmissionDto,
+): { term: string; value: string }[] {
 	const ids: [string, string | null][] = [
 		["Transmission", t.id],
-		...t.refs.recordingKeys.map((k): [string, string] => ["Recording", k]),
+		...t.refs.recordingKeys.map((k): [string, string] => ["Recording key", k]),
 		["Observation", t.refs.observationId],
 		["Discovery", t.refs.discoveryId],
 		[
@@ -756,53 +883,42 @@ function Details({
 		["Operation", t.refs.operationId],
 		["Receiver", t.sourceId],
 	]
+	return ids
+		.filter((x): x is [string, string] => x[1] !== null && x[1] !== "")
+		.map(([term, value]) => ({ term, value }))
+}
+
+/** An id that wraps only between its tokens (idSegments). */
+function IdText({ value }: { value: string }) {
+	const parts = idSegments(value)
+	return (
+		<code className="wkt-id">
+			{parts.map((p, i) => (
+				<Fragment key={i}>
+					{p}
+					{i < parts.length - 1 && <wbr />}
+				</Fragment>
+			))}
+		</code>
+	)
+}
+
+/** The expert Details: facts in words, then the collapsed Identifiers, the file and the stored JSON. */
+export function Details({
+	t,
+	fileUrl,
+}: {
+	t: TransmissionDto
+	fileUrl: string | null
+}) {
+	const [open, setOpen] = useState(readDetailsOpen)
+	const [rawOpen, setRawOpen] = useState(false)
 	const audio = t.artefacts.find(a => a.kind === "audio") ?? null
-	const facts: [string, string | null][] = [
-		[
-			"Measured",
-			t.channel.measuredHz !== null
-				? measuredText(
-						t.channel.measuredHz,
-						t.channel.hz !== null ? rasterHz(t.channel.hz) : null,
-					)
-				: null,
-		],
-		[
-			"Channel Hz",
-			t.channel.hz !== null ? String(Math.round(t.channel.hz)) : null,
-		],
-		["Start (UTC)", t.startedAt],
-		["End (UTC)", t.endedAt],
-		["Duration ms", t.durationMs !== null ? String(t.durationMs) : null],
-		["Part", t.part ? `${t.part.index} of ${t.part.of}` : null],
-		["Close code", t.close?.reason ?? null],
-		["Cut code", t.verdict.itemCut],
-		["Kept by code", t.verdict.keptBy],
-		["Speech", t.verdict.speech],
-		["Tone source", t.tone?.from ?? null],
-		["Tone state", t.tone?.state ?? null],
-		["SNR dB", t.signal?.snrDb != null ? String(t.signal.snrDb) : null],
-		[
-			"Peak dBFS",
-			t.signal?.peakDbfs != null ? String(t.signal.peakDbfs) : null,
-		],
-		[
-			"Flags",
-			t.signal && t.signal.flags.length > 0 ? t.signal.flags.join(", ") : null,
-		],
-		[
-			"File",
-			audio
-				? `${audio.bytes > 0 ? formatBytes(audio.bytes) : "size unknown"} · WAV`
-				: null,
-		],
-		["Missing", t.gone.length > 0 ? t.gone.join(", ") : null],
-	]
-	const admission = t.admission
-		? (Object.entries(t.admission) as [string, unknown][]).filter(
-				([, v]) => v !== undefined,
-			)
-		: []
+	const facts = detailFacts(t, audio ? audio.bytes : null)
+	const ids = detailIds(t)
+	const admission = admissionRows(
+		t.admission as Readonly<Record<string, unknown>> | null,
+	)
 	const copy = (value: string) => void copyValue(value)
 	return (
 		<details
@@ -815,46 +931,61 @@ function Details({
 			}}
 		>
 			<summary>Details</summary>
-			<dl className="wkt-ids">
-				{ids
-					.filter((x): x is [string, string] => x[1] !== null && x[1] !== "")
-					.map(([term, value]) => (
-						<div key={`${term}:${value}`} className="wkt-id-row">
-							<dt>{term}</dt>
-							<dd>
-								<code>{value}</code>
-								<button
-									type="button"
-									className="wkt-link"
-									aria-label={`Copy ${term.toLowerCase()} id`}
-									onClick={() => copy(value)}
-								>
-									Copy
-								</button>
-							</dd>
-						</div>
-					))}
-				{facts
-					.filter((x): x is [string, string] => x[1] !== null)
-					.map(([term, value]) => (
-						<div key={term} className="wkt-id-row">
-							<dt>{term}</dt>
-							<dd>{value}</dd>
-						</div>
-					))}
+			<dl className="wkt-facts">
+				{facts.map(f => (
+					<div key={f.term} className="wkt-fact-row">
+						<dt>{f.term}</dt>
+						<dd>
+							{f.iso !== null ? (
+								<time dateTime={f.iso} title={utcText(f.iso)}>
+									{f.value}
+								</time>
+							) : (
+								<span>{f.value}</span>
+							)}
+							{f.hint !== null && <span className="wkt-hint">{f.hint}</span>}
+						</dd>
+					</div>
+				))}
 			</dl>
 			{admission.length > 0 && (
-				<table className="wkt-admission">
-					<caption>Recording admission</caption>
-					<tbody>
-						{admission.map(([k, v]) => (
-							<tr key={k}>
-								<th scope="row">{k}</th>
-								<td>{v === null ? "none" : String(v)}</td>
-							</tr>
+				<section aria-label="How the recorder decided">
+					<p className="wkt-sublabel">How the recorder decided</p>
+					<dl className="wkt-facts">
+						{admission.map(r => (
+							<div key={r.term} className="wkt-fact-row">
+								<dt>{r.term}</dt>
+								<dd>
+									<span>{r.value}</span>
+								</dd>
+							</div>
 						))}
-					</tbody>
-				</table>
+					</dl>
+				</section>
+			)}
+			{ids.length > 0 && (
+				<details className="wkt-idents">
+					<summary>Identifiers · {ids.length}</summary>
+					<dl className="wkt-ids">
+						{ids.map(({ term, value }) => (
+							<div key={`${term}:${value}`} className="wkt-id-row">
+								<dt>{term}</dt>
+								<dd>
+									<IdText value={value} />
+									<IconButton
+										label={`Copy ${term.toLowerCase()}`}
+										title="Copy"
+										size="xs"
+										className="wkt-copy"
+										onClick={() => copy(value)}
+									>
+										<Icon name="copy" />
+									</IconButton>
+								</dd>
+							</div>
+						))}
+					</dl>
+				</details>
 			)}
 			{fileUrl !== null && (
 				<a className="wkt-link" href={fileUrl} download>
@@ -862,10 +993,21 @@ function Details({
 				</a>
 			)}
 			{open && (
-				<JsonView
-					data={JSON.parse(JSON.stringify(t.raw)) as JsonValue}
-					maxHeight={240}
-				/>
+				// the stored JSON, collapsed too: drawn only once opened
+				<details
+					className="wkt-idents wkt-raw"
+					open={rawOpen}
+					onToggle={e => setRawOpen(e.currentTarget.open)}
+				>
+					<summary>Stored JSON</summary>
+					{rawOpen && (
+						<JsonView
+							data={JSON.parse(JSON.stringify(t.raw)) as JsonValue}
+							maxHeight={240}
+							className="wkt-raw-json"
+						/>
+					)}
+				</details>
 			)}
 		</details>
 	)

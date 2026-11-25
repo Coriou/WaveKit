@@ -35,6 +35,8 @@ import type {
 	PagedFeedState,
 } from "./paged-feed.ts"
 import { PagedFeed } from "./paged-feed.ts"
+import type { RecordingReadiness } from "./recording-readiness.ts"
+import { recordingReadiness } from "./recording-readiness.ts"
 import { Store } from "./store.ts"
 
 /** How long a delete waits for Undo before it reaches the core. */
@@ -219,11 +221,13 @@ export class RecordingsStore extends PagedFeed<
 	 */
 	private copiesRefused = false
 	private readonly gone = new Map<string, number>()
+	private readonly readiness: RecordingReadiness
 
 	constructor(
 		api: ApiClient,
 		events: EventsClient | null = null,
 		options: Partial<PagedFeedOptions> = {},
+		readiness: RecordingReadiness = recordingReadiness,
 	) {
 		super({
 			maxItems: RECORDINGS_WINDOW_MAX,
@@ -232,6 +236,7 @@ export class RecordingsStore extends PagedFeed<
 		})
 		this.api = api
 		this.events = events
+		this.readiness = readiness
 	}
 
 	/**
@@ -261,12 +266,25 @@ export class RecordingsStore extends PagedFeed<
 		return this.api.url(path(RECORDINGS_FILE_ROUTE, id))
 	}
 
-	/** The WAV file, for playback in this browser. Rejects with the ApiError. */
-	file(id: string, signal?: AbortSignal): Promise<Blob> {
-		return this.api.blob(
-			path(RECORDINGS_FILE_ROUTE, id),
-			signal ? { signal } : {},
-		)
+	/**
+	 * The WAV file, for playback in this browser. Rejects with the ApiError. A file an Activity row linked a
+	 * moment ago is still being saved by the core (not served yet: 404): it is fetched again until it is
+	 * served or its grace runs out (RecordingReadiness), so a Play never says it is gone while it is saved.
+	 */
+	async file(id: string, signal?: AbortSignal): Promise<Blob> {
+		const route = path(RECORDINGS_FILE_ROUTE, id)
+		for (;;) {
+			try {
+				return await this.api.blob(route, signal ? { signal } : {})
+			} catch (error) {
+				const refused =
+					error instanceof ApiError &&
+					(error.status === 404 || error.status === 410)
+				const wait = refused ? this.readiness.retryIn(id) : null
+				if (wait === null || signal?.aborted) throw error
+				await this.readiness.wait(wait, signal)
+			}
+		}
 	}
 
 	/** Keep (true) or unkeep (false). Shows the change at once; rejects with the ApiError and reverts. */
@@ -382,6 +400,10 @@ export class RecordingsStore extends PagedFeed<
 					const item = itemSchema.safeParse(raw)
 					if (item.success) items.push(item.data as RecordingInventoryItem)
 				}
+				// a listed file is served: a row linking it plays now
+				this.readiness.listed(
+					items.flatMap(i => (i.key ? [i.id, i.key] : [i.id])),
+				)
 				const d = page.data
 				const counts =
 					(d.counts as RecordingInventoryCounts | undefined) ?? null
@@ -514,6 +536,9 @@ export class RecordingsStore extends PagedFeed<
 	}
 
 	private drop(id: string): void {
+		const key = this.get().items.find(i => i.id === id)?.key
+		// a deleted file is not "being saved": a row still linking it reads as gone at once
+		this.readiness.forget(key ? [id, key] : [id])
 		this.gone.set(id, this.headReads)
 		this.kept.delete(id)
 		this.patchItems(items => items.filter(i => i.id !== id))

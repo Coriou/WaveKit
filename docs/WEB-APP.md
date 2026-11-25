@@ -694,16 +694,28 @@ plays, the player's **Next**, **Previous** and **Auto-next** move the view along
 moving your focus (focus goes to Back only when the view opens). **On this
 channel** says how often the channel was heard and its usual tone, with three doors: **History of
 …** and **Open in Scanner** close the view and show that place (Back does not come back to it), and
-**Tune**. **Details**, collapsed (remembered per browser), holds every id
-with a copy button, the measured frequency in Hz with its offset, the UTC times, the codes, the
-recording admission's numbers, the file size, **Download WAV** and the stored JSON. **Copy** says
-`Copied`, or that the browser blocked it.
+**Tune** (one row, or whole buttons wrapped onto a second). **Details**, collapsed (remembered per
+browser), says everything in words, the important first: when it **Started** and **Ended** (your
+clock, with the same time in UTC under it and in its tooltip), the **Channel** and **Measured**
+frequency in MHz (with its offset from the channel), the **Duration** (and its part), **Speech**,
+**Tone**, **Why kept**, **Copy of**, then how it ended, the signal in dB to one decimal, the
+signal flags (such as `Off the channel raster`), the file size, and how the recorder decided
+(its decision, what the channel's history said and the rule that fired, in words, then its
+measured levels, rounded). A code WaveKit has no sentence for shows in plain words (a newer
+code such as `carrierDrop` would read `Carrier drop`), never as the raw code. **Identifiers**, collapsed under it, lists
+every id (transmission, recording key, observation, discovery, owner discovery, Activity event, operation, receiver), each with a
+copy icon; a long id wraps between its parts. **Download WAV** and **Stored JSON** (collapsed too;
+its header reads like `JSON · 6 lines · 83 B`, with Wrap and Copy beside it) close it. Copy
+says `Copied`, or that the browser blocked it.
 
 A scanner recording's event detail in Activity speaks the same way: **Channel** in MHz,
 **Transmission started** (when the transmission it belongs to began: a later part or a second over
 of the same session shares it, so it is not the file's own start), **Duration** in seconds and
-**Kept at**, never its ids or ISO times; those, the measured frequency in
-whole Hz and the stored JSON are under **Ids and raw values**, collapsed. A live analog
+**Kept at**, never its ids or ISO times. Those are under **Ids and raw values**, collapsed, the
+important first: what happened (**Change**, in words), the channel's exact **Channel frequency**
+and the **Measured** frequency in MHz, the times on your clock with the same time in UTC under
+them, the duration in words, then every id (recording, receiver, discovery, owner discovery,
+observation) and the stored JSON. A live analog
 transmission's detail says its length in seconds and how it ended in words.
 
 ### Playing recordings
@@ -712,8 +724,16 @@ There is one player for the whole app. A play disc on an Activity row or card (e
 a Recordings row, or the tuned card's last transmission or one of its earlier rows starts the
 recording; pressing the same disc again pauses it, and while it loads the disc already says Pause
 (pressing it then cancels the start). Rows without a recording (most decodes, and digital calls the
-core did not record) have no disc. The recording playing is marked the same way in every list that
-shows it. On the tuned card a scanner recording's disc sits on the transmission it recorded, which
+core did not record) have no disc. On an Activity row or card the disc has its own column, the
+last thing on the right after the `N · time` stack count: discs line up row to row, and a
+row without a recording keeps that column empty, so every row's time and stack count sit in the
+same place (a stacked card without a recording keeps it empty too). A call that has just ended shows a quiet **Saving** disc for a few seconds while the
+receiver finishes writing its file (it lists a file once it has been quiet for 10 seconds), in
+the disc's own place and size (the open event and the Transmission view keep the waveform's
+height too); it turns into the play disc by itself, and a play started meanwhile (by Next or
+Auto-next) waits for the file instead of saying it is gone, even when the receiver's clock and
+this browser's disagree. The recording playing is marked the same way in every list that shows
+it. On the tuned card a scanner recording's disc sits on the transmission it recorded, which
 keeps its tone and transcript. A long transmission recorded as several files sits on that one
 transmission and plays its first file (Recordings lists every file). A recording is a row of its own
 when its transmission is not in the list, or when WaveKit cannot tell which of two transmissions on

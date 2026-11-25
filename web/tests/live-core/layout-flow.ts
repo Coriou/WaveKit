@@ -934,7 +934,7 @@ export async function layoutFlow(
 		const play = async () => {
 			phase = "play a recording"
 			await go("#/activity")
-			const disc = page.locator(".wka-list .wkp-disc").first()
+			const disc = page.locator(".wka-list .wkp-disc[data-playback-id]").first()
 			await disc.waitFor({ timeout: STEP_MS })
 			await disc.click()
 			await player.first().waitFor({ timeout: STEP_MS })

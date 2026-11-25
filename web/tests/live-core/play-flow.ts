@@ -77,7 +77,7 @@ export async function playFlow(page: Page): Promise<PlayReport> {
 		await page.evaluate(() => {
 			location.hash = "#/activity"
 		})
-		const disc = page.locator(".wka-list .wkp-disc").first()
+		const disc = page.locator(".wka-list .wkp-disc[data-playback-id]").first()
 		const shown = await until(async () => (await disc.count()) > 0)
 		note("a row with a recording shows a disc", shown)
 		const bare = await page.evaluate(() => {
@@ -86,7 +86,9 @@ export async function playFlow(page: Page): Promise<PlayReport> {
 			]
 			return {
 				rows: rows.length,
-				discs: rows.filter(r => r.querySelector(".wkp-disc") !== null).length,
+				discs: rows.filter(
+					r => r.querySelector(".wkp-disc[data-playback-id]") !== null,
+				).length,
 			}
 		})
 		note(
@@ -187,7 +189,7 @@ export async function playFlow(page: Page): Promise<PlayReport> {
 		const audioRow = page.locator(".wka-list .wka-item[data-disc]").first()
 		await audioRow.waitFor(bounded)
 		const key = await audioRow
-			.locator(".wkp-disc")
+			.locator(".wkp-disc[data-playback-id]")
 			.first()
 			.getAttribute("data-playback-id")
 		const gone = key === null ? null : { key }

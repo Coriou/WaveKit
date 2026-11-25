@@ -51,7 +51,7 @@ import {
 import { formatMHz } from "../format.ts"
 import { Icon } from "../../ui/Icon.tsx"
 import type { QueueRef } from "../playback/service.ts"
-import { ActivityDisc } from "./ActivityPlayback.tsx"
+import { ActivityDisc, DiscSlot } from "./ActivityPlayback.tsx"
 import { activityListKey, activityQueue } from "./playback.ts"
 import { recordingStarts, recordStarts, rowTimeOf } from "./row-time.ts"
 
@@ -650,6 +650,7 @@ export const ActivityRow = memo(function ActivityRow({
 			ref={measure}
 			className="wka-item"
 			data-stacked={stacked || undefined}
+			data-col=""
 			data-disc={audio || undefined}
 		>
 			<button
@@ -687,7 +688,6 @@ export const ActivityRow = memo(function ActivityRow({
 					{channels !== null && <span className="wka-read">{channels}</span>}
 				</span>
 			</button>
-			<ActivityDisc item={item} queue={queue} />
 			{stacked && (
 				<StackToggle
 					stack={stack}
@@ -696,6 +696,9 @@ export const ActivityRow = memo(function ActivityRow({
 					foldsId={foldsId}
 				/>
 			)}
+			{/* the disc's column is always last: discs line up at the item's right edge, and a row without
+			    audio keeps the column empty so every row's time and stack count sit in the same place */}
+			{audio ? <ActivityDisc item={item} queue={queue} /> : <DiscSlot />}
 		</div>
 	)
 })
@@ -783,7 +786,6 @@ export const ActivityCard = memo(function ActivityCard({
 			{(stacked || channels !== null || audio) && (
 				<div className="wka-cardstack">
 					{channels !== null && <span className="wka-read">{channels}</span>}
-					<ActivityDisc item={item} queue={queue} inline />
 					{stacked && (
 						<StackToggle
 							stack={stack}
@@ -791,6 +793,12 @@ export const ActivityCard = memo(function ActivityCard({
 							onToggle={onToggle}
 							foldsId={foldsId}
 						/>
+					)}
+					{/* the disc's column, last and of one width (empty on a stacked card without audio) */}
+					{audio ? (
+						<ActivityDisc item={item} queue={queue} inline />
+					) : (
+						stacked && <DiscSlot inline />
 					)}
 				</div>
 			)}

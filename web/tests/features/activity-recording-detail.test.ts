@@ -16,7 +16,10 @@ import {
 	summaryOfRecord,
 } from "../../src/features/messages/card.ts"
 import { PlayerDock } from "../../src/features/playback/PlayerDock.tsx"
-import { recordingChangeDetails } from "../../src/features/transmission/words.ts"
+import {
+	recordingChangeDetails,
+	recordingChangeText,
+} from "../../src/features/transmission/words.ts"
 import { playerCompactForced } from "../../src/shell/layout/stores.ts"
 
 const KEPT: Extract<ActivityRecord, { kind: "recording-change" }> = {
@@ -100,7 +103,7 @@ describe("a kept recording's event in words", () => {
 		])
 	})
 
-	it("keeps every id and raw number for the expert section, the measured centre in whole Hz", () => {
+	it("keeps every id and raw number for the expert section, the measured centre in MHz", () => {
 		const d = recordingChangeDetails(KEPT.payload)
 		const by = Object.fromEntries(d.map(r => [r.term, r.value]))
 		expect(by).toMatchObject({
@@ -109,10 +112,36 @@ describe("a kept recording's event in words", () => {
 			"Owner discovery": "d_B",
 			Observation: "o_A",
 			Receiver: "rx-1",
-			Measured: "measured 145 562 753 Hz (+253 Hz)",
-			"Observation start (UTC)": "2026-11-23T17:30:21.000Z",
-			"Duration ms": "8181",
+			Measured: "145.562753 MHz (+253 Hz)",
+			Duration: "8 s",
+			Change: "Kept: the file was saved",
+			"Channel frequency": "145.5625 MHz",
 		})
+		// the important facts first, the ids last
+		expect(d.map(r => r.term).slice(0, 3)).toEqual([
+			"Change",
+			"Channel frequency",
+			"Measured",
+		])
+		expect(d.at(-1)?.term).toBe("Observation")
+		expect(d.find(r => r.term === "Change")?.code).toBe(false)
+		expect(d.some(r => r.term === "Channel Hz")).toBe(false)
+		const started = d.find(r => r.term === "Transmission started")
+		expect(started?.iso).toBe("2026-11-23T17:30:21.000Z")
+		expect(started?.code).toBe(false)
+		expect(started?.value).not.toContain("T17")
+		expect(`${started?.value ?? ""} ${started?.hint ?? ""}`).toContain(
+			"17:30:21",
+		)
+		expect(d.some(r => r.term.includes("ms") || r.term.includes("(UTC)"))).toBe(
+			false,
+		)
+	})
+
+	it("a change code WaveKit has no sentence for reads in plain words", () => {
+		expect(recordingChangeText("finalized")).toBe("Kept: the file was saved")
+		expect(recordingChangeText("reKeyed")).toBe("Re keyed")
+		expect(recordingChangeText("")).toBe("")
 	})
 
 	it("a live analog transmission's duration and close are words", () => {
