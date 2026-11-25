@@ -374,7 +374,8 @@ describe("NC2 original probe cleanup before service artifact publication", () =>
 	)
 })
 
-// No probe call file is kept: nothing on disk says a clear call (callTrustAdmits) matched it.
+// No probe call file is listed: nothing on disk says a clear call (callTrustAdmits) matched it. It
+// is parked in its discovery's folder (scanner retention) and never named by an observation.
 describe("probe call recordings never reach the recordings list", () => {
 	const pad = (n: number): string => String(n).padStart(2, "0")
 	const stamp = (ms: number): string => {
@@ -400,7 +401,7 @@ describe("probe call recordings never reach the recordings list", () => {
 		return b
 	}
 
-	it("keeps no over of a conversation, even of clear-flagged calls, and lists none", async () => {
+	it("parks every over of a conversation, even of clear-flagged calls, and lists none", async () => {
 		const h = await harness()
 		try {
 			const live = h.observe()
@@ -441,8 +442,8 @@ describe("probe call recordings never reach the recordings list", () => {
 			await vi.waitFor(() => {
 				expect(existsSync(probeDir)).toBe(false)
 			})
-			expect(existsSync(join(target, first))).toBe(false)
-			expect(existsSync(join(target, second))).toBe(false)
+			expect(existsSync(join(target, first))).toBe(true)
+			expect(existsSync(join(target, second))).toBe(true)
 			const inventory = createRecordingInventory({
 				dsdFmeDirs: () => [],
 				scannerRecordingsDir: () => join(h.dir, "recordings"),
@@ -454,6 +455,8 @@ describe("probe call recordings never reach the recordings list", () => {
 			expect(
 				page.items.filter(i => i.discoveryId === live.discoveryId),
 			).toEqual([])
+			expect(JSON.stringify(page)).not.toContain(first)
+			expect(JSON.stringify(page)).not.toContain(second)
 		} finally {
 			await h.service.stop()
 		}

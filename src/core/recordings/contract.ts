@@ -97,6 +97,16 @@ export interface RecordingProtection {
 	 * call verdict (RecordingKeepEntry.callClear) and the store is ready. Unknown: false.
 	 */
 	isCallClearKept?(key: string): boolean
+	/**
+	 * Not a deletion decision: the one-time stamp of `dsd~` keeps made before callClear was
+	 * recorded. Each unstamped keep (of `keys` when given, else all) that `admitted` (a clear call
+	 * row's link, read when the write runs) answers true for gains callClear. Resolves the number
+	 * stamped; one store write at most, none when nothing changes; never rejects (0 on any fault).
+	 */
+	stampCallClear?(
+		admitted: (key: string) => boolean,
+		keys?: readonly string[],
+	): Promise<number>
 }
 
 /** What the routes call (protected mode only). */

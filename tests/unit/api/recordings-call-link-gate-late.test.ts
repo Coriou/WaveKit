@@ -5,7 +5,14 @@
  * link. Real Activity store (inline SQLite) and link index, real catalogue over a temporary
  * dsd-fme directory, real routes and keep service. Synthetic files and rows only.
  */
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	utimes,
+	writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import Fastify from "fastify"
@@ -20,6 +27,9 @@ import {
 	recordingRoutes,
 	type RecordingRoutesOptions,
 } from "../../../src/api/routes/recordings.js"
+import { wireRecordingLinks } from "../../../src/core/activity/recording-links.js"
+import type { RecordingLinkWiring } from "../../../src/core/activity/recording-links.js"
+import type { ActivityRecordingLinks } from "../../../src/core/activity/runtime.js"
 import type { ActivityStoreHandle } from "../../../src/core/activity/storage/contract.js"
 import { openSqliteFile } from "../../../src/core/activity/storage/probe.js"
 import type { DecodeEnvelope } from "../../../src/core/activity/types.js"
@@ -82,7 +92,9 @@ function callEnd(
 
 let app: FastifyInstance | undefined
 const keepServices: OpenedRecordingKeepService[] = []
+const wirings: RecordingLinkWiring[] = []
 afterEach(async () => {
+	for (const w of wirings.splice(0)) w.close()
 	await app?.close()
 	app = undefined
 	await Promise.all(keepServices.splice(0).map(k => k.close()))
@@ -117,14 +129,20 @@ async function mount(
 	dsd: string,
 	store: ActivityStoreHandle,
 	stateDir?: string,
+	/** Wire the links as src/index.ts does (wireRecordingLinks) instead of a bare onLinks. */
+	viaWiring = false,
 ): Promise<Mounted> {
 	let keeps: OpenedRecordingKeepService | undefined
+	let wiring: RecordingLinkWiring | undefined
 	const inventory = createRecordingInventory({
 		dsdFmeDirs: () => [{ decoderId: "dsd-a", dir: dsd }],
 		scannerRecordingsDir: () => null,
 		logger,
 		protection: lateBoundRecordingProtection(() => keeps),
-		activityEventId: key => store.recordingEventId?.(key) ?? null,
+		// As src/index.ts: through the wiring's return value once it is stored.
+		activityEventId: viaWiring
+			? key => wiring?.activityEventId(key) ?? null
+			: key => store.recordingEventId?.(key) ?? null,
 	})
 	keeps = await openRecordingKeepService({
 		stateDir: stateDir ?? (await tempDir()),
@@ -132,10 +150,18 @@ async function mount(
 		logger,
 	})
 	keepServices.push(keeps)
-	// MAIN-NEEDED wiring (recording-links.ts): link changes reach the catalogue.
-	store.onLinks?.(events =>
-		inventory.linksChanged?.(events.map(e => e.recordingId)),
-	)
+	if (viaWiring) {
+		wiring = wireRecordingLinks({
+			links: storeLinks(store),
+			catalogue: inventory,
+			logger,
+		})
+		wirings.push(wiring)
+	} else
+		// MAIN-NEEDED wiring (recording-links.ts): link changes reach the catalogue.
+		store.onLinks?.(events =>
+			inventory.linksChanged?.(events.map(e => e.recordingId)),
+		)
 	app = Fastify({ logger: false })
 	await app.register(recordingRoutes, {
 		inventory,
@@ -150,6 +176,17 @@ async function mount(
 	} as RecordingRoutesOptions)
 	await app.ready()
 	return { inventory, keeps }
+}
+
+/** The store's link surface as ActivityRuntime.recordingLinks() hands it to the wiring. */
+function storeLinks(store: ActivityStoreHandle): ActivityRecordingLinks {
+	return {
+		admitRecording: () => undefined,
+		link: op => store.link?.(op),
+		recordingEventId: key => store.recordingEventId?.(key) ?? null,
+		linkedRecordings: () => store.linkedRecordings?.() ?? [],
+		onLinks: listener => store.onLinks?.(listener) ?? (() => undefined),
+	}
 }
 
 async function listedIds(): Promise<string[]> {
@@ -390,5 +427,115 @@ describe("recordings keep: a Kept clear call file outlives its link", () => {
 		expect(keeps.isCallClearKept?.(`dsd~${CLEAR}`)).toBe(false)
 		expect(await listedIds()).toEqual([])
 		expect(await fileStatus(`dsd~${CLEAR}`)).toBe(404)
+	})
+})
+
+describe("recordings keep: the one-time stamp of keeps made before the verdict", () => {
+	/** A keep file of an older core: no callClear on any entry. */
+	async function legacyKeeps(keepDir: string, names: string[]): Promise<void> {
+		await writeFile(
+			join(keepDir, "recording-keeps.json"),
+			`${JSON.stringify({
+				schemaVersion: 1,
+				revision: 1,
+				keeps: names.map(name => ({
+					key: `dsd~${name}`,
+					keptAt: "2026-10-16T12:00:00.000Z",
+					bytes: BYTES.length,
+				})),
+			})}\n`,
+			{ mode: 0o600 },
+		)
+	}
+
+	async function keepFile(keepDir: string): Promise<{
+		revision: number
+		keeps: { key: string; callClear?: true }[]
+	}> {
+		return JSON.parse(
+			await readFile(join(keepDir, "recording-keeps.json"), "utf8"),
+		) as { revision: number; keeps: { key: string; callClear?: true }[] }
+	}
+
+	it("stamps an admitted keep once the links loaded: it outlives its link; an unproven keep stays hidden", async () => {
+		const dsd = await callDir()
+		const store = await openStore()
+		const keepDir = await tempDir()
+		await legacyKeeps(keepDir, [CLEAR, UNPROVEN])
+		// Links loaded at open (inline): a clear row links CLEAR, an unproven one UNPROVEN.
+		store.admit(callEnd("c-1", "clear"), undefined, {
+			id: `dsd~${CLEAR}`,
+			durationMs: 2000,
+		})
+		store.admit(callEnd("c-2", "unproven"), undefined, {
+			id: `dsd~${UNPROVEN}`,
+			durationMs: 2000,
+		})
+		const { keeps, inventory } = await mount(dsd, store, keepDir, true)
+		await expect
+			.poll(() => keeps.isCallClearKept?.(`dsd~${CLEAR}`) ?? false)
+			.toBe(true)
+		expect(keeps.isCallClearKept?.(`dsd~${UNPROVEN}`)).toBe(false)
+		const stamped = await keepFile(keepDir)
+		expect(stamped.revision).toBe(2)
+		expect(stamped.keeps).toEqual([
+			expect.objectContaining({ key: `dsd~${CLEAR}`, callClear: true }),
+			expect.not.objectContaining({ callClear: true }),
+		])
+		// Idempotent: a second load or a link change of these keys writes nothing.
+		inventory.linksLoaded?.()
+		inventory.linksChanged?.([`dsd~${CLEAR}`, `dsd~${UNPROVEN}`])
+		await expect(
+			keeps.stampCallClear?.(() => true, [`dsd~${CLEAR}`]),
+		).resolves.toBe(0)
+		expect((await keepFile(keepDir)).revision).toBe(2)
+		// The rows go (pruned): the stamped keep stays listed, served and keepable.
+		store.link?.({
+			type: "unlink",
+			recordingIds: [`dsd~${CLEAR}`, `dsd~${UNPROVEN}`],
+		})
+		await expect
+			.poll(() => store.recordingEventId?.(`dsd~${CLEAR}`) ?? null)
+			.toBeNull()
+		expect(await listedIds()).toEqual([`dsd:0~${CLEAR}`])
+		expect(await fileStatus(`dsd:0~${CLEAR}`)).toBe(200)
+		expect(await fileStatus(`dsd~${CLEAR}`)).toBe(200)
+		await expect(keeps.keep(`dsd:0~${CLEAR}`)).resolves.toMatchObject({
+			kept: true,
+			changed: false,
+		})
+		// The unproven keep: still protected, never listed, served nor answered by Keep.
+		expect(keeps.isProtected(`dsd~${UNPROVEN}` as RecordingKeepKey)).toBe(true)
+		expect(await fileStatus(`dsd~${UNPROVEN}`)).toBe(404)
+		await expect(keeps.keep(`dsd:0~${UNPROVEN}`)).rejects.toMatchObject({
+			status: 404,
+		})
+		expect((await keepFile(keepDir)).keeps[1]).not.toHaveProperty("callClear")
+	})
+
+	it("stamps a keep whose clear link arrives later, and fails closed on a throwing gate", async () => {
+		const dsd = await callDir()
+		const store = await openStore()
+		const keepDir = await tempDir()
+		await legacyKeeps(keepDir, [CLEAR])
+		store.admit(callEnd("c-1", "clear"))
+		const { keeps } = await mount(dsd, store, keepDir, true)
+		await expect(
+			keeps.stampCallClear?.(() => {
+				throw new Error("gate")
+			}),
+		).resolves.toBe(0)
+		expect((await keepFile(keepDir)).revision).toBe(1)
+		expect(keeps.isCallClearKept?.(`dsd~${CLEAR}`)).toBe(false)
+		store.link?.({
+			type: "link-call",
+			decoderId: "dsd-a",
+			callId: "c-1",
+			recording: { id: `dsd~${CLEAR}`, durationMs: 2000 },
+		})
+		await expect
+			.poll(() => keeps.isCallClearKept?.(`dsd~${CLEAR}`) ?? false)
+			.toBe(true)
+		expect((await keepFile(keepDir)).revision).toBe(2)
 	})
 })

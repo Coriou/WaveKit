@@ -36,5 +36,14 @@ export function lateBoundRecordingProtection(
 				return false
 			}
 		},
+		// The stamp needs the bound service; unbound or throwing, nothing is stamped.
+		stampCallClear: (admitted, keys) => {
+			try {
+				const run = current()?.stampCallClear?.(admitted, keys)
+				return run === undefined ? Promise.resolve(0) : run.catch(() => 0)
+			} catch {
+				return Promise.resolve(0)
+			}
+		},
 	}
 }

@@ -260,6 +260,34 @@ describe("recording links in the store", () => {
 		})
 	})
 
+	it("a prefix prune that drops a linked row tells the link listeners the link went", async () => {
+		// Fixture rows are stamped 2026-10-12; a clock 30 days later makes the next write's age
+		// prune remove them (a prefix prune: its watermark passes the linked row).
+		let clock = Date.parse("2026-10-12T00:00:30.000Z")
+		const store = await openStore({ now: () => clock })
+		const events: ActivityLinkEvent[] = []
+		store.onLinks?.(e => events.push(...e))
+		const call = callEnd("call-prune")
+		store.admit(call, undefined, { id: KEY_A, durationMs: 1 })
+		expect(store.recordingEventId?.(KEY_A)).toBe(call.eventId)
+		events.length = 0
+		clock = Date.parse("2026-11-12T00:00:00.000Z")
+		store.admit(
+			envelope({
+				eventId: "fresh",
+				receivedAt: "2026-11-12T00:00:00.000Z",
+			}),
+		)
+		expect(store.recordingEventId?.(KEY_A)).toBeNull()
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				recordingId: KEY_A,
+				eventId: call.eventId,
+				linked: false,
+			}),
+		)
+	})
+
 	it("a fair-share delete reports the links of the rows it removes", async () => {
 		const store = await openStore()
 		const linked = callEnd("call-13")

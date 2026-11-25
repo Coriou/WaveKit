@@ -1073,8 +1073,7 @@ export class EvidenceStore {
 				continue
 			}
 			const c = matches[0]
-			// Never kept: a dsd-fme call file is not servable (scannerRecordingNameServable).
-			if (c === undefined || low || !scannerRecordingNameServable(f.name)) {
+			if (c === undefined || low) {
 				await rm(f.path, { force: true })
 				continue
 			}
@@ -1103,6 +1102,11 @@ export class EvidenceStore {
 					)
 					return
 				}
+				// Parked, not linked: a dsd-fme call file stays in its discovery's folder under the
+				// scanner retention (maxAgeDays, maxRecordingsMb, the discovery's removal), but no
+				// observation names it and no route lists or serves it (scannerRecordingNameServable):
+				// nothing on disk says a clear call matched it.
+				if (!scannerRecordingNameServable(name)) return
 				linked.push({
 					observationId: c.observationId,
 					recordingId: `${c.discoveryId}~${name}`,

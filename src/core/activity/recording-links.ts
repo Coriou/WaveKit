@@ -82,6 +82,11 @@ export interface RecordingLinkWiringOptions {
 		hasKey?(key: string): boolean | null
 		/** Hears every committed link change, so a per-call file shown by its link bumps the revision. */
 		linksChanged?(keys: readonly string[]): void
+		/**
+		 * The link index is wired (loaded, or loading as link changes): kept call files made
+		 * before their Keep recorded the clear verdict are stamped while their link admits them.
+		 */
+		linksLoaded?(): void
 	} | null
 	scanner?: RecordingKeptSource | null
 	logger: Logger
@@ -251,6 +256,18 @@ export function wireRecordingLinks(
 		}) ?? null
 	const timer = setInterval(sweep, sweepMs)
 	timer.unref()
+	// The links loaded at open (inline) never reach onLinks; a writer thread's load does, as link
+	// changes. A microtask: the catalogue reads links through this wiring's return value, which
+	// its caller has stored by then.
+	if (links !== null)
+		queueMicrotask(() => {
+			if (closed) return
+			try {
+				options.catalogue?.linksLoaded?.()
+			} catch {
+				// The stamp is best effort; an unstamped old keep stays hidden (fail closed).
+			}
+		})
 
 	return {
 		activityEventId: key => {

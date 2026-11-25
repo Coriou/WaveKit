@@ -3,8 +3,10 @@
  * folder. Nothing on disk records whether a clear call (callTrustAdmits) matched a file: a P25
  * phase 1 or NXDN call is clear only with clearEvidence, P25 phase 2, dPMR, ProVoice, EDACS and
  * M17 never prove it, a call_end may omit encryptionKnown, and DMR is parked. So no probe call
- * file is linked, listed or served (fail closed): linking deletes it, and one an older core left
- * in a discovery's folder is refused on every route. Analog recordings are unchanged.
+ * file is linked, listed or served (fail closed): linking parks a matched clear one in its
+ * discovery's folder (on disk, under the scanner retention, unnamed by any observation), deletes
+ * an encrypted one, and every one there (parked, or left by an older core) is refused on every
+ * route. Analog recordings are unchanged.
  */
 import { existsSync } from "node:fs"
 import {
@@ -89,8 +91,10 @@ const ANALOG = "analog-00000000-0000-4000-8000-000000000001.wav"
 /**
  * A probe folder holding DMR, YSF (a call_end without encryptionKnown, which the old rule kept),
  * P25 (an encrypted call) and D-STAR call files of one discovery's calls, linked with the
- * candidates the scanner builds (probeLinkCandidates). Then an older core's YSF, D-STAR and
- * protocol-less call files sit in the discovery's dv folder, and an analog file in its own.
+ * candidates the scanner builds (probeLinkCandidates): the clear matches are parked in the
+ * discovery's dv folder (aged past the catalogue's in-progress delay, so only the gate hides them).
+ * Then an older core's YSF, D-STAR and protocol-less call files sit there too, and an analog file
+ * in its own folder.
  */
 async function linkedProbe(root: string, store: EvidenceStore) {
 	const dmr = call(T0 + 1_000, "DMR_CC_1", "1234")
@@ -98,6 +102,9 @@ async function linkedProbe(root: string, store: EvidenceStore) {
 	const ysf = call(T0 + 3_000, "YSF", "1236")
 	const p25 = call(T0 + 4_000, "P25_1A3", "1237")
 	const dstar = call(T0 + 5_000, "DSTAR", "1238")
+	// An older core's files (it moved clear-matched call files in and listed them).
+	const oldYsf = call(T0 + 7_000, "YSF", "1240")
+	const oldDstar = call(T0 + 8_000, "DSTAR", "1241")
 	const probe = join(root, "recordings", "dv", "probe-scn-abc-auto-1")
 	await mkdir(probe, { recursive: true })
 	for (const f of [dmr, ysf, p25, dstar])
@@ -123,42 +130,46 @@ async function linkedProbe(root: string, store: EvidenceStore) {
 		probeLinkCandidates([observation], calls),
 	)
 	const folder = join(root, "recordings", "dv", "d_1")
-	const linkedOnDisk = existsSync(folder) ? (await readdir(folder)).sort() : []
+	const parkedOnDisk = existsSync(folder) ? (await readdir(folder)).sort() : []
 	await mkdir(folder, { recursive: true })
 	const analog = join(root, "recordings", "analog", "d_1")
 	await mkdir(analog, { recursive: true })
 	const old = (Date.now() - 60_000) / 1000
 	for (const f of [
 		join(folder, unnamed),
-		join(folder, ysf),
-		join(folder, dstar),
+		join(folder, oldYsf),
+		join(folder, oldDstar),
 		join(analog, ANALOG),
-	]) {
+	])
 		await writeFile(f, Buffer.alloc(1_000, 1))
-		await utimes(f, old, old)
-	}
-	return { dmr, unnamed, p25, ysf, dstar, probe, linkedOnDisk, result }
+	for (const name of [...parkedOnDisk, unnamed, oldYsf, oldDstar])
+		await utimes(join(folder, name), old, old)
+	await utimes(join(analog, ANALOG), old, old)
+	const names = [dmr, unnamed, p25, ysf, dstar, oldYsf, oldDstar]
+	return { dmr, ysf, dstar, names, probe, parkedOnDisk, result }
 }
 
 describe("scanner probe call files", () => {
-	it("are never linked or kept from a probe, and never resolved by the evidence store", async () => {
+	it("are parked from a probe, never linked, and never resolved by the evidence store", async () => {
 		const root = await tempRoot()
 		const store = evidence(root)
-		const { dmr, unnamed, p25, ysf, dstar, probe, linkedOnDisk, result } =
+		const { dmr, ysf, dstar, names, probe, parkedOnDisk, result } =
 			await linkedProbe(root, store)
+		// No observation names a parked file (so no recordingIds carries it).
 		expect(result.linked).toEqual([])
-		expect(linkedOnDisk).toEqual([])
+		// The clear matches stay on disk in the discovery's folder; the encrypted P25 one is gone.
+		expect(parkedOnDisk).toEqual([dmr, dstar, ysf].sort())
 		// The encrypted P25 call is still reported as such.
 		expect(result.droppedEncrypted).toEqual(["o-1"])
 		expect(existsSync(probe)).toBe(false)
-		for (const name of [dmr, unnamed, p25, ysf, dstar])
+		for (const name of names)
 			expect(store.recordingPath(`d_1~${name}`)).toBeNull()
 	})
 
 	it("GET /api/scanner/recordings/:recordingId answers 404 for every probe call file", async () => {
 		const root = await tempRoot()
 		const store = evidence(root)
-		const { dmr, unnamed, p25, ysf, dstar } = await linkedProbe(root, store)
+		const { names } = await linkedProbe(root, store)
 		const app = Fastify({ logger: false })
 		try {
 			await app.register(scannerRoutes, {
@@ -170,8 +181,7 @@ describe("scanner probe call files", () => {
 				app.inject({
 					url: `/api/scanner/recordings/${encodeURIComponent(`d_1~${name}`)}`,
 				})
-			for (const name of [dmr, unnamed, p25, ysf, dstar])
-				expect((await get(name)).statusCode).toBe(404)
+			for (const name of names) expect((await get(name)).statusCode).toBe(404)
 		} finally {
 			await app.close()
 		}
@@ -180,7 +190,8 @@ describe("scanner probe call files", () => {
 	it("GET /api/recordings lists none of them and its file route serves none; analog is unchanged", async () => {
 		const root = await tempRoot()
 		const store = evidence(root)
-		const { dmr, unnamed, p25, ysf, dstar } = await linkedProbe(root, store)
+		const { names, parkedOnDisk } = await linkedProbe(root, store)
+		expect(parkedOnDisk).toHaveLength(3)
 		const inventory = createRecordingInventory({
 			// Not the gate under test: every dsd-fme call file counts as linked by a clear row.
 			callFileLinked: () => true,
@@ -206,12 +217,12 @@ describe("scanner probe call files", () => {
 			expect(list.json<RecordingInventoryPage>().items.map(i => i.id)).toEqual([
 				`scan:d_1~${ANALOG}`,
 			])
+			for (const name of names) expect(list.body).not.toContain(name)
 			const file = (name: string) =>
 				app.inject({
 					url: `/api/recordings/${encodeURIComponent(`scan:d_1~${name}`)}/file`,
 				})
-			for (const name of [dmr, unnamed, p25, ysf, dstar])
-				expect((await file(name)).statusCode).toBe(404)
+			for (const name of names) expect((await file(name)).statusCode).toBe(404)
 			expect((await file(ANALOG)).statusCode).toBe(200)
 		} finally {
 			await app.close()

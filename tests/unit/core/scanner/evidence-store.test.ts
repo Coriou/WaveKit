@@ -68,8 +68,9 @@ async function probeDirWith(
 }
 
 describe("EvidenceStore.linkProbeRecordings", () => {
-	// No probe call file is kept: nothing on disk says a clear call (callTrustAdmits) matched it.
-	it("deletes a call WAV matched to its discovery instead of linking it, and resolves no id", async () => {
+	// No probe call file is linked or served: nothing on disk says a clear call (callTrustAdmits)
+	// matched it. It is parked in its discovery's folder under the scanner retention.
+	it("parks a call WAV matched to its discovery: moved, not linked, and resolves no id", async () => {
 		await withDir(async root => {
 			const store = new EvidenceStore({
 				dir: root,
@@ -103,8 +104,9 @@ describe("EvidenceStore.linkProbeRecordings", () => {
 			expect(result).toEqual({ linked: [], cut: [], droppedEncrypted: [] })
 			expect(store.recordingPath(`d_ONE~${name}`)).toBeNull()
 			expect(existsSync(join(root, "recordings", "dv", "d_ONE", name))).toBe(
-				false,
+				true,
 			)
+			expect(existsSync(join(root, "recordings", "dv", "d_OTHER"))).toBe(false)
 			expect(existsSync(probe)).toBe(false)
 		})
 	})
@@ -135,7 +137,9 @@ describe("EvidenceStore.linkProbeRecordings", () => {
 				},
 			])
 			expect(result).toEqual({ linked: [], cut: [], droppedEncrypted: [] })
-			expect(existsSync(join(root, "recordings", "dv", "d_ONE"))).toBe(false)
+			expect(await readdir(join(root, "recordings", "dv", "d_ONE"))).toEqual([
+				name,
+			])
 			expect(existsSync(probe)).toBe(false)
 		})
 	})
@@ -553,6 +557,39 @@ describe("EvidenceStore.retention", () => {
 		})
 	})
 
+	it("ages out a parked probe call file under maxAgeDays like any recording of its folder", async () => {
+		await withDir(async root => {
+			const now = T0 + 60_000
+			const store = new EvidenceStore({
+				dir: root,
+				caps: { ...CAPS, maxAgeDays: 1 },
+				logger,
+				now: () => now,
+				statfs: plentyOfDisk,
+			})
+			const name = callWav(T0 + 1_000, "9", "2001")
+			const probe = await probeDirWith(root, [name], "WAV")
+			await store.linkProbeRecordings(probe, [
+				{
+					observationId: "o-1",
+					discoveryId: "d_ONE",
+					talkgroup: "9",
+					source: "2001",
+					startedAt: T0,
+					endedAt: T0 + 6_000,
+					encrypted: false,
+				},
+			])
+			const parked = join(root, "recordings", "dv", "d_ONE", name)
+			expect(existsSync(parked)).toBe(true)
+			const t = (T0 - 2 * DAY) / 1000
+			await utimes(parked, t, t)
+			const { deleted } = await store.retention(new Set())
+			expect(deleted).toEqual([join("recordings", "dv", "d_ONE", name)])
+			expect(existsSync(parked)).toBe(false)
+		})
+	})
+
 	it("counts live probe folders against the recordings cap without deleting them", async () => {
 		await withDir(async root => {
 			const now = Date.now()
@@ -773,7 +810,7 @@ describe("probeLinkCandidates", () => {
 		encrypted,
 	})
 
-	it("matches each over of a conversation, yet keeps no call file (none is servable)", async () => {
+	it("parks each over of a conversation in its discovery's folder, serving none", async () => {
 		await withDir(async root => {
 			const store = new EvidenceStore({
 				dir: root,
@@ -792,6 +829,9 @@ describe("probeLinkCandidates", () => {
 			expect(result.linked).toEqual([])
 			expect(store.recordingPath(`d_ONE~${a}`)).toBeNull()
 			expect(store.recordingPath(`d_ONE~${b}`)).toBeNull()
+			expect(
+				(await readdir(join(root, "recordings", "dv", "d_ONE"))).sort(),
+			).toEqual([a, b].sort())
 		})
 	})
 
@@ -886,6 +926,10 @@ describe("probeLinkCandidates", () => {
 			expect(result.droppedEncrypted).toEqual(["o-1"])
 			expect(store.recordingPath(`d_ONE~${clearA}`)).toBeNull()
 			expect(store.recordingPath(`d_ONE~${encA}`)).toBeNull()
+			// The clear over is parked; the encrypted one is deleted.
+			expect(await readdir(join(root, "recordings", "dv", "d_ONE"))).toEqual([
+				clearA,
+			])
 		})
 	})
 

@@ -365,6 +365,13 @@ export interface RecordingInventory {
 	 * (`recordings:changed`). Memory only; at most RECORDINGS_LINK_CHANGES_MAX keys read.
 	 */
 	linksChanged?(keys: readonly string[]): void
+	/**
+	 * The Activity link index is wired (its links loaded, or loading as link changes): a keep made
+	 * before its Keep recorded the clear call verdict is stamped now if its link admits it
+	 * (RecordingProtection.stampCallClear; one keep store write at most). Link changes stamp the
+	 * keys they name the same way.
+	 */
+	linksLoaded?(): void
 	/** `recordings:changed` notices (at most one a second); returns the unsubscribe. */
 	onChange?(listener: (e: RecordingsChangedEventData) => void): () => void
 	/** `refreshing`: an urgent refresh (invalidate, source change, settling file) is running. */
@@ -1982,7 +1989,8 @@ export function createRecordingInventory(
 	 *
 	 * A Kept file whose Keep recorded that verdict (RecordingProtection.isCallClearKept: Keep is
 	 * possible only while this gate admits the file) stays admitted after its link is gone (its
-	 * row pruned); a keep made before that record exists admits nothing on its own.
+	 * row pruned); a keep made before that record exists admits nothing on its own until the
+	 * one-time stamp (stampKeptCalls) records the verdict while its link still admits it.
 	 *
 	 * Bound: memory only, one Map read per call; a listing reads at most one per catalogue entry
 	 * (RECORDINGS_CATALOGUE_MAX = 50 000 O(1) reads, a few ms), an open or a resolve one per
@@ -1990,22 +1998,39 @@ export function createRecordingInventory(
 	 */
 	function callFileLinked(key: string | null): boolean {
 		if (key === null || !key.startsWith("dsd~")) return false
-		let linked = false
-		try {
-			if (options.callFileLinked !== undefined)
-				linked = options.callFileLinked(key) === true
-			else {
-				const eventId = options.activityEventId?.(key)
-				linked = typeof eventId === "string" && eventId.length > 0
-			}
-		} catch {
-			linked = false
-		}
-		if (linked) return true
+		if (callLinkAdmitted(key)) return true
 		try {
 			return options.protection?.isCallClearKept?.(key) === true
 		} catch {
 			return false
+		}
+	}
+
+	/** The link half of callFileLinked: a clear call row links this `dsd~` key now. */
+	function callLinkAdmitted(key: string): boolean {
+		if (!key.startsWith("dsd~")) return false
+		try {
+			if (options.callFileLinked !== undefined)
+				return options.callFileLinked(key) === true
+			const eventId = options.activityEventId?.(key)
+			return typeof eventId === "string" && eventId.length > 0
+		} catch {
+			return false
+		}
+	}
+
+	/**
+	 * Keeps made before the Keep recorded its clear call verdict gain it while their link admits
+	 * them (RecordingProtection.stampCallClear): `keys` of a link change, or every keep once the
+	 * links loaded. Fire and forget; it never rejects and changes no listing (an admitted file is
+	 * already shown).
+	 */
+	function stampKeptCalls(keys?: readonly string[]): void {
+		try {
+			const run = options.protection?.stampCallClear?.(callLinkAdmitted, keys)
+			if (run !== undefined) void run.catch(() => undefined)
+		} catch {
+			// The stamp is a convenience for old keeps; a failure hides them (fail closed).
 		}
 	}
 
@@ -2792,6 +2817,11 @@ export function createRecordingInventory(
 				n = 0
 			}
 			changed("changed", n)
+			if (Array.isArray(keys)) stampKeptCalls(keys)
+		},
+
+		linksLoaded() {
+			stampKeptCalls()
 		},
 
 		onChange(listener) {

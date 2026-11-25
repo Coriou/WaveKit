@@ -7253,8 +7253,8 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   dsd-fme call pattern nor the scanner recording id, symbolic links and
   non-regular files. Files that vanish during a scan are skipped.
 - Digital call files (since 2026-11-25): a `dsd-fme-call` or `dv-call` file
-  (a YSF or D-STAR call; DMR, P25, NXDN, dPMR, ProVoice and M17 names are
-  refused by name) is listed, counted and served only while a stored call row
+  (a YSF or D-STAR call; DMR, P25, NXDN, dPMR, ProVoice, EDACS and M17 names
+  are refused by name) is listed, counted and served only while a stored call row
   whose own trust fields prove the call clear links that exact file (the
   transmissions route's rule: an unproven or encrypted call, a file no row
   links, a pruned row and Activity off all leave it out). Its `id`, its `key`
@@ -7269,8 +7269,9 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   delete of such a file answer 404 too; it stays on disk under the usual
   retention. A Keep of a listed call file records that its call was proven
   clear, so a Kept call file stays listed and served once its row is pruned
-  (until it is unkept); a file kept before 2026-11-25 has no such record and
-  shows only while linked. Scanner
+  (until it is unkept); a file kept before 2026-11-25 has no such record, shows
+  only while linked, and gains it once the Activity links load while a clear
+  call row still links it (one keep store write). Scanner
   probe call files (`scanner-dv`) keep their own rules
   ([SCANNER](SCANNER.md#digital-voice-recordings)).
 - Catalogue: the list is served from memory, never from a walk of the disk per
@@ -8000,8 +8001,10 @@ unlinked (DMR files and files whose name says no known protocol) stay without
 backfill of older stores does not run again).
 Files dsd-fme already wrote stay on disk under the usual retention.
 No scanner probe call file is listed or served yet, whatever its protocol: a
-probe deletes its dsd-fme call files when it stops, and one an older core moved
-into a discovery's `dv` folder is not in `GET /api/recordings`, answers 404 from
+probe parks a call file that matches a clear call in its discovery's `dv`
+folder when it stops (on disk, under the scanner retention) and deletes the
+others, and a parked file, like one an older core moved into that folder, is
+not in `GET /api/recordings`, answers 404 from
 `GET /api/scanner/recordings/:recordingId` and is not among an observation's
 `recordingIds` (see [SCANNER.md](SCANNER.md#digital-voice-recordings)). `dv-call` files a core wrote before this change are not
 filtered by protocol: their names carry no protocol.
