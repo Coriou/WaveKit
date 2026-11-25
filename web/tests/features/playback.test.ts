@@ -571,6 +571,39 @@ describe("PlaybackService: stop, forget, dispose", () => {
 		expect(s.fetchFile).toHaveBeenCalledTimes(2)
 	})
 
+	it("forget aborting a waveform read keeps no flat waveform: an Undo loads it anew", async () => {
+		const blob = new Blob([new Uint8Array(synthWav(2, 1))])
+		let calls = 0
+		const fetchFile = vi.fn(
+			(_id: string, signal?: AbortSignal) =>
+				new Promise<Blob>((resolve, reject) => {
+					calls++
+					if (calls > 1) {
+						resolve(blob)
+						return
+					}
+					signal?.addEventListener("abort", () =>
+						reject(new DOMException("aborted", "AbortError")),
+					)
+				}),
+		)
+		const p = new PlaybackService({
+			fetchFile,
+			holdLive: () => {},
+			createAudio: () => new FakeAudio(),
+			createUrl: () => "blob:1",
+			revokeUrl: () => {},
+			storage: memoryStorage(),
+		})
+		const first = p.loadPeaks("x")
+		p.forget("x")
+		await first
+		expect(p.peaks.get().has("x")).toBe(false)
+		await p.loadPeaks("x")
+		expect(fetchFile).toHaveBeenCalledTimes(2)
+		expect(p.peaks.get().get("x")).not.toBe("none")
+	})
+
 	it("Delete then Undo while the shared fetch is in flight: a new play fetches anew and plays", async () => {
 		const s = setup({ hold: true })
 		s.p.play("x", Q("x"))

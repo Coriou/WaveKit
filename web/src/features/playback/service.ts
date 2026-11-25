@@ -521,7 +521,9 @@ export class PlaybackService extends Store<PlaybackState> {
 			this.setPeaks(id, file.peaks ?? "none")
 		} catch (error: unknown) {
 			// the strip stays flat (never "Loading waveform…" for good); playing it reports the error
+			// an abort (forget, dispose) is no answer about the file: an Undo may bring it back
 			if (error instanceof StaleFetchError || this.disposed) return
+			if (error instanceof Error && error.name === "AbortError") return
 			if (!this.peakStore.get().has(id)) this.setPeaks(id, "none")
 		}
 	}

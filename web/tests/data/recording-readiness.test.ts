@@ -479,7 +479,9 @@ describe("the Activity row's play control", () => {
 		delete a.recording
 		const html = renderRow(a)
 		expect(html).toContain("wka-disc-slot")
-		expect(html).toContain("data-disc")
+		// data-disc marks a row with audio only (the live-core harness reads it), the slot is no disc
+		expect(html).not.toContain("data-disc")
+		expect(html).not.toContain("wkp-disc")
 		expect(html).not.toContain('<button type="button" class="wkp-disc')
 	})
 

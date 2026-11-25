@@ -650,7 +650,8 @@ export const ActivityRow = memo(function ActivityRow({
 			ref={measure}
 			className="wka-item"
 			data-stacked={stacked || undefined}
-			data-disc
+			data-col=""
+			data-disc={audio || undefined}
 		>
 			<button
 				type="button"

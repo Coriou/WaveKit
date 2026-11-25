@@ -76,7 +76,7 @@ export function SavingWave() {
 export function DiscSlot({ inline = false }: { inline?: boolean }) {
 	return (
 		<span
-			className="wkp-disc wka-disc wka-disc-slot"
+			className="wka-disc wka-disc-slot"
 			data-inline={inline || undefined}
 			aria-hidden="true"
 		/>
