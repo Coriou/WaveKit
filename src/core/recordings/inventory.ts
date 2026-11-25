@@ -36,7 +36,6 @@ import {
 	DSD_FME_CALL_WAV,
 	DSD_FME_TEMP_WAV,
 	dsdFmeCallRecordable,
-	dsdFmeNameServable,
 } from "../../decoders/builtin/call-recordings.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { WaveKitError } from "../../utils/errors.js"
@@ -601,8 +600,9 @@ function dsdId(n: number, name: string): string | null {
 function scanId(discoveryId: string, name: string): string | null {
 	// req 4.2: a TEMP_ file is never listed, in a scanner folder either
 	if (DSD_FME_TEMP_WAV.test(name)) return null
-	// A scanner probe's dsd-fme call file of a protocol that is not recordable (DMR) never is
-	if (!dsdFmeNameServable(name)) return null
+	// A scanner probe's dsd-fme call file never is: nothing on disk says whether a clear call
+	// (callTrustAdmits) matched it, so an encrypted or unproven call's file must not pass (fail closed)
+	if (DSD_FME_CALL_WAV.test(name)) return null
 	if (!SCANNER_DISCOVERY_ID.test(discoveryId)) return null
 	const recordingId = `${discoveryId}~${name}`
 	const m = SCANNER_RECORDING_ID.exec(recordingId)

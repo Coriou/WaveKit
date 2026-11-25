@@ -68,7 +68,8 @@ async function probeDirWith(
 }
 
 describe("EvidenceStore.linkProbeRecordings", () => {
-	it("moves a call WAV to its discovery by TG, SRC and time, and resolves the recording id", async () => {
+	// No probe call file is kept: nothing on disk says a clear call (callTrustAdmits) matched it.
+	it("deletes a call WAV matched to its discovery instead of linking it, and resolves no id", async () => {
 		await withDir(async root => {
 			const store = new EvidenceStore({
 				dir: root,
@@ -99,13 +100,10 @@ describe("EvidenceStore.linkProbeRecordings", () => {
 					encrypted: false,
 				},
 			])
-			expect(result).toEqual({
-				linked: [{ observationId: "o-1", recordingId: `d_ONE~${name}` }],
-				cut: [],
-				droppedEncrypted: [],
-			})
-			expect(store.recordingPath(`d_ONE~${name}`)).toBe(
-				join(root, "recordings", "dv", "d_ONE", name),
+			expect(result).toEqual({ linked: [], cut: [], droppedEncrypted: [] })
+			expect(store.recordingPath(`d_ONE~${name}`)).toBeNull()
+			expect(existsSync(join(root, "recordings", "dv", "d_ONE", name))).toBe(
+				false,
 			)
 			expect(existsSync(probe)).toBe(false)
 		})
@@ -136,14 +134,8 @@ describe("EvidenceStore.linkProbeRecordings", () => {
 					encrypted: false,
 				},
 			])
-			expect(result).toEqual({
-				linked: [{ observationId: "o-1", recordingId: `d_ONE~${name}` }],
-				cut: [],
-				droppedEncrypted: [],
-			})
-			expect(await readdir(join(root, "recordings", "dv", "d_ONE"))).toEqual([
-				name,
-			])
+			expect(result).toEqual({ linked: [], cut: [], droppedEncrypted: [] })
+			expect(existsSync(join(root, "recordings", "dv", "d_ONE"))).toBe(false)
 			expect(existsSync(probe)).toBe(false)
 		})
 	})
@@ -781,7 +773,7 @@ describe("probeLinkCandidates", () => {
 		encrypted,
 	})
 
-	it("links each over of a conversation, the observation keeping only the latest source", async () => {
+	it("matches each over of a conversation, yet keeps no call file (none is servable)", async () => {
 		await withDir(async root => {
 			const store = new EvidenceStore({
 				dir: root,
@@ -797,9 +789,9 @@ describe("probeLinkCandidates", () => {
 				probe,
 				probeLinkCandidates([obs], [call("2001"), call("2002", T0 + 3_000)]),
 			)
-			expect(result.linked.map(l => l.recordingId).sort()).toEqual(
-				[`d_ONE~${a}`, `d_ONE~${b}`].sort(),
-			)
+			expect(result.linked).toEqual([])
+			expect(store.recordingPath(`d_ONE~${a}`)).toBeNull()
+			expect(store.recordingPath(`d_ONE~${b}`)).toBeNull()
 		})
 	})
 
@@ -890,8 +882,9 @@ describe("probeLinkCandidates", () => {
 				],
 			)
 			const result = await store.linkProbeRecordings(probe, candidates)
-			expect(result.linked.map(l => l.recordingId)).toEqual([`d_ONE~${clearA}`])
+			expect(result.linked).toEqual([])
 			expect(result.droppedEncrypted).toEqual(["o-1"])
+			expect(store.recordingPath(`d_ONE~${clearA}`)).toBeNull()
 			expect(store.recordingPath(`d_ONE~${encA}`)).toBeNull()
 		})
 	})

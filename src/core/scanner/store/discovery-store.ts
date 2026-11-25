@@ -26,7 +26,7 @@ import { ambientReachHz } from "../probes/ambient-placement.js"
 import { rasterChannelOf } from "../replay-channel.js"
 import { isTrusted } from "../probes/ambient-trust.js"
 import { isDsdFmeProtocol } from "../probes/confirm/dsd-fme.js"
-import { dsdFmeNameServable } from "../../../decoders/builtin/call-recordings.js"
+import { DSD_FME_CALL_WAV } from "../../../decoders/builtin/call-recordings.js"
 import { randomBytes } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -8351,9 +8351,10 @@ export class DiscoveryStore
 		else delete copy.proof
 		delete (copy as StoredObservation).classVote // store-internal (DQ 3.4), not part of the DTO
 		delete (copy as StoredObservation).short // store-internal (scanner-redesign 3.11)
-		// A dsd-fme call recording of a protocol that is not recordable (DMR) is not exposed
-		const servable = copy.recordingIds.filter(id =>
-			dsdFmeNameServable(id.slice(id.indexOf("~") + 1)),
+		// A scanner dsd-fme call recording is not exposed: its file keeps no proof that a clear
+		// call matched it (evidence-store scannerRecordingNameServable)
+		const servable = copy.recordingIds.filter(
+			id => !DSD_FME_CALL_WAV.test(id.slice(id.indexOf("~") + 1)),
 		)
 		if (servable.length !== copy.recordingIds.length) {
 			copy.recordingIds = servable

@@ -374,7 +374,8 @@ describe("NC2 original probe cleanup before service artifact publication", () =>
 	)
 })
 
-describe("probe call recordings reach the recordings list", () => {
+// No probe call file is kept: nothing on disk says a clear call (callTrustAdmits) matched it.
+describe("probe call recordings never reach the recordings list", () => {
 	const pad = (n: number): string => String(n).padStart(2, "0")
 	const stamp = (ms: number): string => {
 		const d = new Date(ms)
@@ -399,7 +400,7 @@ describe("probe call recordings reach the recordings list", () => {
 		return b
 	}
 
-	it("links every over of a conversation, not only the observation's latest talkgroup and source", async () => {
+	it("keeps no over of a conversation, even of clear-flagged calls, and lists none", async () => {
 		const h = await harness()
 		try {
 			const live = h.observe()
@@ -438,10 +439,10 @@ describe("probe call recordings reach the recordings list", () => {
 			})
 			const target = join(h.dir, "recordings", "dv", live.discoveryId!)
 			await vi.waitFor(() => {
-				expect(existsSync(join(target, first))).toBe(true)
-				expect(existsSync(join(target, second))).toBe(true)
 				expect(existsSync(probeDir)).toBe(false)
 			})
+			expect(existsSync(join(target, first))).toBe(false)
+			expect(existsSync(join(target, second))).toBe(false)
 			const inventory = createRecordingInventory({
 				dsdFmeDirs: () => [],
 				scannerRecordingsDir: () => join(h.dir, "recordings"),
@@ -450,16 +451,9 @@ describe("probe call recordings reach the recordings list", () => {
 				logger: createLogger({ level: "fatal" }),
 			})
 			const page = await inventory.list({})
-			const items = page.items
-				.filter(i => i.discoveryId === live.discoveryId)
-				.map(i => [i.kind, i.frequencyHz, i.durationMs])
-			expect(items).toHaveLength(2)
-			expect(items).toEqual(
-				expect.arrayContaining([
-					["scanner-dv", 145_500_000, 1_000],
-					["scanner-dv", 145_500_000, 2_000],
-				]),
-			)
+			expect(
+				page.items.filter(i => i.discoveryId === live.discoveryId),
+			).toEqual([])
 		} finally {
 			await h.service.stop()
 		}

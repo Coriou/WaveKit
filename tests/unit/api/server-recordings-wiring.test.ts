@@ -271,7 +271,7 @@ describe("recordings inventory through the API server", () => {
 		)
 	})
 
-	it("protected: a scanner probe's DMR or P25 call file (or one of no known protocol) is neither listed nor served; YSF and analog are", async () => {
+	it("protected: no scanner probe dsd-fme call file (DMR, P25, YSF, D-STAR or no known protocol) is listed or served; analog is", async () => {
 		const { root, bytes } = await setup()
 		const scan = join(root, "scan")
 		const dv = join(scan, "dv", "d_1")
@@ -282,6 +282,7 @@ describe("recordings inventory through the API server", () => {
 		const UNNAMED = "20261017_081501_12345__GROUP_TGT_9_SRC_1234.wav"
 		const P25 = "20261017_081502_12345_P25_1A3_GROUP_TGT_9_SRC_1234.wav"
 		const YSF = "20261017_081503_12345_YSF_GROUP_TGT_9_SRC_1234.wav"
+		const DSTAR = "20261017_081504_12345_DSTAR_GROUP_TGT_0_SRC_0.wav"
 		const ANALOG = "analog-00000000-0000-4000-8000-000000000001.wav"
 		const old = (Date.now() - 60_000) / 1000
 		for (const file of [
@@ -289,6 +290,7 @@ describe("recordings inventory through the API server", () => {
 			join(dv, UNNAMED),
 			join(dv, P25),
 			join(dv, YSF),
+			join(dv, DSTAR),
 			join(analog, ANALOG),
 		]) {
 			await fs.writeFile(file, bytes)
@@ -313,26 +315,25 @@ describe("recordings inventory through the API server", () => {
 				.json<RecordingInventoryPage>()
 				.items.map(i => i.id)
 				.sort(),
-		).toEqual([`scan:d_1~${YSF}`, `scan:d_2~${ANALOG}`].sort())
+		).toEqual([`scan:d_2~${ANALOG}`])
 		const get = (id: string) =>
 			app.inject({
 				method: "GET",
 				url: `/api/recordings/${encodeURIComponent(id)}/file`,
 				headers: authorized,
 			})
-		for (const name of [DMR, UNNAMED, P25]) {
+		// Nothing on disk says a clear call matched a probe's call file (fail closed).
+		for (const name of [DMR, UNNAMED, P25, YSF, DSTAR]) {
 			expect((await get(`scan:d_1~${name}`)).statusCode).toBe(404)
 			expect(await inventory.open(`scan:d_1~${name}`)).toBeNull()
 			expect(await inventory.resolve(`scan:d_1~${name}`)).toBeNull()
 		}
-		for (const id of [`scan:d_1~${YSF}`, `scan:d_2~${ANALOG}`]) {
-			const file = await get(id)
-			expect(file.statusCode).toBe(200)
-			expect(file.rawPayload.equals(bytes)).toBe(true)
-		}
+		const file = await get(`scan:d_2~${ANALOG}`)
+		expect(file.statusCode).toBe(200)
+		expect(file.rawPayload.equals(bytes)).toBe(true)
 		// The refused files stay on disk.
 		expect((await fs.readdir(dv)).sort()).toEqual(
-			[DMR, P25, UNNAMED, YSF].sort(),
+			[DMR, DSTAR, P25, UNNAMED, YSF].sort(),
 		)
 	})
 

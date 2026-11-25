@@ -937,13 +937,12 @@ describe("recordings inventory property", () => {
 					if (s.kind === "file") fs.file(p, m)
 					else if (s.kind === "link") fs.link(p)
 					else fs.dir(p)
+					// A scanner folder never lists a dsd-fme call name: nothing on disk says a clear
+					// call matched it (fail closed), so only its own recording names pass.
 					const nameOk =
 						s.place === "dsd"
 							? s.name === "call"
-							: s.place !== "probe" &&
-								s.name !== "upper" &&
-								s.name !== "space" &&
-								s.name !== "temp"
+							: s.place !== "probe" && s.name === "scan"
 					const id = s.place === "dsd" ? `dsd:0~${name}` : `scan:d_${i}~${name}`
 					if (nameOk && s.kind === "file" && !s.fresh) expected.set(id, p)
 					else if (s.place !== "probe") refused.push(id)

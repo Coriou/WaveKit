@@ -806,6 +806,8 @@ describe("a merge keeps a listing that left the window", () => {
 	})
 })
 
+// No probe call file is published any more (nothing on disk says a clear call matched it), so
+// these pin that a probe call file neither replaces nor joins the folder's files.
 describe("a probe publication never replaces a file in the folder", () => {
 	const NAME = "20261009_120000_00001_x_GROUP_TGT_100_SRC_200.wav"
 	for (const exdev of [false, true])
@@ -842,17 +844,11 @@ describe("a probe publication never replaces a file in the folder", () => {
 			expect(
 				await readFile(join(root, "recordings", "dv", a.id, dup1), "utf8"),
 			).toBe("taken")
-			const fresh = NAME.replace("_00001_", "_00001_dup2_")
-			expect(out.linked).toEqual([
-				{ observationId: "o1", recordingId: `${a.id}~${fresh}` },
-			])
-			expect(
-				await readFile(join(root, "recordings", "dv", a.id, fresh), "utf8"),
-			).toBe("probe")
+			expect(out.linked).toEqual([])
 			expect(existsSync(probe)).toBe(false)
 			expect(
 				(await readdir(join(root, "recordings", "dv", a.id))).sort(),
-			).toEqual(["call.wav", NAME, dup1, fresh].sort())
+			).toEqual(["call.wav", NAME, dup1].sort())
 		})
 
 	it(`every one of the ${PUBLISH_NAME_TRIES} names taken: nothing is published and nothing replaced`, async () => {
@@ -888,7 +884,7 @@ describe("a probe publication never replaces a file in the folder", () => {
 		expect(existsSync(probe)).toBe(false)
 	})
 
-	it("a free name publishes as itself and the probe file goes", async () => {
+	it("a free name is not published either, and the probe file goes", async () => {
 		const root = await tempRoot()
 		const store = newStore()
 		const ev = evidenceFor(root, () => store, undefined)
@@ -906,11 +902,8 @@ describe("a probe publication never replaces a file in the folder", () => {
 				encrypted: false,
 			},
 		])
-		expect(out.linked).toEqual([
-			{ observationId: "o1", recordingId: `${a.id}~${NAME}` },
-		])
-		expect(
-			await readFile(join(root, "recordings", "dv", a.id, NAME), "utf8"),
-		).toBe("probe")
+		expect(out.linked).toEqual([])
+		expect(existsSync(join(root, "recordings", "dv", a.id, NAME))).toBe(false)
+		expect(existsSync(probe)).toBe(false)
 	})
 })
