@@ -1,7 +1,9 @@
 /**
  * The mock's GET /api/transmissions/:ref, as the core answers it: 400 for a malformed ref, 404 for
  * an unknown one (and every `tx_`: the mock mints no ids), a recording's and its Activity row's
- * transmission by `rec:` and `evt:`, and a digital call's file only when its row links it.
+ * transmission by `rec:` and `evt:`, and a digital call's file only when its row links it: an
+ * unlinked call file's own `rec:` ref answers exactly as an unknown ref, and an unproven or
+ * encrypted call names no file anywhere in its body (the core's rule six).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type {
@@ -81,11 +83,9 @@ describe("mock transmissions", () => {
 			i => i.kind === "dsd-fme-call" && i.activityEventId == null,
 		)
 		if (unlinked) {
-			const dto = (
-				await tx(`rec:${unlinked.key ?? unlinked.id}`)
-			).json<TransmissionDto>()
-			expect(dto.privacy).toBe("unproven")
-			expect(dto.artefacts).toEqual([])
+			const res = await tx(`rec:${unlinked.key ?? unlinked.id}`)
+			expect(res.statusCode).toBe(404)
+			expect(res.body).toBe((await tx("rec:dsd~none.wav")).body)
 		}
 	})
 
@@ -98,8 +98,7 @@ describe("mock transmissions", () => {
 		let clear = 0
 		for (const call of calls) {
 			const key = call.key ?? call.id
-			const dto = (await tx(`rec:${key}`)).json<TransmissionDto>()
-			expect(dto.kind).toBe("voice-digital")
+			const res = await tx(`rec:${key}`)
 			const row =
 				typeof call.activityEventId === "string"
 					? (
@@ -112,15 +111,41 @@ describe("mock transmissions", () => {
 					: undefined
 			const decoderLinked =
 				row?.kind === "decoder-reception" && row.recording?.id === key
-			if (dto.privacy === "clear") {
+			if (res.statusCode === 200) {
+				const dto = res.json<TransmissionDto>()
+				expect(dto.kind).toBe("voice-digital")
+				expect(dto.privacy).toBe("clear")
 				clear++
 				expect(decoderLinked).toBe(true)
 				expect(dto.artefacts.map(a => a.id)).toEqual([key])
 			} else {
-				expect(dto.artefacts).toEqual([])
-				if (dto.privacy === "unproven") expect(decoderLinked).toBe(false)
+				// Not linked (or encrypted): the file's key is no oracle.
+				expect(res.statusCode).toBe(404)
+				expect(res.body).toBe((await tx("rec:dsd~none.wav")).body)
+				expect(res.body).not.toContain(key)
 			}
 		}
 		expect(clear).toBeGreaterThan(0)
+	})
+
+	it("an unproven or encrypted call row names no file, key or audio by evt:", async () => {
+		const rows = (
+			await get("/api/activity?kinds=decoder-reception&limit=200")
+		).json<ActivitySearchPage>()
+		let checked = 0
+		for (const row of rows.items) {
+			const res = await tx(`evt:${row.eventId}`)
+			if (res.statusCode !== 200) continue
+			const dto = res.json<TransmissionDto>()
+			if (dto.privacy !== "unproven" && dto.privacy !== "encrypted") continue
+			checked++
+			expect(dto.artefacts).toEqual([])
+			expect(dto.refs.recordingKeys).toEqual([])
+			expect(dto.raw.recording).toBeNull()
+			expect(res.body).not.toMatch(/\.wav|dsd~/)
+			if (dto.privacy === "encrypted")
+				expect(dto.noAudioReason).toBe("encrypted")
+		}
+		expect(checked).toBeGreaterThan(0)
 	})
 })

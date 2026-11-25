@@ -169,12 +169,14 @@ export interface DsdFmeWavPrevious {
 
 /**
  * Whether a recording stamped `fileMs` (a whole second) may be a call's own when `previous` is
- * the previous call of the same identity: a stamp in a second before that call's end second is
- * the earlier call's file (dsd-fme stamps the file at its call's start, which precedes that
- * call's end), never the later call's. The end the adapter saw lags dsd-fme (stdout, event loop)
- * and a back-to-back re-key's file can be stamped before it, so the threshold is also capped at
- * the second after the previous start's second: the earlier file is stamped in that start
- * second. A stamp in the threshold's own second cannot be told apart and stays admitted.
+ * an earlier call whose name pattern also names that file: a stamp in a second before that
+ * call's end second is the earlier call's file (dsd-fme stamps the file at its call's start,
+ * which precedes that call's end), never the later call's. The end the adapter saw lags dsd-fme
+ * (stdout, event loop) and a back-to-back re-key's file can be stamped before it, so the
+ * threshold is also capped at the second after the previous start's second. dsd-fme may stamp
+ * the earlier file in that second too (it saw the start a moment after the adapter did), so a
+ * stamp in the threshold's own second cannot be told apart and is refused: the safe answer
+ * (a later call loses its link, an earlier call's audio is never served under it).
  */
 export function dsdFmeWavStampAfterPrevious(
 	fileMs: number,
@@ -184,5 +186,30 @@ export function dsdFmeWavStampAfterPrevious(
 	const endSecondMs = Math.floor(previous.endWallMs / 1000) * 1000
 	const afterStartSecondMs =
 		Math.floor(previous.startWallMs / 1000) * 1000 + 1000
-	return fileMs >= Math.min(endSecondMs, afterStartSecondMs)
+	return fileMs > Math.min(endSecondMs, afterStartSecondMs)
+}
+
+/** An earlier call as a later call's lookup sees it: its name pattern and wall start and end. */
+export interface DsdFmeWavEarlier extends DsdFmeWavPrevious {
+	pattern: RegExp
+}
+
+/**
+ * Whether the file `name`, stamped `fileMs`, may be a later call's own given the `earlier`
+ * calls the adapter ended before it: refused when any earlier call's own pattern names the file
+ * and the stamp is not past that call (dsdFmeWavStampAfterPrevious). Matched on the name, not on
+ * an identity key: a field one over lacks (a P25 NAC, an NXDN RAN, a D-STAR UR) widens its
+ * pattern, so two overs of one station can hold different identities while one's pattern still
+ * names the other's file.
+ */
+export function dsdFmeWavNotEarlierOwned(
+	name: string,
+	fileMs: number,
+	earlier: readonly DsdFmeWavEarlier[],
+): boolean {
+	for (const e of earlier) {
+		if (e.pattern.test(name) && !dsdFmeWavStampAfterPrevious(fileMs, e))
+			return false
+	}
+	return true
 }

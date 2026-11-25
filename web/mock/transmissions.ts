@@ -4,17 +4,93 @@
 // and Activity rows with `id` null, and a `tx_` or `obs:` ref is 404. A digital call is "clear" and
 // lists its file only when its decoder call row (decoder-reception) links that file in `recording`,
 // the decoder's link the core accepts; a row whose `encrypted` field is true reads "encrypted";
-// anything else "unproven" with no audio. An analog recording's `copy` comes from the catalogue items'
+// anything else "unproven" with no audio. Rule six as the core applies it: an unproven or encrypted
+// call shows nothing of its file (no key, facts, times, file name in the raw row), and its file's
+// own `rec:` ref answers exactly as an unknown ref (404). An analog recording's `copy` comes from the catalogue items'
 // `copyOf` (the original it names, the listed copies naming it), as the core builds it.
 import type { FastifyInstance } from "fastify"
 import type {
 	ActivityRecord,
 	ActivitySummary,
+	JsonValue,
 	RecordingInventoryItem,
 	TransmissionCopy,
 	TransmissionDto,
 	TransmissionTone,
 } from "@wavekit/api-types"
+
+/** A field key or value that names a recording file (the core's redact.ts). */
+const RECORDING_FIELD_KEY = /wav|recording|^file(name)?$|path/i
+const namesRecording = (v: unknown): boolean =>
+	typeof v === "string" && (/\.wav$/i.test(v) || v.startsWith("dsd~"))
+
+/**
+ * A digital call row's stored record with every file reference gone unless `keep` admits its
+ * `dsd~` key: the core's redactCallRecordingRefs (src/core/transmissions/redact.ts). Other kinds
+ * pass unchanged.
+ */
+export function redactMockCallRecord(
+	record: ActivityRecord,
+	keep: (key: string) => boolean,
+): ActivityRecord {
+	if (record.kind !== "decoder-reception") return record
+	const kept = (v: unknown) => typeof v === "string" && keep(`dsd~${v}`)
+	const payload = record.payload
+	const fields = payload.fields.filter(
+		f =>
+			!(
+				(RECORDING_FIELD_KEY.test(f.key) || namesRecording(f.value)) &&
+				!kept(f.value)
+			),
+	)
+	let decodedData = payload.decodedData
+	if (
+		typeof decodedData === "object" &&
+		decodedData !== null &&
+		!Array.isArray(decodedData)
+	) {
+		const rest: { [key: string]: JsonValue } = {}
+		for (const [field, value] of Object.entries(decodedData)) {
+			if (field === "wavFile") {
+				if (kept(value)) rest[field] = value
+				continue
+			}
+			if (
+				(RECORDING_FIELD_KEY.test(field) || namesRecording(value)) &&
+				!kept(value)
+			)
+				continue
+			rest[field] = value
+		}
+		decodedData = rest
+	}
+	const out: Record<string, unknown> = { ...payload, fields, decodedData }
+	const link = (payload as { recording?: { id?: unknown } }).recording
+	if (link !== undefined && !(typeof link.id === "string" && keep(link.id)))
+		delete out["recording"]
+	return { ...record, payload: out as unknown as typeof payload }
+}
+
+/** Whether a mock row's stored record says its call is encrypted (its `encrypted` field). */
+function encryptedRow(record: ActivityRecord): boolean {
+	return (
+		record.kind === "decoder-reception" &&
+		record.payload.fields.some(f => f.key === "encrypted" && f.value === true)
+	)
+}
+
+/**
+ * The key a call row's file may be named by: its decoder link (`recording`) when the call is not
+ * encrypted, else null (nothing of its file is named).
+ */
+export function mockCallLinkedKey(row: {
+	summary: ActivitySummary
+	record: ActivityRecord
+}): string | null {
+	if (row.summary.kind !== "decoder-reception") return null
+	if (encryptedRow(row.record)) return null
+	return row.summary.recording?.id ?? null
+}
 
 const REF = /^(tx_[0-9A-HJKMNP-TV-Z]{26}|(rec|evt|obs):[^\s]{1,512})$/
 
@@ -89,25 +165,28 @@ function copyOf(
 }
 
 function dto(
-	item: RecordingInventoryItem | undefined,
+	listed: RecordingInventoryItem | undefined,
 	row: { summary: ActivitySummary; record: ActivityRecord } | null,
 	items: readonly RecordingInventoryItem[] = [],
 ): TransmissionDto {
 	const digital =
-		item !== undefined
-			? item.kind !== "scanner-analog"
+		listed !== undefined
+			? listed.kind !== "scanner-analog"
 			: row?.summary.kind === "decoder-reception"
-	const encrypted =
-		row?.record.kind === "decoder-reception" &&
-		row.record.payload.fields.some(
-			f => f.key === "encrypted" && f.value === true,
-		)
-	const linked =
-		item !== undefined &&
-		!encrypted &&
-		row?.summary.kind === "decoder-reception" &&
-		row.summary.recording?.id === (item.key ?? item.id)
-	const audio = item !== undefined && (!digital || linked) ? [item] : []
+	const encrypted = row !== null && encryptedRow(row.record)
+	const linkedKey = row === null ? null : mockCallLinkedKey(row)
+	const linked = listed !== undefined && linkedKey === (listed.key ?? listed.id)
+	// Rule six: a digital call's unlinked file shows nothing (key, facts, times, frequency).
+	const item = digital && !linked ? undefined : listed
+	const audio = item !== undefined ? [item] : []
+	const field = (key: string) =>
+		row?.record.kind === "decoder-reception"
+			? row.record.payload.fields.find(f => f.key === key)?.value
+			: undefined
+	const text = (v: unknown): string | null =>
+		typeof v === "number" || (typeof v === "string" && v.length > 0)
+			? String(v)
+			: null
 	const facts = item?.facts ?? null
 	const startedAt =
 		item?.startedAt ??
@@ -145,8 +224,8 @@ function dto(
 		tone: digital ? null : toneOf(item),
 		identity: digital
 			? {
-					talkgroup: item?.talkgroup ?? null,
-					radio: item?.source ?? null,
+					talkgroup: item?.talkgroup ?? text(field("talkgroup")),
+					radio: item?.source ?? text(field("source")),
 					label: null,
 				}
 			: null,
@@ -167,14 +246,22 @@ function dto(
 			kept: i.kept ?? null,
 			expiresAt: null,
 		})),
-		noAudioReason: null,
+		noAudioReason: audio.length === 0 && encrypted ? "encrypted" : null,
 		group: null,
 		sameTime: null,
 		channelSummary: null,
 		gone: [],
 		raw: {
 			recording: item ?? null,
-			activity: row?.record ?? null,
+			activity:
+				row === null
+					? null
+					: digital
+						? redactMockCallRecord(
+								row.record,
+								key => linked && key === linkedKey,
+							)
+						: row.record,
 			facts,
 			observation: null,
 		},
@@ -216,6 +303,12 @@ export function registerTransmissionsMock(
 				typeof item.activityEventId === "string"
 					? options.activity(item.activityEventId)
 					: null
+			// A digital file its call row does not link answers exactly as an unknown ref.
+			if (
+				item.kind !== "scanner-analog" &&
+				(row === null || mockCallLinkedKey(row) !== key)
+			)
+				return notFound()
 			return dto(item, row, items)
 		}
 		if (ref.startsWith("evt:")) {
@@ -223,7 +316,7 @@ export function registerTransmissionsMock(
 			if (!row) return notFound()
 			const key = row.summary.recording?.id
 			const item =
-				key === undefined ? undefined : items.find(i => i.key === key)
+				key === undefined ? undefined : items.find(i => (i.key ?? i.id) === key)
 			return dto(item, row, items)
 		}
 		return notFound()

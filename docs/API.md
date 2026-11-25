@@ -7984,10 +7984,13 @@ missing (not created yet, or unmounted); other keys are still judged. So a
 deleted file's link usually goes within two to three minutes. Only the summary and the refs change: the stored record stays as it
 was received. dsd-fme reports the file as an absolute path; Activity stores and
 serves its file name only (`decodedData.wavFile`), never a path, and drops a
-`wavFile` that is not a call file name. Rows stored by cores before links are
+`wavFile` that is not a call file name. It stores the name only for a call its
+`call_end` proves clear and whose file the recordings route may serve: an
+unproven or encrypted call (and a DMR call while DMR recordings are parked)
+stores no file name. Rows stored by cores before links are
 linked once, in the background, after the store opens (rows of a probe whose
 file is not in the catalogue are unlinked by the sweep), and their `wavFile` is
-served as a file name.
+served as a file name under the same rule (see `GET /api/activity/:eventId`).
 
 A `recording-change` record's `payload`: `change` (`"finalized"`),
 `recordingId` (the key, `scan:<discoveryId>~<file>`), `recordingKind`
@@ -8275,6 +8278,15 @@ One stored record: `kind`, decimal `commitSeq`, and `payload` (the envelope,
 including `outputType` and `decodedData`). 404 `NOT_FOUND` when the id is
 absent. 400 `ACTIVITY_QUERY_INVALID` when the id is not a valid event id.
 
+A digital call's row (`decoder-reception` with `outputType` `call_start` or
+`call_end`) names its recording file only when its own stored call output
+proves the call clear and the file is one the recordings route may serve. For
+an unproven or encrypted call, every file reference is left out of the answer:
+`decodedData.wavFile`, any field or `decodedData` member naming a `.wav` file or
+a `dsd~` key, and a `recording` link. A row stored by an older core is answered
+the same way. This is the rule the `raw` block of `GET /api/transmissions/:ref`
+applies to the same row.
+
 ### POST /api/activity/facets
 
 Body `{ "query": { }, "dimensions": ["kind"] }`. Dimensions are `category`,
@@ -8516,7 +8528,8 @@ count.
 One transmission, read only. `ref` is a transmission id (`tx_<ULID>`) or an alias of one of its
 artefacts: `rec:<recording key>`, `evt:<Activity event id>` or `obs:<scanner observation id>`
 (at most 520 characters, no whitespace). URL-encode it. In protected mode it is behind the same
-admission as `GET /api/recordings`.
+admission as `GET /api/recordings`: a request without it is denied (401) before the ref is
+read, so a held, an unknown and a malformed ref answer alike.
 
 - 400 `TRANSMISSION_REF_INVALID`: not one of those forms.
 - 404 `TRANSMISSION_NOT_FOUND`: nothing the core holds names it.
@@ -8571,7 +8584,9 @@ decoder link counts as it does for a call with an id.
   `rec:` alias, and frequency) when this recording is a copy; `copies` the listed copies of this
   recording (`{ ref, hz, recordingKey, evidence }`, at most 8; `copiesTotal` counts them all).
   Null when neither, and for digital calls.
-- `raw`: the catalogue item, stored record and facts as read (Details only).
+- `raw`: the catalogue item, stored record and facts as read (Details only). For a digital call
+  that is not clear, `raw.recording` and `raw.facts` are null and `raw.activity` names no file
+  (as `GET /api/activity/:eventId` answers the same row).
 - `signal`, `sameTime` and `channelSummary` are null: not computed yet.
 
 ## WebSocket API

@@ -169,6 +169,30 @@ describe("dsd-fme call recordings in the Activity ingress", () => {
 		expect(data(rows[0]!.envelope)["wavFile"]).toBe(NAME)
 	})
 
+	it("stores no file name for a call not proven clear, nor for a DMR call file", () => {
+		const { ingress, rows } = setup()
+		const shapes: Record<string, unknown>[] = [
+			{ encryptionKnown: false },
+			{ clearEvidence: undefined },
+			{ encrypted: true, flags: { encrypted: true } },
+			{ protocol: "p25p2" },
+			{ wavFile: `/calls/${DMR_NAME}`, protocol: "dmr" },
+		]
+		for (const shape of shapes)
+			ingress.publish(
+				"dsd-a",
+				"dsd-fme",
+				callEnd({ wavFile: `/calls/${NAME}`, ...shape }),
+			)
+		expect(rows).toHaveLength(shapes.length)
+		for (const row of rows) {
+			expect(row.recording).toBeUndefined()
+			expect("wavFile" in data(row.envelope)).toBe(false)
+			expect(JSON.stringify(row.envelope)).not.toContain(NAME)
+			expect(JSON.stringify(row.envelope)).not.toContain(DMR_NAME)
+		}
+	})
+
 	it("drops a wavFile that is not a call file name and never links it", () => {
 		const { ingress, rows } = setup()
 		for (const wavFile of ["/etc/passwd", "../../x.wav", `/a/${NAME}.part`])
