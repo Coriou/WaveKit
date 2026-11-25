@@ -7987,11 +7987,11 @@ unlinked (DMR files and files whose name says no known protocol) stay without
 `recording` (a row is linked only at its `call_end`, and the one-time link
 backfill of older stores does not run again).
 Files dsd-fme already wrote stay on disk under the usual retention.
-Scanner DMR call files are not listed or served yet either: a probe's dsd-fme
-call file in a discovery's `dv` folder whose name says DMR (or no known
-protocol) is not in `GET /api/recordings`, answers 404 from
+No scanner probe call file is listed or served yet, whatever its protocol: a
+probe deletes its dsd-fme call files when it stops, and one an older core moved
+into a discovery's `dv` folder is not in `GET /api/recordings`, answers 404 from
 `GET /api/scanner/recordings/:recordingId` and is not among an observation's
-`recordingIds`. `dv-call` files a core wrote before this change are not
+`recordingIds` (see [SCANNER.md](SCANNER.md#digital-voice-recordings)). `dv-call` files a core wrote before this change are not
 filtered by protocol: their names carry no protocol.
 
 A link goes when its file goes (pruned, deleted, retention, a removed
