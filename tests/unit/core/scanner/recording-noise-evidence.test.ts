@@ -8,9 +8,10 @@
  * frames judged on its partial window (ADMISSION_PROVEN_VOICE); elsewhere it stays unmeasured, so
  * weak voice of 1.6 and 2.5 s is kept. The proven-channel rule applies only on a discovery that
  * made DISCOVERY_NOISE_GATE (15) or more noise-read files in the hour before the file
- * (DiscoveryNoiseRate; `base` is such a discovery unless a test says otherwise); there a file kept
- * only by its quieted run or quieted share spends the budget too. All readings and signals are
- * modelled.
+ * (DiscoveryNoiseRate; `base` is such a discovery unless a test says otherwise) and judges only a
+ * file whose whole-file share is under 0.10 and that does not read voice-like (no quieted run, a
+ * quieted share under 0.10 or none): a voice-like file is kept, gated or latched, and never
+ * spends the budget. All readings and signals are modelled.
  */
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
@@ -469,42 +470,90 @@ describe("finishPath: decoded tone and carrier quieting on a proven-voice channe
 				).toMatchObject({ verdict: "finish", reason: "prior-none" })
 	})
 
-	it("on a gated discovery a file kept only by its quieted run spends the budget; under the gate it is kept", () => {
+	it("a file with a quieted run is never judged, gated, latched or not, with or without budget", () => {
 		for (const q of [0, 0.05, null])
-			for (const room of [true, false]) {
-				const at = (reads: number) =>
-					finishPath({
-						...base,
-						prior: proven,
-						admission: quieted(0.01, {
-							quietedPeriodicShare: q,
-							quietedRun: true,
-						}),
-						noiseEvidence: room,
-						discoveryNoiseReads: reads,
-					}).reason
-				expect(at(DISCOVERY_NOISE_GATE)).toBe(room ? "noise-evidence" : "noise")
-				expect(at(DISCOVERY_NOISE_GATE - 1)).toBe("prior-none")
-			}
+			for (const room of [true, false])
+				for (const latched of [true, false])
+					for (const reads of [
+						0,
+						DISCOVERY_NOISE_GATE - 1,
+						DISCOVERY_NOISE_GATE,
+					]) {
+						const p = finishPath({
+							...base,
+							prior: proven,
+							admission: quieted(0.01, {
+								quietedPeriodicShare: q,
+								quietedRun: true,
+							}),
+							noiseEvidence: room,
+							discoveryNoiseReads: reads,
+							discoveryNoiseLatched: latched,
+						})
+						expect(p.reason).toBe("prior-none")
+						expect(p.noiseCounted).toBe(false)
+					}
 	})
 
-	it("on a gated discovery either share under 0.10 judges it: a file kept only by its quieted share spends the budget", () => {
-		const at = (whole: number, q: number) =>
+	it("judged only with a whole-file share under 0.10 and a quieted share under 0.10 or none", () => {
+		const at = (whole: number | null, q: number | null) =>
 			finishPath({
 				...base,
 				prior: proven,
-				admission: quieted(whole, {
-					quietedPeriodicShare: q,
-					quietedRun: false,
-				}),
+				admission: {
+					enabled: true,
+					noise: true,
+					periodicShare: whole,
+					quieting: { quietedPeriodicShare: q, quietedRun: false },
+				},
 			}).reason
-		// Pitched quieted frames over a whole-file share under 0.10: judged (the emitter reads so too).
-		expect(at(0.02, 0.1)).toBe("noise")
-		expect(at(0.02, 0.3)).toBe("noise")
-		// A whole-file share over 0.10 with unpitched quieted frames: judged.
-		expect(at(0.2, 0.099)).toBe("noise")
-		// Both pitched: kept.
+		// Pitched quieted frames over an unpitched whole file: voice-like, kept.
+		expect(at(0.02, 0.1)).toBe("prior-none")
+		expect(at(0.02, 0.25)).toBe("prior-none")
+		expect(at(0.02, 0.3)).toBe("prior-none")
+		// A whole-file share at or over 0.10, or none: kept whatever the quieted frames read.
+		expect(at(0.2, 0.099)).toBe("prior-none")
+		expect(at(0.1, 0.01)).toBe("prior-none")
+		expect(at(null, 0.01)).toBe("prior-none")
 		expect(at(0.2, 0.1)).toBe("prior-none")
+		// Unpitched both ways, or the whole file with no quieted share: judged.
+		expect(at(0.02, 0.099)).toBe("noise")
+		expect(at(0.02, null)).toBe("noise")
+	})
+
+	it("on a latched discovery with the budget spent: a quieted-run file and a quieted-share 0.25 file are kept, the whole-share-only unpitched file is discarded", () => {
+		const latched = (
+			quieting: {
+				quietedPeriodicShare: number | null
+				quietedRun: boolean
+			} | null,
+		) =>
+			finishPath({
+				...base,
+				prior: proven,
+				admission: quieted(0.03, quieting),
+				noiseEvidence: false,
+				discoveryNoiseReads: 0,
+				discoveryNoiseLatched: true,
+			})
+		for (const quieting of [
+			{ quietedPeriodicShare: null, quietedRun: true },
+			{ quietedPeriodicShare: 0.25, quietedRun: false },
+		]) {
+			const p = latched(quieting)
+			expect(p).toMatchObject({ verdict: "finish", reason: "prior-none" })
+			expect(p.reason).not.toBe("noise-evidence")
+			expect(p.noiseCounted).toBe(false)
+		}
+		for (const quieting of [
+			null,
+			{ quietedPeriodicShare: null, quietedRun: false },
+			{ quietedPeriodicShare: 0.05, quietedRun: false },
+		]) {
+			const p = latched(quieting)
+			expect(p).toMatchObject({ verdict: "discarded:noise", reason: "noise" })
+			expect(p.noiseCounted).toBe(true)
+		}
 	})
 
 	it("no quieted share (under 16 quieted frames) or no quieting reading: the whole file's share stands", () => {
@@ -545,7 +594,7 @@ describe("finishPath: decoded tone and carrier quieting on a proven-voice channe
 
 	// Feature: noise-recordings, Property 3: tone and the noise gate keep a proven channel's file
 	// Validates: Requirements 1
-	it("property: on a proven channel a file is discarded or demoted only with no tone, its discovery at the gate and a share under 0.10", () => {
+	it("property: on a proven channel a file is discarded or demoted only with no tone, its discovery at the gate, a whole-file share under 0.10 and nothing voice-like", () => {
 		fc.assert(
 			fc.property(
 				fc.boolean(),
@@ -569,8 +618,9 @@ describe("finishPath: decoded tone and carrier quieting on a proven-voice channe
 						discoveryNoiseReads: reads,
 					})
 					const shareUnder =
-						whole < SPEECH_NOISE_MAX_PERIODIC_SHARE ||
-						(withQuieting && q !== null && q < SPEECH_NOISE_MAX_PERIODIC_SHARE)
+						whole < SPEECH_NOISE_MAX_PERIODIC_SHARE &&
+						(!withQuieting ||
+							(!run && (q === null || q < SPEECH_NOISE_MAX_PERIODIC_SHARE)))
 					expect(noiseRuleJudges(admission, tone)).toBe(!tone && shareUnder)
 					const caught = !tone && reads >= DISCOVERY_NOISE_GATE && shareUnder
 					expect(p.reason).toBe(
@@ -642,7 +692,7 @@ describe("the discovery noise-rate gate (DiscoveryNoiseRate, DISCOVERY_NOISE_GAT
 		expect(noiseRuleJudges(judged, false)).toBe(true)
 	})
 
-	it("noise reads: admission noise (the partial window when given) with a share under 0.10; not when disabled, not noise or both shares pitched", () => {
+	it("noise reads: admission noise (the partial window when given) with a whole-file share under 0.10 and nothing voice-like; not when disabled, not noise, pitched or voice-like", () => {
 		expect(noiseRuleJudges(undefined, false)).toBe(false)
 		expect(
 			noiseRuleJudges(
@@ -687,7 +737,30 @@ describe("the discovery noise-rate gate (DiscoveryNoiseRate, DISCOVERY_NOISE_GAT
 					enabled: true,
 					noise: true,
 					periodicShare: 0.2,
-					quieting: { quietedPeriodicShare: 0.05, quietedRun: true },
+					quieting: { quietedPeriodicShare: 0.05, quietedRun: false },
+				},
+				false,
+			),
+		).toBe(false)
+		for (const quieting of [
+			{ quietedPeriodicShare: 0.05, quietedRun: true },
+			{ quietedPeriodicShare: null, quietedRun: true },
+			{ quietedPeriodicShare: 0.1, quietedRun: false },
+			{ quietedPeriodicShare: 0.25, quietedRun: false },
+		])
+			expect(
+				noiseRuleJudges(
+					{ enabled: true, noise: true, periodicShare: 0.01, quieting },
+					false,
+				),
+			).toBe(false)
+		expect(
+			noiseRuleJudges(
+				{
+					enabled: true,
+					noise: true,
+					periodicShare: 0.01,
+					quieting: { quietedPeriodicShare: 0.099, quietedRun: false },
 				},
 				false,
 			),
@@ -750,12 +823,15 @@ describe("the discovery noise-rate gate (DiscoveryNoiseRate, DISCOVERY_NOISE_GAT
 		expect(full.before("d0", NOW + 5_000)).toBe(0)
 	})
 
-	it("on a gated discovery, quieted-run and quieted-share files spend the budget in turn: 2 kept as evidence, the 3rd discarded", () => {
+	it("on a gated discovery, quieted-run and quieted-share files never spend the budget: the unpitched files take its 2, the 3rd is discarded", () => {
 		const budget = new NoiseEvidenceBudget()
 		const files = [
 			{ quietedPeriodicShare: 0.05, quietedRun: true },
+			{ quietedPeriodicShare: 0.04, quietedRun: false },
 			{ quietedPeriodicShare: 0.4, quietedRun: false },
+			null,
 			{ quietedPeriodicShare: null, quietedRun: true },
+			{ quietedPeriodicShare: null, quietedRun: false },
 		]
 		const reasons = files.map((quieting, i) => {
 			const p = finishPath({
@@ -772,7 +848,14 @@ describe("the discovery noise-rate gate (DiscoveryNoiseRate, DISCOVERY_NOISE_GAT
 			if (p.reason === "noise-evidence") budget.spend("d", NOW + i)
 			return p.reason
 		})
-		expect(reasons).toEqual(["noise-evidence", "noise-evidence", "noise"])
+		expect(reasons).toEqual([
+			"prior-none",
+			"noise-evidence",
+			"prior-none",
+			"noise-evidence",
+			"prior-none",
+			"noise",
+		])
 	})
 
 	// Feature: noise-recordings, Property 4: the noise-rate count is the live reads, capped at gate + 1
@@ -986,7 +1069,7 @@ describe("what counts in the noise-read rate (FinishPath.noiseCounted, noiseRate
 			quieting: { quietedPeriodicShare, quietedRun },
 		}) as const
 
-	it("a voice-like file (quieted share at or over 0.10, or a quieted run) is not counted; its verdict is unchanged", () => {
+	it("a voice-like file (quieted share at or over 0.10, or a quieted run) is neither judged nor counted: kept as before the rule", () => {
 		for (const reads of [0, DISCOVERY_NOISE_GATE])
 			for (const room of [true, false]) {
 				const at = (admission: NonNullable<FinishInput["admission"]>) =>
@@ -1013,7 +1096,7 @@ describe("what counts in the noise-read rate (FinishPath.noiseCounted, noiseRate
 					[noise(0.01), true],
 				] as const) {
 					const p = at(admission)
-					expect(p.reason).toBe(judged)
+					expect(p.reason).toBe(counted ? judged : "prior-none")
 					expect(p.noiseCounted).toBe(counted)
 				}
 			}
@@ -1044,9 +1127,9 @@ describe("what counts in the noise-read rate (FinishPath.noiseCounted, noiseRate
 		for (const input of not) expect(finishPath(input).noiseCounted).toBe(false)
 	})
 
-	// Feature: noise-recordings, Property 6: a file counts exactly when the proven-channel rule judges it and it is not voice-like
+	// Feature: noise-recordings, Property 6: a file counts exactly when the proven-channel rule judges it, and a voice-like file is never judged
 	// Validates: Requirements 1
-	it("property: noiseCounted is proven ∧ no joined voice ∧ no tone ∧ noiseRuleJudges ∧ noiseRateCounts, and never changes the verdict", () => {
+	it("property: noiseCounted is proven ∧ no joined voice ∧ no tone ∧ noiseRuleJudges, and a voice-like file reads as one not measured as noise", () => {
 		fc.assert(
 			fc.property(
 				fc.record({
@@ -1083,19 +1166,17 @@ describe("what counts in the noise-read rate (FinishPath.noiseCounted, noiseRate
 						r.proven &&
 							!r.joined &&
 							!r.tone &&
-							noiseRuleJudges(admission, false) &&
-							noiseRateCounts(admission),
+							noiseRuleJudges(admission, false),
 					)
-					// The same input without the quieting run or share flags reads the same verdict
-					// whenever the rule judged it: counting never moves a verdict.
-					const unquieted = finishPath({
-						...input,
-						admission: {
-							...admission,
-							quieting: { quietedPeriodicShare: r.qShare, quietedRun: false },
-						},
-					})
-					expect(unquieted.reason).toBe(p.reason)
+					// A judged file is never voice-like, and a voice-like file on a proven channel
+					// reads as the same file not measured as noise: never discarded, no budget spent.
+					if (noiseRuleJudges(admission, false))
+						expect(noiseRateCounts(admission)).toBe(true)
+					if (r.proven && !noiseRateCounts(admission))
+						expect(p.reason).toBe(
+							finishPath({ ...input, admission: { ...admission, noise: null } })
+								.reason,
+						)
 				},
 			),
 			{ numRuns: 200 },

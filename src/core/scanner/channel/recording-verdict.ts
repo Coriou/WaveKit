@@ -1133,9 +1133,9 @@ export interface FinishPath {
 	 * The file counts in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate,
 	 * noted once per file by the recorder): the proven-channel noise rule judged it (finishPath
 	 * reached it: a channel with proven analog voice, admission noise, no joined voice of another
-	 * transmission, no decoded tone, noiseRuleJudges), kept or discarded, gated or not, and it
-	 * does not read voice-like (noiseRateCounts: no quieted share at or over 0.10, no quieted
-	 * run). False for every other path.
+	 * transmission, no decoded tone, noiseRuleJudges: a whole-file share under 0.10 and not
+	 * voice-like, no quieted run and no quieted share at or over 0.10), kept or discarded, gated
+	 * or not. False for every other path.
 	 */
 	readonly noiseCounted: boolean
 }
@@ -1171,10 +1171,10 @@ export interface FinishInput {
 		readonly partialNoise?: boolean | null
 		/**
 		 * The file's carrier quieting (quieting.ts QuietingReading), read only on a channel with
-		 * proven analog voice: `quietedPeriodicShare` (null: no quieted frame) is read beside
-		 * `periodicShare` there (noiseRuleJudges). `quietedRun` (300 ms quieted) no longer keeps a
-		 * file on its own: on a gated discovery it spends the evidence budget like noise (finishPath).
-		 * Absent or null: the whole-file `periodicShare` decides.
+		 * proven analog voice: a file with a `quietedRun` (300 ms quieted) or a
+		 * `quietedPeriodicShare` (null: under 16 quieted frames) of 0.10 or more is never judged as
+		 * noise there, whatever the gate (noiseRuleJudges). Absent or null: the whole-file
+		 * `periodicShare` decides.
 		 */
 		readonly quieting?: {
 			readonly quietedPeriodicShare: number | null
@@ -1233,11 +1233,11 @@ export interface FinishInput {
  * channel with proven analog voice (analogVoiceHeard) only when its discovery made
  * DISCOVERY_NOISE_GATE (15) or more noise-read files in the hour before it
  * (`discoveryNoiseReads`; under it the file is kept as before the rule), or its gate is latched
- * closed (`discoveryNoiseLatched`: it reached the gate under 24 h ago), and its periodic share is
- * under SPEECH_NOISE_MAX_PERIODIC_SHARE (0.10: measured, the spur-like emitter's noise files at
- * most 0.099, real voice at least 0.14) over its quieted frames (`quietedPeriodicShare`, 16 or
- * more quieted) or over the whole file (noiseRuleJudges: a file kept by one share only, or by a
- * quieted run, is judged too on a gated discovery; no share given keeps it as `prior-none`), and
+ * closed (`discoveryNoiseLatched`: in memory, see DISCOVERY_NOISE_LATCH_MS), and its whole-file
+ * periodic share is under SPEECH_NOISE_MAX_PERIODIC_SHARE (0.10: measured, the spur-like
+ * emitter's noise files at most 0.099, real voice at least 0.14) and it is not voice-like (no
+ * quieted run, no quieted share, 16 or more quieted frames, at or over 0.10: noiseRuleJudges; any
+ * other file, or no whole-file share, falls through as before the rule, `prior-none`), and
  * then kept as `noise-evidence` while its discovery's
  * evidence budget has room (`noiseEvidence`, at most NOISE_EVIDENCE_PER_HOUR per rolling hour);
  * there only, a file of 47 to 93 level frames is judged too (`partialNoise`, ADMISSION_PROVEN_VOICE),
@@ -1323,17 +1323,16 @@ export function finishPath(input: FinishInput): FinishPath {
 			// The whole-window floor (94 frames) only: a shorter file is never measured here.
 			if (admission.noise === true) return path("discarded:noise", "noise")
 		} else if (noiseRuleJudges(admission, false)) {
-			// Counted kept or discarded, but a voice-like file (noiseRateCounts) never moves the gate.
-			noiseCounted = noiseRateCounts(admission)
+			// Counted kept or discarded (a voice-like file, noiseRateCounts, is never judged).
+			noiseCounted = true
 			// A channel with proven analog voice: static and a weak over read the same (equal
 			// speech readings, the same pitch), so the rule applies only to a discovery that makes
 			// noise at an emitter's rate (DISCOVERY_NOISE_GATE, 15 an hour: the busiest voice
 			// discovery of the corpus at most 9, the emitter at least 20), or that reached it under
 			// 24 h ago (the latch: the warm-up once per process start); otherwise every file is kept
-			// as before the rule. There, a file kept only by its quieted share or its quieted run
-			// (the emitter read them on a few files: a run on 5 and a share of 0.10 or more on 1 of
-			// its 517) spends the evidence budget like any other noise file (unpitched noise goes, a
-			// few kept as evidence). Files of 47 to 93 frames are judged on their partial window.
+			// as before the rule. A file with a quieted run or a quieted share of 0.10 or more is
+			// never judged (noiseRuleJudges), whatever the gate: it is kept as before the rule.
+			// Files of 47 to 93 frames are judged on their partial window.
 			if (
 				(input.discoveryNoiseReads ?? 0) >= DISCOVERY_NOISE_GATE ||
 				input.discoveryNoiseLatched === true
@@ -1358,11 +1357,14 @@ export function finishPath(input: FinishInput): FinishPath {
 /**
  * Whether the proven-channel noise rule judges a file (finishPath), whatever its discovery's
  * rate: the admission is enabled and reads noise (its partial-window `partialNoise` when given,
- * else `noise`), no CTCSS or DCS tone was decoded over it (`decodedTone`), and its periodic share
- * is under SPEECH_NOISE_MAX_PERIODIC_SHARE over its quieted frames or over the whole file. Where
+ * else `noise`), no CTCSS or DCS tone was decoded over it (`decodedTone`), its whole-file
+ * periodic share is measured and under SPEECH_NOISE_MAX_PERIODIC_SHARE (0.10), and it does not
+ * read voice-like (noiseRateCounts: no quieted run, and a quieted share under 0.10 or none, under
+ * 16 quieted frames). Every other file is never judged: never discarded as noise, never spends the
+ * evidence budget, never counted, whatever the gate (it falls through as before the rule). Where
  * finishPath reaches the rule (a proven-voice channel, no joined voice of another transmission),
- * such a file counts in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate),
- * kept or discarded, unless it reads voice-like (noiseRateCounts; FinishPath.noiseCounted).
+ * a judged file counts in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate,
+ * FinishPath.noiseCounted), kept or discarded.
  */
 export function noiseRuleJudges(
 	admission: FinishInput["admission"],
@@ -1374,24 +1376,25 @@ export function noiseRuleJudges(
 			? admission.noise
 			: admission.partialNoise
 	if (partial !== true) return false
-	const under = (share: number | null | undefined): boolean =>
-		share !== null &&
-		share !== undefined &&
-		share < SPEECH_NOISE_MAX_PERIODIC_SHARE
-	return (
-		under(admission.quieting?.quietedPeriodicShare) ||
-		under(admission.periodicShare)
+	const whole = admission.periodicShare
+	if (
+		whole === null ||
+		whole === undefined ||
+		!(whole < SPEECH_NOISE_MAX_PERIODIC_SHARE)
 	)
+		return false
+	// A voice-like file (a quieted run, or a quieted share at or over 0.10) is never judged.
+	return noiseRateCounts(admission)
 }
 
 /**
- * Whether a file the proven-channel noise rule judges (noiseRuleJudges) counts in its discovery's
- * noise-read rate (noise-evidence.ts DiscoveryNoiseRate; FinishPath.noiseCounted): not when it
- * reads voice-like, a quieted periodic share at or over SPEECH_NOISE_MAX_PERIODIC_SHARE (0.10) or
- * a quieted run (300 ms quieted, quieting.ts). Such a file is still judged on a gated discovery
- * (by its whole-file share, spending the evidence budget), but a busy voice channel's weak overs
- * never push it to the gate (replay of 2026-11-25: the busiest voice discovery's counted reads
- * 104 → 51 over the day).
+ * Whether a file does not read voice-like (noiseRuleJudges requires it): no quieted run (300 ms
+ * quieted, quieting.ts) and a quieted periodic share under SPEECH_NOISE_MAX_PERIODIC_SHARE (0.10)
+ * or none (no quieting reading, or under 16 quieted frames). A voice-like file is neither judged
+ * nor counted in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate;
+ * FinishPath.noiseCounted), so a busy voice channel's weak overs never push it to the gate
+ * (replay of 2026-11-25: the busiest voice discovery's counted reads 104 → 51 over the day) and
+ * are never discarded as noise on a gated one.
  */
 export function noiseRateCounts(admission: FinishInput["admission"]): boolean {
 	const q = admission?.quieting
