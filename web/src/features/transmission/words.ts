@@ -26,6 +26,7 @@ export const KEPT_BY_WORDS: Readonly<Record<string, string>> = {
 	"joined-decode": "A decode of this signal was heard with it",
 	content: "Its sound measured as speech",
 	held: "Held, then kept",
+	"noise-evidence": "Kept as a sample of a noisy channel, not as voice",
 }
 
 /** Why the store ended the file (facts `finish.cut`). */
@@ -333,6 +334,7 @@ export const ADMISSION_REASON_WORDS: Readonly<Record<string, string>> = {
 	"prior-none": "Kept at once",
 	content: "Discarded by the content check",
 	noise: "Measured as noise",
+	"noise-evidence": "Kept as a noise sample",
 	held: "Held, then kept",
 	final: "Kept at the end of its hold",
 }
