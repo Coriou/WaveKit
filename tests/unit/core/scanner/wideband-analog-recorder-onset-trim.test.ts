@@ -40,8 +40,11 @@ import { FskSource } from "./wideband-nfm-fixtures.js"
 import {
 	DISCOVERY_NOISE_GATE,
 	DISCOVERY_NOISE_LATCH_MS,
+	NOISE_EVIDENCE_PER_HOUR,
 	type DiscoveryNoiseRate,
+	type NoiseEvidenceBudget,
 } from "../../../../src/core/scanner/channel/noise-evidence.js"
+import { DcsDecoder } from "../../../../src/core/audio-tones/dcs.js"
 
 type OnsetTrimModule = typeof OnsetTrimModuleNs
 
@@ -358,6 +361,67 @@ describe("the recorder's noise evidence budget on a channel with proven analog v
 		expect(h.ops[3]!.noise).toMatchObject({ reason: "noise" })
 		expect(h.ops[4]!.noise).toMatchObject({ reason: "noise" })
 		expect(h.rec.diagnostics().counts["discarded:noise"]).toBe(2)
+	}, 240_000)
+
+	it("a DCS-coded over on a latched discovery with no evidence room is kept and not counted; the same buzz uncoded is discarded:noise; both lines carry the rate", async () => {
+		const clock = 1_000
+		const { h, written, lines } = recorder({
+			prior: { ...analogFm, analogVoice: () => true },
+			clock: () => clock,
+		})
+		const white = h.rec as unknown as {
+			noiseRate: DiscoveryNoiseRate
+			noiseEvidence: NoiseEvidenceBudget
+		}
+		// The gate reached at 0 (latched) and the evidence budget spent: a judged file is discarded.
+		for (let i = 0; i < DISCOVERY_NOISE_GATE; i++)
+			white.noiseRate.note("d_1", 0)
+		for (let i = 0; i < NOISE_EVIDENCE_PER_HOUR; i++)
+			white.noiseEvidence.spend("d_1", 0)
+		expect(white.noiseRate.latched("d_1", clock)).toBe(true)
+		// The DCS decoder confirms code 023 over the buzz (injected tone coverage: the modelled
+		// 4FSK buzz carries no sub-audible code; its sample count is the real one, 6 s at 8 kHz).
+		const dcs = vi
+			.spyOn(DcsDecoder.prototype, "result")
+			.mockReturnValue({ code: "023", polarity: "normal" })
+		try {
+			await over(h, {
+				leadS: 0,
+				voiceS: 6,
+				keyedBefore: true,
+				buzz: true,
+				id: "coded",
+			})
+		} finally {
+			dcs.mockRestore()
+		}
+		// Not counted: a decoded tone is never a noise read (FinishPath.noiseCounted false).
+		expect(white.noiseRate.before("d_1", clock)).toBe(DISCOVERY_NOISE_GATE)
+		await over(h, {
+			leadS: 0,
+			voiceS: 6,
+			keyedBefore: true,
+			buzz: true,
+			id: "uncoded",
+		})
+		expect(h.ops.map(op => op.outcome)).toEqual(["finalized", "aborted"])
+		expect(written[0]!.facts).toMatchObject({
+			tone: { kind: "dcs", code: "023", polarity: "normal" },
+		})
+		expect(written[0]!.facts?.keptBy).not.toMatch(/noise/)
+		expect(h.ops[1]!.noise).toMatchObject({ reason: "noise" })
+		// The uncoded buzz is judged and counted (16 reads now, capped at gate + 1).
+		expect(white.noiseRate.before("d_1", clock)).toBe(DISCOVERY_NOISE_GATE + 1)
+		const kept = lines.find(l => l["msg"] === "Analog file kept")
+		const gone = lines.find(l => l["msg"] === "Analog file discarded as noise")
+		expect(kept).toMatchObject({
+			discoveryNoiseReads: DISCOVERY_NOISE_GATE,
+			latched: true,
+		})
+		expect(gone).toMatchObject({
+			discoveryNoiseReads: DISCOVERY_NOISE_GATE,
+			latched: true,
+		})
 	}, 240_000)
 })
 

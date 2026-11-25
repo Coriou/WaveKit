@@ -16,6 +16,8 @@ import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import {
 	finishPath,
+	noiseRateCounts,
+	noiseRateLog,
 	noiseRuleJudges,
 	type FinishInput,
 	type VoicePrior,
@@ -963,6 +965,236 @@ describe("the noise gate latch (DiscoveryNoiseRate.latched, DISCOVERY_NOISE_LATC
 							DISCOVERY_NOISE_GATE + 1,
 						)
 						expect(rate.size).toBeLessThanOrEqual(2)
+					}
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+})
+
+describe("what counts in the noise-read rate (FinishPath.noiseCounted, noiseRateCounts)", () => {
+	const q = (
+		quietedPeriodicShare: number | null,
+		quietedRun: boolean,
+		periodicShare = 0.01,
+	) =>
+		({
+			enabled: true,
+			noise: true,
+			periodicShare,
+			quieting: { quietedPeriodicShare, quietedRun },
+		}) as const
+
+	it("a voice-like file (quieted share at or over 0.10, or a quieted run) is not counted; its verdict is unchanged", () => {
+		for (const reads of [0, DISCOVERY_NOISE_GATE])
+			for (const room of [true, false]) {
+				const at = (admission: FinishInput["admission"]) =>
+					finishPath({
+						...base,
+						prior: proven,
+						admission,
+						noiseEvidence: room,
+						discoveryNoiseReads: reads,
+					})
+				const gated = reads >= DISCOVERY_NOISE_GATE
+				const judged = gated
+					? room
+						? "noise-evidence"
+						: "noise"
+					: "prior-none"
+				for (const [admission, counted] of [
+					[q(0.1, false), false],
+					[q(0.4, false), false],
+					[q(0.05, true), false],
+					[q(null, true), false],
+					[q(0.099, false), true],
+					[q(null, false), true],
+					[noise(0.01), true],
+				] as const) {
+					const p = at(admission)
+					expect(p.reason).toBe(judged)
+					expect(p.noiseCounted).toBe(counted)
+				}
+			}
+		expect(noiseRateCounts(q(0.1, false))).toBe(false)
+		expect(noiseRateCounts(q(0.0999, false))).toBe(true)
+		expect(noiseRateCounts(q(null, true))).toBe(false)
+		expect(noiseRateCounts(noise(0.01))).toBe(true)
+		expect(noiseRateCounts({ ...noise(0.01), quieting: null })).toBe(true)
+	})
+
+	it("counted only where the proven-channel rule judges: not off a proven channel, with a joined voice, a decoded tone, own tone, an own decode, or both shares pitched", () => {
+		const judged = noise(0.01)
+		expect(
+			finishPath({ ...base, prior: proven, admission: judged }).noiseCounted,
+		).toBe(true)
+		const not: FinishInput[] = [
+			{ ...base, prior: unproven, admission: judged },
+			{ ...base, prior: null, admission: judged },
+			{ ...base, prior: proven, joinedVoice: true, admission: judged },
+			{ ...base, prior: proven, decodedTone: true, admission: judged },
+			{ ...base, prior: proven, ownTone: true, admission: judged },
+			{ ...base, prior: proven, decodedOwn: true, admission: judged },
+			{ ...base, prior: proven, admission: q(0.2, false, 0.2) },
+			{ ...base, prior: proven, admission: { ...judged, enabled: false } },
+			{ ...base, prior: proven, admission: { ...judged, noise: false } },
+			{ ...base, prior: proven },
+		]
+		for (const input of not) expect(finishPath(input).noiseCounted).toBe(false)
+	})
+
+	// Feature: noise-recordings, Property 6: a file counts exactly when the proven-channel rule judges it and it is not voice-like
+	// Validates: Requirements 1
+	it("property: noiseCounted is proven ∧ no joined voice ∧ no tone ∧ noiseRuleJudges ∧ noiseRateCounts, and never changes the verdict", () => {
+		fc.assert(
+			fc.property(
+				fc.record({
+					proven: fc.boolean(),
+					joined: fc.boolean(),
+					tone: fc.boolean(),
+					noise: fc.boolean(),
+					whole: fc.option(fc.double({ min: 0, max: 1, noNaN: true })),
+					qShare: fc.option(fc.double({ min: 0, max: 1, noNaN: true })),
+					run: fc.boolean(),
+					reads: fc.integer({ min: 0, max: 20 }),
+					latched: fc.boolean(),
+					room: fc.boolean(),
+				}),
+				r => {
+					const admission = {
+						enabled: true,
+						noise: r.noise,
+						periodicShare: r.whole,
+						quieting: { quietedPeriodicShare: r.qShare, quietedRun: r.run },
+					}
+					const input: FinishInput = {
+						...base,
+						prior: r.proven ? proven : unproven,
+						joinedVoice: r.joined,
+						decodedTone: r.tone,
+						admission,
+						discoveryNoiseReads: r.reads,
+						discoveryNoiseLatched: r.latched,
+						noiseEvidence: r.room,
+					}
+					const p = finishPath(input)
+					expect(p.noiseCounted).toBe(
+						r.proven &&
+							!r.joined &&
+							!r.tone &&
+							noiseRuleJudges(admission, false) &&
+							noiseRateCounts(admission),
+					)
+					// The same input without the quieting run or share flags reads the same verdict
+					// whenever the rule judged it: counting never moves a verdict.
+					const unquieted = finishPath({
+						...input,
+						admission: {
+							...admission,
+							quieting: { quietedPeriodicShare: r.qShare, quietedRun: false },
+						},
+					})
+					expect(unquieted.reason).toBe(p.reason)
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("noiseRateLog: the count before the file and the latch, numbers and booleans only", () => {
+		expect(
+			noiseRateLog({ noiseReadsBefore: 15, noiseLatchedBefore: true }),
+		).toEqual({
+			discoveryNoiseReads: 15,
+			latched: true,
+		})
+		expect(
+			noiseRateLog({ noiseReadsBefore: null, noiseLatchedBefore: false }),
+		).toEqual({
+			discoveryNoiseReads: null,
+			latched: false,
+		})
+	})
+})
+
+describe("the noise-rate map bound keeps latched discoveries (DiscoveryNoiseRate)", () => {
+	const reach = (rate: DiscoveryNoiseRate, d: string, from: number) => {
+		for (let i = 0; i < DISCOVERY_NOISE_GATE; i++) rate.note(d, from + i)
+	}
+
+	it("past the cap the least recently noted unlatched entry goes first, even when it is newer than latched ones", () => {
+		const rate = new DiscoveryNoiseRate(DISCOVERY_NOISE_GATE, 3)
+		reach(rate, "x", NOW) // latched, oldest
+		rate.note("y", NOW + 100) // unlatched
+		reach(rate, "z", NOW + 200) // latched
+		rate.note("w", NOW + 300)
+		expect(rate.size).toBe(3)
+		expect(rate.before("y", NOW + 400)).toBe(0)
+		expect(rate.latched("x", NOW + 400)).toBe(true)
+		expect(rate.latched("z", NOW + 400)).toBe(true)
+		expect(rate.before("w", NOW + 400)).toBe(1)
+	})
+
+	it("an entry whose latch expired is no longer kept; a newer unlatched entry goes before older latched ones; all latched: the least recently noted goes, never the one just noted", () => {
+		const rate = new DiscoveryNoiseRate(DISCOVERY_NOISE_GATE, 3)
+		reach(rate, "old", NOW)
+		const later = NOW + DISCOVERY_NOISE_LATCH_MS - HOUR
+		reach(rate, "a", later)
+		reach(rate, "b", later + 100)
+		const t = NOW + DISCOVERY_NOISE_LATCH_MS + 100
+		// "old"'s latch expired (its times long gone): dropped, a and b still latched.
+		rate.note("c", t)
+		expect(rate.size).toBe(3)
+		expect(rate.latched("old", t)).toBe(false)
+		expect(rate.latched("a", t)).toBe(true)
+		expect(rate.latched("b", t)).toBe(true)
+		// The new "d" evicts c (the least recently noted unlatched), not the older latched a.
+		rate.note("d", t + 1)
+		expect(rate.size).toBe(3)
+		expect(rate.before("c", t + 2)).toBe(0)
+		expect(rate.latched("a", t + 2)).toBe(true)
+		expect(rate.before("d", t + 2)).toBe(1)
+		// All others latched: "d" stays, the least recently noted latched one ("a") goes.
+		const full = new DiscoveryNoiseRate(DISCOVERY_NOISE_GATE, 2)
+		reach(full, "p", NOW)
+		reach(full, "q", NOW + 100)
+		full.note("r", NOW + 200)
+		expect(full.size).toBe(2)
+		expect(full.latched("p", NOW + 300)).toBe(false)
+		expect(full.latched("q", NOW + 300)).toBe(true)
+		expect(full.before("r", NOW + 300)).toBe(1)
+	})
+
+	// Feature: noise-recordings, Property 7: past the cap a latched discovery is forgotten only when every other entry is latched
+	// Validates: Requirements 1
+	it("property: the map stays at its cap and a latched discovery is dropped only while no other entry is unlatched", () => {
+		fc.assert(
+			fc.property(
+				fc.array(
+					fc.record({
+						d: fc.constantFrom("a", "b", "c", "d", "e"),
+						burst: fc.boolean(),
+						dt: fc.integer({ min: 0, max: 2 * HOUR }),
+					}),
+					{ maxLength: 40 },
+				),
+				events => {
+					const rate = new DiscoveryNoiseRate(DISCOVERY_NOISE_GATE, 3)
+					let now = NOW
+					for (const e of events) {
+						now += e.dt
+						const latchedBefore = ["a", "b", "c", "d", "e"].filter(
+							id => id !== e.d && rate.latched(id, now),
+						)
+						const n = e.burst ? DISCOVERY_NOISE_GATE : 1
+						for (let i = 0; i < n; i++) rate.note(e.d, now + i)
+						now += n
+						expect(rate.size).toBeLessThanOrEqual(3)
+						const lost = latchedBefore.filter(id => !rate.latched(id, now))
+						// One note drops at most one entry; a latched one only when all others were latched.
+						if (lost.length > 0)
+							expect(latchedBefore.length).toBeGreaterThanOrEqual(2)
 					}
 				},
 			),

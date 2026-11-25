@@ -1129,6 +1129,15 @@ export interface FinishPath {
 	readonly noVoice: boolean | null
 	readonly joinedOther: boolean
 	readonly speechHeard: boolean | null
+	/**
+	 * The file counts in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate,
+	 * noted once per file by the recorder): the proven-channel noise rule judged it (finishPath
+	 * reached it: a channel with proven analog voice, admission noise, no joined voice of another
+	 * transmission, no decoded tone, noiseRuleJudges), kept or discarded, gated or not, and it
+	 * does not read voice-like (noiseRateCounts: no quieted share at or over 0.10, no quieted
+	 * run). False for every other path.
+	 */
+	readonly noiseCounted: boolean
 }
 
 /** finishVerdict's input (see there). */
@@ -1271,6 +1280,8 @@ export function finishPath(input: FinishInput): FinishPath {
 	const speechHeard =
 		rolled && noVoice !== true ? null : (input.speechHeard ?? null)
 	const notSpeech = !rolled && input.notSpeech
+	// Set where the proven-channel noise rule judges the file (noiseCounted); every later path keeps it.
+	let noiseCounted = false
 	const path = (verdict: FinishVerdict, reason: FinishReason): FinishPath => ({
 		verdict,
 		reason,
@@ -1279,6 +1290,7 @@ export function finishPath(input: FinishInput): FinishPath {
 		noVoice,
 		joinedOther,
 		speechHeard,
+		noiseCounted,
 	})
 	if (input.ownTone) return path("finish", "own-tone")
 	if (input.decodedOwn)
@@ -1310,22 +1322,25 @@ export function finishPath(input: FinishInput): FinishPath {
 		if (!proven) {
 			// The whole-window floor (94 frames) only: a shorter file is never measured here.
 			if (admission.noise === true) return path("discarded:noise", "noise")
-		} else if (
-			((input.discoveryNoiseReads ?? 0) >= DISCOVERY_NOISE_GATE ||
-				input.discoveryNoiseLatched === true) &&
-			noiseRuleJudges(admission, false)
-		) {
+		} else if (noiseRuleJudges(admission, false)) {
+			// Counted kept or discarded, but a voice-like file (noiseRateCounts) never moves the gate.
+			noiseCounted = noiseRateCounts(admission)
 			// A channel with proven analog voice: static and a weak over read the same (equal
 			// speech readings, the same pitch), so the rule applies only to a discovery that makes
-			// noise at an emitter's rate (DISCOVERY_NOISE_GATE, 15 an hour: real voice at most 9,
-			// the emitter at least 20), or that reached it under 24 h ago (the latch: the warm-up
-			// once per process start); otherwise every file is kept as before the rule. There, a
-			// file kept only by its quieted share or its quieted run (both read on the emitter too)
-			// spends the evidence budget like any other noise file (unpitched noise goes, a few
-			// kept as evidence). Files of 47 to 93 frames are judged on their partial window.
-			return input.noiseEvidence === true
-				? path("finish", "noise-evidence")
-				: path("discarded:noise", "noise")
+			// noise at an emitter's rate (DISCOVERY_NOISE_GATE, 15 an hour: the busiest voice
+			// discovery of the corpus at most 9, the emitter at least 20), or that reached it under
+			// 24 h ago (the latch: the warm-up once per process start); otherwise every file is kept
+			// as before the rule. There, a file kept only by its quieted share or its quieted run
+			// (the emitter read them on a few files: a run on 5 and a share of 0.10 or more on 1 of
+			// its 517) spends the evidence budget like any other noise file (unpitched noise goes, a
+			// few kept as evidence). Files of 47 to 93 frames are judged on their partial window.
+			if (
+				(input.discoveryNoiseReads ?? 0) >= DISCOVERY_NOISE_GATE ||
+				input.discoveryNoiseLatched === true
+			)
+				return input.noiseEvidence === true
+					? path("finish", "noise-evidence")
+					: path("discarded:noise", "noise")
 		}
 	}
 	if (strength === "none") return path("finish", "prior-none")
@@ -1344,9 +1359,10 @@ export function finishPath(input: FinishInput): FinishPath {
  * Whether the proven-channel noise rule judges a file (finishPath), whatever its discovery's
  * rate: the admission is enabled and reads noise (its partial-window `partialNoise` when given,
  * else `noise`), no CTCSS or DCS tone was decoded over it (`decodedTone`), and its periodic share
- * is under SPEECH_NOISE_MAX_PERIODIC_SHARE over its quieted frames or over the whole file. Such a
- * file counts in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate), kept or
- * discarded.
+ * is under SPEECH_NOISE_MAX_PERIODIC_SHARE over its quieted frames or over the whole file. Where
+ * finishPath reaches the rule (a proven-voice channel, no joined voice of another transmission),
+ * such a file counts in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate),
+ * kept or discarded, unless it reads voice-like (noiseRateCounts; FinishPath.noiseCounted).
  */
 export function noiseRuleJudges(
 	admission: FinishInput["admission"],
@@ -1366,6 +1382,38 @@ export function noiseRuleJudges(
 		under(admission.quieting?.quietedPeriodicShare) ||
 		under(admission.periodicShare)
 	)
+}
+
+/**
+ * Whether a file the proven-channel noise rule judges (noiseRuleJudges) counts in its discovery's
+ * noise-read rate (noise-evidence.ts DiscoveryNoiseRate; FinishPath.noiseCounted): not when it
+ * reads voice-like, a quieted periodic share at or over SPEECH_NOISE_MAX_PERIODIC_SHARE (0.10) or
+ * a quieted run (300 ms quieted, quieting.ts). Such a file is still judged on a gated discovery
+ * (by its whole-file share, spending the evidence budget), but a busy voice channel's weak overs
+ * never push it to the gate (replay of 2026-11-25: the busiest voice discovery's counted reads
+ * 104 → 51 over the day).
+ */
+export function noiseRateCounts(admission: FinishInput["admission"]): boolean {
+	const q = admission?.quieting
+	if (q === null || q === undefined) return true
+	if (q.quietedRun) return false
+	const share = q.quietedPeriodicShare
+	return share === null || share < SPEECH_NOISE_MAX_PERIODIC_SHARE
+}
+
+/**
+ * The noise-rate fields of a file's kept or noise-discard log line: its discovery's noise-read
+ * count before it (`discoveryNoiseReads`, DiscoveryNoiseRate.before; null: not read) and whether
+ * its gate was latched closed then (`latched`). Numbers and booleans only.
+ */
+export function noiseRateLog(file: {
+	readonly noiseReadsBefore: number | null
+	readonly noiseLatchedBefore: boolean
+}): { discoveryNoiseReads: number | null; latched: boolean } {
+	return {
+		discoveryNoiseReads: file.noiseReadsBefore,
+		latched: file.noiseLatchedBefore,
+	}
 }
 
 /**

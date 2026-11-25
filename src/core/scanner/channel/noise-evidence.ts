@@ -104,9 +104,15 @@ export class NoiseEvidenceBudget {
  * proven-channel noise discard applies (DiscoveryNoiseRate; recording-verdict.ts finishPath).
  * Below it a noise-read file is kept as before the noise rule (`prior-none`, or the later rules).
  *
- * Arithmetic (recall corpus of 2026-11-25): the busiest real-voice discoveries made at most 9
- * noise-read files in any rolling hour, the spur-like emitter at least 20 in the hours it ran.
- * 15 sits between with margin both ways (9 × 1.67, 20 × 0.75). Without the latch
+ * Arithmetic (recall corpus of 2026-11-25, one day of one site): the busiest real-voice discovery
+ * made at most 9 counted noise-read files in any rolling hour (voice-like files excluded,
+ * recording-verdict.ts noiseRateCounts: the corpus's voice discoveries 104 → 51 counted reads
+ * over the day, the busiest unchanged at 9), the spur-like emitter at least 20 in the hours it
+ * ran. 15 sits between (9 × 1.67, 20 × 0.75), a margin measured on that one day only: a voice
+ * channel about twice as busy with weak overs would reach it and latch, and then, for 24 h, its
+ * unpitched untoned overs (whole-file periodic share under 0.10, no CTCSS or DCS decoded) are
+ * discarded beyond the evidence budget's 2 an hour; toned and pitched overs are still kept.
+ * Without the latch
  * (DISCOVERY_NOISE_LATCH_MS) a noise source kept up to 15 files after each quiet hour before the
  * gate closed on it again: the corpus emitter warmed up 4 times a day (54 files kept).
  */
@@ -117,17 +123,19 @@ export const DISCOVERY_NOISE_GATE = 15
  * closed the discard applies at any rate, so the warm-up of up to DISCOVERY_NOISE_GATE kept files
  * happens once per process start (the state is in memory) instead of after every quiet hour: the
  * corpus emitter kept 45 files over its day (15 of warm-up, then the evidence budget's 2 an hour)
- * instead of 73. Voice discoveries' noise reads peak at 9 in any rolling hour of the corpus, under
- * the gate, so the latch never closes on them.
+ * instead of 73. Voice discoveries' counted reads peak at 9 in any rolling hour of the corpus,
+ * under the gate, so the latch never closed on them there (DISCOVERY_NOISE_GATE: the margin).
  */
 export const DISCOVERY_NOISE_LATCH_MS = 86_400_000
 
 /**
  * The noise-read rate of each discovery: a file counts when the proven-channel noise rule judges
- * it (recording-verdict.ts noiseRuleJudges: admission noise, no decoded tone, a periodic share
- * under 0.10), kept or discarded, once per file, and its gate latch. Recorder state like
+ * it (recording-verdict.ts FinishPath.noiseCounted: a proven-voice channel, no joined voice of
+ * another transmission, admission noise, no decoded tone, a periodic share under 0.10, and not
+ * voice-like: no quieted share at or over 0.10, no quieted run), kept or discarded, once per
+ * file, and its gate latch. Recorder state like
  * NoiseEvidenceBudget: lost with the process, no clock of its own (callers pass monotonic ms),
- * the same discovery bound: at most NOISE_EVIDENCE_MAX_DISCOVERIES discoveries, each at most
+ * the same discovery bound (past it an unlatched discovery is forgotten first): at most NOISE_EVIDENCE_MAX_DISCOVERIES discoveries, each at most
  * `gate + 1` times and one latch time (2 048 × 17 numbers ≈ 272 KB of values), times past
  * NOISE_EVIDENCE_WINDOW_MS dropped.
  *
@@ -157,7 +165,8 @@ export const DISCOVERY_NOISE_LATCH_MS = 86_400_000
  * | reads after the note < gate        | note    | latchedAt unchanged                          |
  * | every time expired, latch expired  | any     | d's entry dropped                            |
  * | every time expired, latch live     | any     | entry kept (times dropped, latch held)       |
- * | max entries, new d                 | note    | least recently noted d dropped, latched too  |
+ * | max entries, new d                 | note    | least recently noted unlatched d dropped     |
+ * | max entries, all others latched    | note    | least recently noted d dropped (latched)     |
  *
  * Capping at `gate + 1` keeps `before` exact up to the gate: the newest `gate + 1` times are the
  * live ones whenever `gate + 1` or more are live, so `before` is min(live count, gate + 1).
@@ -201,10 +210,26 @@ export class DiscoveryNoiseRate {
 		this.reads.delete(discoveryId)
 		this.reads.set(discoveryId, { times, latchedAt })
 		while (this.reads.size > this.maxDiscoveries) {
-			const oldest = this.reads.keys().next().value
-			if (oldest === undefined) break
-			this.reads.delete(oldest)
+			const evict = this.evictable(discoveryId, now)
+			if (evict === undefined) break
+			this.reads.delete(evict)
 		}
+	}
+
+	/**
+	 * The entry the bound drops for `noted` (just noted, never itself): the least recently noted
+	 * one whose latch is not live, else (all latched) the least recently noted. Forgetting a
+	 * latched emitter would reopen its gate (its warm-up again), so an unlatched one goes first;
+	 * O(entries) only when the bound is reached.
+	 */
+	private evictable(noted: string, now: number): string | undefined {
+		let oldest: string | undefined
+		for (const [id, entry] of this.reads) {
+			if (id === noted) continue
+			if (!this.latchLive(entry, now)) return id
+			oldest ??= id
+		}
+		return oldest
 	}
 
 	/** Discoveries remembered (for tests and bounds). */

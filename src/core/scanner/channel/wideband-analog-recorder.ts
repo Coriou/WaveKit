@@ -145,7 +145,7 @@ import {
 	LATE_VERDICT_GRACE_MS,
 	noiseFacts,
 	noiseLog,
-	noiseRuleJudges,
+	noiseRateLog,
 	notVoiceDecode,
 	noteJoinedVoice,
 	provisionalRoom,
@@ -5423,13 +5423,13 @@ export class WidebandAnalogRecorder {
 		const clockNow = this.clock()
 		const decodedTone = toneFactOf(file.toneHz, file.toneCoverage).tone
 		const toned = decodedTone !== undefined && decodedTone !== null
-		// The discovery's noise-read rate before this file, read and noted once per file (a held
-		// file's release reuses it): the proven-channel noise gate (DISCOVERY_NOISE_GATE).
+		// The discovery's noise-read rate before this file, read once per file (a held file's
+		// release reuses it): the proven-channel noise gate (DISCOVERY_NOISE_GATE). Noted below,
+		// at that first verdict only, when the rule judged it (FinishPath.noiseCounted).
+		const firstVerdict = file.noiseReadsBefore === null
 		if (file.noiseReadsBefore === null) {
 			file.noiseReadsBefore = this.noiseRate.before(s.discoveryId, clockNow)
 			file.noiseLatchedBefore = this.noiseRate.latched(s.discoveryId, clockNow)
-			if (noiseRuleJudges(admission, toned))
-				this.noiseRate.note(s.discoveryId, clockNow)
 		}
 		const path = this.deps.voicePrior
 			? finishPath({
@@ -5456,6 +5456,8 @@ export class WidebandAnalogRecorder {
 					now,
 				})
 			: null
+		if (firstVerdict && path?.noiseCounted === true)
+			this.noiseRate.note(s.discoveryId, clockNow)
 		const verdict = path?.verdict ?? "finish"
 		if (verdict !== "finish" && verdict !== "hold") {
 			const noise =
@@ -5464,7 +5466,7 @@ export class WidebandAnalogRecorder {
 					: undefined
 			if (noise !== undefined && path !== null && speech !== null)
 				this.log.info(
-					noiseLog(path, speech, file, s),
+					{ ...noiseLog(path, speech, file, s), ...noiseRateLog(file) },
 					"Analog file discarded as noise",
 				)
 			this.endFile(s, file, verdict)
@@ -5484,7 +5486,11 @@ export class WidebandAnalogRecorder {
 				this.noiseEvidence.spend(s.discoveryId, clockNow)
 			if (path)
 				this.log.info(
-					{ ...keptLog(path, file, s), headTrimmedMs: file.headTrimmedMs ?? 0 },
+					{
+						...keptLog(path, file, s),
+						headTrimmedMs: file.headTrimmedMs ?? 0,
+						...noiseRateLog(file),
+					},
 					"Analog file kept",
 				)
 			// The verdict it was kept on, for its receipt (read-only: nothing decides on it),
