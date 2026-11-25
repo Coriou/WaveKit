@@ -1,6 +1,6 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { TransmissionDto } from "../../src/features/transmission/contract.ts"
 import {
@@ -236,5 +236,24 @@ describe("Details: identifiers", () => {
 		expect(html).not.toContain(">prior-none<")
 		expect(html).not.toContain(">completed<")
 		expect(html).not.toContain("measured 446")
+	})
+})
+
+describe("Details: the stored JSON", () => {
+	afterEach(() => vi.unstubAllGlobals())
+
+	it("is collapsed by default inside an open Details, and not drawn until opened", () => {
+		vi.stubGlobal("localStorage", {
+			getItem: () => "1",
+			setItem: () => undefined,
+		})
+		const html = renderToStaticMarkup(
+			createElement(Details, { t: dto({}), fileUrl: null }),
+		)
+		expect(html).toMatch(/<details class="wkt-details" open/)
+		expect(html).toMatch(
+			/<details class="wkt-idents wkt-raw"><summary>Stored JSON<\/summary><\/details>/,
+		)
+		expect(html).not.toContain("wkd-json")
 	})
 })

@@ -70,8 +70,8 @@ export function SavingWave() {
 }
 
 /**
- * The disc column's empty slot: a stacked row (or card) without audio keeps the disc's width at its right
- * edge, so its stack count sits where every other row's does.
+ * The disc column's empty slot: a row (or stacked card) without audio keeps the disc's width at its right
+ * edge, so its time and stack count sit where every other row's do.
  */
 export function DiscSlot({ inline = false }: { inline?: boolean }) {
 	return (

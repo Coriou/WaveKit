@@ -53,7 +53,7 @@ export function createServices(options: DataLayerOptions = {}): AppServices {
 		pausePlayback: () => playback.pause(),
 	})
 	const playback = new PlaybackService({
-		fetchFile: id => data.recordings.file(id),
+		fetchFile: (id, signal) => data.recordings.file(id, signal),
 		holdLive: held => listen.hold(held),
 	})
 	const activity = new ActivityController(data)

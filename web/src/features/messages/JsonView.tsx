@@ -6,6 +6,8 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { Button } from "../../ui/Button.tsx"
 import { cx } from "../../ui/cx.ts"
 import { jsonLines, jsonMeta, MAX_LINES } from "./json.ts"
+// its own styles: the viewer also opens where no message card loaded them (Activity, Transmission)
+import "./messages.css"
 
 const CHECK = "M5 12l5 5l10 -10"
 const COPY =
@@ -53,8 +55,13 @@ export function JsonView({ data, maxHeight = 260, className }: JsonViewProps) {
 	return (
 		<div className={cx("wkd-json", className)}>
 			<div className="wkd-json-bar">
-				<span className="wkd-json-title">JSON</span>
-				<span className="wkd-json-meta">{jsonMeta(text, total)}</span>
+				<span className="wkd-json-head">
+					<span className="wkd-json-title">JSON</span>
+					<span className="wkd-json-meta">
+						{" · "}
+						{jsonMeta(text, total)}
+					</span>
+				</span>
 				<span className="wkd-grow" />
 				<Button
 					variant="ghost"

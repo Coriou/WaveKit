@@ -382,3 +382,25 @@ describe("JSON viewer", () => {
 		expect(jsonMeta("é", 3)).toBe("3 lines · 2 B")
 	})
 })
+
+describe("JsonView header", () => {
+	it("reads `JSON · 6 lines · 83 B`, with Wrap and Copy on the same bar", async () => {
+		const { createElement } = await import("react")
+		const { renderToStaticMarkup } = await import("react-dom/server")
+		const { JsonView } =
+			await import("../../src/features/messages/JsonView.tsx")
+		const data = { a: 1, b: "two" }
+		const html = renderToStaticMarkup(createElement(JsonView, { data }))
+		const text = JSON.stringify(data, null, 2)
+		const head = /<span class="wkd-json-head">(.*?)<\/span><\/span>/.exec(
+			html,
+		)?.[1]
+		const words = (head ?? "")
+			.replace(/<!--.*?-->/g, "")
+			.replace(/<[^>]+>/g, "")
+		expect(words).toBe(`JSON · ${jsonMeta(text, text.split("\n").length)}`)
+		const bar = /<div class="wkd-json-bar">(.*?)<\/div>/.exec(html)?.[1] ?? ""
+		expect(bar).toContain("Wrap")
+		expect(bar).toContain("wkd-copy")
+	})
+})

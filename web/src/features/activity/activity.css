@@ -381,8 +381,8 @@
 		min-width: 0;
 	}
 	/* the play disc's column (playback.css), last at the item's right edge after the stack count: the disc, its
-	   Saving place, or an empty slot of the same width on a stacked row without audio, so discs line up row to
-	   row and every stack count sits in one column */
+	   Saving place, or an empty slot of the same width on a row without audio, so discs line up row to row
+	   and every row's time and stack count sit in one column */
 	.wka-disc {
 		align-self: flex-start;
 		flex: none;

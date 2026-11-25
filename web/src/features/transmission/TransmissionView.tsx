@@ -912,6 +912,7 @@ export function Details({
 	fileUrl: string | null
 }) {
 	const [open, setOpen] = useState(readDetailsOpen)
+	const [rawOpen, setRawOpen] = useState(false)
 	const audio = t.artefacts.find(a => a.kind === "audio") ?? null
 	const facts = detailFacts(t, audio ? audio.bytes : null)
 	const ids = detailIds(t)
@@ -992,10 +993,21 @@ export function Details({
 				</a>
 			)}
 			{open && (
-				<JsonView
-					data={JSON.parse(JSON.stringify(t.raw)) as JsonValue}
-					maxHeight={240}
-				/>
+				// the stored JSON, collapsed too: drawn only once opened
+				<details
+					className="wkt-idents wkt-raw"
+					open={rawOpen}
+					onToggle={e => setRawOpen(e.currentTarget.open)}
+				>
+					<summary>Stored JSON</summary>
+					{rawOpen && (
+						<JsonView
+							data={JSON.parse(JSON.stringify(t.raw)) as JsonValue}
+							maxHeight={240}
+							className="wkt-raw-json"
+						/>
+					)}
+				</details>
 			)}
 		</details>
 	)

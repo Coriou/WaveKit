@@ -703,16 +703,19 @@ signal flags (such as `Off the channel raster`), the file size, and how the reco
 (its decision, what the channel's history said and the rule that fired, in words, then its
 measured levels, rounded). A code WaveKit has no sentence for shows in plain words (a newer
 code such as `carrierDrop` would read `Carrier drop`), never as the raw code. **Identifiers**, collapsed under it, lists
-every id (transmission, recording key, observation, discovery, Activity event, operation, receiver), each with a
-copy icon; a long id wraps between its parts. **Download WAV** and the stored JSON close it. Copy
+every id (transmission, recording key, observation, discovery, owner discovery, Activity event, operation, receiver), each with a
+copy icon; a long id wraps between its parts. **Download WAV** and **Stored JSON** (collapsed too;
+its header reads like `JSON · 6 lines · 83 B`, with Wrap and Copy beside it) close it. Copy
 says `Copied`, or that the browser blocked it.
 
 A scanner recording's event detail in Activity speaks the same way: **Channel** in MHz,
 **Transmission started** (when the transmission it belongs to began: a later part or a second over
 of the same session shares it, so it is not the file's own start), **Duration** in seconds and
-**Kept at**, never its ids or ISO times; those, the measured frequency in
-MHz and the stored JSON are under **Ids and raw values**, collapsed, where the times too
-read on your clock with the same time in UTC under them, and the duration in words. A live analog
+**Kept at**, never its ids or ISO times. Those are under **Ids and raw values**, collapsed, the
+important first: what happened (**Change**, in words), the channel's exact **Channel frequency**
+and the **Measured** frequency in MHz, the times on your clock with the same time in UTC under
+them, the duration in words, then every id (recording, receiver, discovery, owner discovery,
+observation) and the stored JSON. A live analog
 transmission's detail says its length in seconds and how it ended in words.
 
 ### Playing recordings
@@ -723,8 +726,8 @@ recording; pressing the same disc again pauses it, and while it loads the disc a
 (pressing it then cancels the start). Rows without a recording (most decodes, and digital calls the
 core did not record) have no disc. On an Activity row or card the disc has its own column, the
 last thing on the right after the `N · time` stack count: discs line up row to row, and a
-stacked row without a recording keeps that column empty, so every stack count sits in the same
-place. A call that has just ended shows a quiet **Saving** disc for a few seconds while the
+row without a recording keeps that column empty, so every row's time and stack count sit in the
+same place (a stacked card without a recording keeps it empty too). A call that has just ended shows a quiet **Saving** disc for a few seconds while the
 receiver finishes writing its file (it lists a file once it has been quiet for 10 seconds), in
 the disc's own place and size (the open event and the Transmission view keep the waveform's
 height too); it turns into the play disc by itself, and a play started meanwhile (by Next or

@@ -536,6 +536,9 @@ export class RecordingsStore extends PagedFeed<
 	}
 
 	private drop(id: string): void {
+		const key = this.get().items.find(i => i.id === id)?.key
+		// a deleted file is not "being saved": a row still linking it reads as gone at once
+		this.readiness.forget(key ? [id, key] : [id])
 		this.gone.set(id, this.headReads)
 		this.kept.delete(id)
 		this.patchItems(items => items.filter(i => i.id !== id))

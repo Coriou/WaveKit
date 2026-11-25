@@ -310,6 +310,45 @@ describe("the file of a recording still being saved", () => {
 		expect(calls).toHaveLength(1)
 	})
 
+	it("a deleted file (its Undo window over) is no longer saving: a row linking it reads as gone at once", async () => {
+		vi.useFakeTimers({ now: T0 })
+		const r = new RecordingReadiness()
+		r.note([row(iso(T0))])
+		expect(r.isSaving(KEY)).toBe(true)
+		const { api, calls } = scripted(call =>
+			call.method === "DELETE"
+				? json(200, { id: KEY, deleted: true })
+				: json(404, {
+						error: "Not Found",
+						code: "RECORDING_NOT_FOUND",
+						message: "Recording not found",
+					}),
+		)
+		const store = new RecordingsStore(api, null, {}, r)
+		const failed = vi.fn()
+		store.scheduleRemove(KEY, failed, 5_000)
+		// still undoable: nothing forgotten yet
+		expect(r.isSaving(KEY)).toBe(true)
+		await vi.advanceTimersByTimeAsync(5_000)
+		expect(failed).not.toHaveBeenCalled()
+		expect(r.isSaving(KEY)).toBe(false)
+		expect(r.retryIn(KEY)).toBeNull()
+		const before = calls.length
+		const e: unknown = await store.file(KEY).catch((x: unknown) => x)
+		expect(calls.length).toBe(before + 1)
+		expect(fileErrorText(e)).toBe("This recording is no longer on the receiver")
+		store.dispose()
+	})
+
+	it("forget clears a saving id and its key alike", () => {
+		const r = new RecordingReadiness(fakeClock(T0))
+		r.note([row(iso(T0), "rec-1", "e1"), row(iso(T0), "k.wav", "e2")])
+		r.forget(["rec-1", "k.wav"])
+		expect(r.saving.get().size).toBe(0)
+		expect(r.retryIn("rec-1")).toBeNull()
+		expect(r.retryIn("k.wav")).toBeNull()
+	})
+
 	it("a file never linked here still fails at once with the core's answer", async () => {
 		const r = new RecordingReadiness()
 		const { api, calls } = scripted(() =>
@@ -395,7 +434,7 @@ describe("the Activity row's play control", () => {
 			channelsHz: [],
 		}) as unknown as ActivityStack
 
-	const renderRow = (item: ActivitySummary, stack: ActivityStack) => {
+	const renderRow = (item: ActivitySummary, stack?: ActivityStack) => {
 		services ??= createServices()
 		return renderToStaticMarkup(
 			createElement(
@@ -408,7 +447,7 @@ describe("the Activity row's play control", () => {
 					current: false,
 					fresh: false,
 					onOpen: () => undefined,
-					stack,
+					...(stack ? { stack } : {}),
 				}),
 			),
 		)
@@ -423,6 +462,15 @@ describe("the Activity row's play control", () => {
 		expect(html.indexOf("wka-stack")).toBeLessThan(
 			html.indexOf("wka-disc-slot"),
 		)
+		expect(html).not.toContain('<button type="button" class="wkp-disc')
+	})
+
+	it("a lone row without audio keeps the disc column empty too, so every row's time lines up", () => {
+		const a = { ...row("2026-01-01T00:00:00.000Z", KEY, "evt_a") }
+		delete a.recording
+		const html = renderRow(a)
+		expect(html).toContain("wka-disc-slot")
+		expect(html).toContain("data-disc")
 		expect(html).not.toContain('<button type="button" class="wkp-disc')
 	})
 

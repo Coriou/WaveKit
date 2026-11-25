@@ -170,6 +170,22 @@ export class RecordingReadiness {
 		})
 	}
 
+	/**
+	 * These ids (or keys) were deleted: no Saving and no retry window for them any more (a row still
+	 * linking one reads as gone at once, not after ~30 s of tries).
+	 */
+	forget(ids: Iterable<string>): void {
+		const current = this.saving.get()
+		let next: Map<string, number> | null = null
+		for (const id of ids) {
+			this.seen.delete(id)
+			if (!current.has(id)) continue
+			next ??= new Map(current)
+			next.delete(id)
+		}
+		if (next !== null) this.saving.set(next)
+	}
+
 	/** Forgets everything (tests, a new pairing or a session that ended: data/index.ts). */
 	reset(): void {
 		if (this.timer !== null) this.clock.clearTimeout(this.timer)

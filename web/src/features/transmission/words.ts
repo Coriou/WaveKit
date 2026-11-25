@@ -479,14 +479,30 @@ export interface RecordingDetailRow {
 	code: boolean
 }
 
+/** What a recording change record says happened (its `change` code). */
+export const RECORDING_CHANGE_WORDS: Readonly<Record<string, string>> = {
+	finalized: "Kept: the file was saved",
+}
+
+/** A recording change code in words; one WaveKit has no sentence for reads in plain words (humanCode). */
+export function recordingChangeText(change: string | null | undefined): string {
+	if (typeof change !== "string" || change === "") return ""
+	return RECORDING_CHANGE_WORDS[change] ?? humanCode(change)
+}
+
 /**
- * The expert Details of a kept recording's record, in a fixed order: every id and raw number, labelled, the
- * times on the chosen clock with UTC under them and the duration in words (as Transmission's Details).
+ * The expert Details of a kept recording's record, in a fixed order, the important first: what happened, the
+ * channel's exact frequency and the measured one in MHz, the times on the chosen clock with UTC under them and
+ * the duration in words (as Transmission's Details), then every id, labelled, as code.
  */
 export function recordingChangeDetails(
 	p: RecordingChangePayload,
 ): RecordingDetailRow[] {
 	const channelHz = p.channel?.frequencyHz ?? null
+	const word = (term: string, value: string | null): RecordingDetailRow[] =>
+		value === null || value === ""
+			? []
+			: [{ term, value, hint: null, iso: null, code: false }]
 	const code = (term: string, value: string | null): RecordingDetailRow[] =>
 		value === null || value === ""
 			? []
@@ -498,35 +514,26 @@ export function recordingChangeDetails(
 		const hint = value.endsWith("Z") ? null : utcText(iso)
 		return [{ term, value, hint, iso, code: false }]
 	}
-	const duration = durationWords(p.durationMs)
 	return [
-		...code("Recording", p.recordingId),
-		...code("Discovery", p.discoveryId),
-		...code("Owner discovery", p.channel?.discoveryId ?? null),
-		...code("Observation", p.observationId),
-		...code("Receiver", p.sourceId),
-		...code(
+		...word("Change", recordingChangeText(p.change)),
+		...word(
+			"Channel frequency",
+			channelHz !== null && Number.isFinite(channelHz)
+				? `${formatMHz(channelHz)} MHz`
+				: null,
+		),
+		...word(
 			"Measured",
 			p.frequencyHz !== null ? measuredText(p.frequencyHz, channelHz) : null,
 		),
-		...code(
-			"Channel Hz",
-			channelHz !== null ? String(Math.round(channelHz)) : null,
-		),
 		...time(TRANSMISSION_STARTED, p.observationStartedAt),
 		...time("Kept", p.finalizedAt),
-		...(duration === null
-			? []
-			: [
-					{
-						term: "Duration",
-						value: duration,
-						hint: null,
-						iso: null,
-						code: false,
-					},
-				]),
-		...code("Change", p.change),
+		...word("Duration", durationWords(p.durationMs)),
+		...code("Recording", p.recordingId),
+		...code("Receiver", p.sourceId),
+		...code("Discovery", p.discoveryId),
+		...code("Owner discovery", p.channel?.discoveryId ?? null),
+		...code("Observation", p.observationId),
 	]
 }
 

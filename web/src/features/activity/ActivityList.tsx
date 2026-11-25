@@ -650,7 +650,7 @@ export const ActivityRow = memo(function ActivityRow({
 			ref={measure}
 			className="wka-item"
 			data-stacked={stacked || undefined}
-			data-disc={audio || undefined}
+			data-disc
 		>
 			<button
 				type="button"
@@ -695,13 +695,9 @@ export const ActivityRow = memo(function ActivityRow({
 					foldsId={foldsId}
 				/>
 			)}
-			{/* the disc's column is always last: discs line up at the item's right edge, and a stacked row
-			    without audio keeps the column empty so every stack count sits in the same place */}
-			{audio ? (
-				<ActivityDisc item={item} queue={queue} />
-			) : (
-				stacked && <DiscSlot />
-			)}
+			{/* the disc's column is always last: discs line up at the item's right edge, and a row without
+			    audio keeps the column empty so every row's time and stack count sit in the same place */}
+			{audio ? <ActivityDisc item={item} queue={queue} /> : <DiscSlot />}
 		</div>
 	)
 })

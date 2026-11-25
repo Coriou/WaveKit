@@ -99,8 +99,11 @@ export interface KeyValueStore {
 }
 
 export interface PlaybackDeps {
-	/** The WAV file (RecordingsStore.file). */
-	fetchFile(id: string): Promise<Blob>
+	/**
+	 * The WAV file (RecordingsStore.file). `signal` aborts once nobody waits for it any more (a superseded or
+	 * stopped start, forget(), dispose()), so a retry loop for a file still being saved stops too.
+	 */
+	fetchFile(id: string, signal: AbortSignal): Promise<Blob>
 	/** Mutes (true) or unmutes live audio (ListenController.hold). */
 	holdLive(held: boolean): void
 	createAudio?: () => AudioLike
@@ -114,6 +117,16 @@ interface Cached {
 	blob: Blob
 	url: string
 	peaks: number[] | null
+}
+
+/** A fetch in flight, shared by every caller waiting for the same file. */
+interface Loading {
+	promise: Promise<Cached>
+	controller: AbortController
+	/** Callers with a signal still waiting. */
+	waiters: number
+	/** A caller without a signal waits: the fetch is never abandoned. */
+	held: boolean
 }
 
 /** A fetch that landed after forget() or dispose(): it keeps nothing, and its waveform is not "none". */
@@ -231,7 +244,7 @@ export class PlaybackService extends Store<PlaybackState> {
 	 * Fetches in flight, one per file. forget() and dispose() drop the entry: a fetch no longer listed
 	 * here when it lands keeps nothing (no object URL, no cache, no peaks), and a new play fetches anew.
 	 */
-	private readonly loading = new Map<string, Promise<Cached>>()
+	private readonly loading = new Map<string, Loading>()
 	private disposed = false
 	private abort: AbortController | null = null
 	/** Bumped at every play, src set and stop; element events and play() results of an older one are stale. */
@@ -522,7 +535,8 @@ export class PlaybackService extends Store<PlaybackState> {
 				...s,
 				queue: { ...s.queue, ids: s.queue.ids.filter(x => x !== id) },
 			})
-		// an in-flight fetch keeps nothing when it lands; a play after an Undo fetches anew
+		// an in-flight fetch stops and keeps nothing; a play after an Undo fetches anew
+		this.loading.get(id)?.controller.abort()
 		this.loading.delete(id)
 		this.dropFile(id)
 		if (this.peakStore.get().has(id)) {
@@ -534,6 +548,7 @@ export class PlaybackService extends Store<PlaybackState> {
 
 	dispose(): void {
 		this.disposed = true
+		for (const l of this.loading.values()) l.controller.abort()
 		this.loading.clear()
 		this.stop()
 		this.offHold()
@@ -672,18 +687,19 @@ export class PlaybackService extends Store<PlaybackState> {
 			this.cache.set(id, hit)
 			return Promise.resolve(hit)
 		}
-		let p = this.loading.get(id)
-		if (!p) {
-			// one fetch per file, shared; it is not cancelled when one caller stops waiting
+		let entry = this.loading.get(id)
+		if (!entry) {
+			// one fetch per file, shared; aborted only once every caller stopped waiting (abandon())
 			// still the listed fetch of the file: forget() or dispose() since means it keeps nothing
+			const controller = new AbortController()
 			const stale = (): Error | null =>
 				this.disposed
 					? new StaleFetchError("Playback closed")
-					: this.loading.get(id) !== p
+					: this.loading.get(id) !== entry
 						? new StaleFetchError("This recording was deleted")
 						: null
-			p = this.deps
-				.fetchFile(id)
+			const promise = this.deps
+				.fetchFile(id, controller.signal)
 				.then(async blob => {
 					const before = stale()
 					if (before) throw before
@@ -706,18 +722,38 @@ export class PlaybackService extends Store<PlaybackState> {
 					return file
 				})
 				.finally(() => {
-					if (this.loading.get(id) === p) this.loading.delete(id)
+					if (this.loading.get(id) === entry) this.loading.delete(id)
 				})
-			this.loading.set(id, p)
+			entry = { promise, controller, waiters: 0, held: false }
+			this.loading.set(id, entry)
 		}
-		if (!signal) return p
+		const shared = entry
+		if (!signal) {
+			// a waiter without a signal (loadPeaks) keeps the fetch going to its end
+			shared.held = true
+			return shared.promise
+		}
+		shared.waiters += 1
 		return new Promise<Cached>((resolve, reject) => {
-			const onAbort = () => reject(new DOMException("Aborted", "AbortError"))
+			const onAbort = () => {
+				reject(new DOMException("Aborted", "AbortError"))
+				this.abandon(id, shared)
+			}
 			signal.addEventListener("abort", onAbort, { once: true })
-			p.then(resolve, reject).finally(() =>
-				signal.removeEventListener("abort", onAbort),
-			)
+			shared.promise.then(resolve, reject).finally(() => {
+				if (signal.aborted) return
+				signal.removeEventListener("abort", onAbort)
+				shared.waiters -= 1
+			})
 		})
+	}
+
+	/** A waiter stopped waiting: the last one aborts the fetch (a new play fetches anew). */
+	private abandon(id: string, entry: Loading): void {
+		entry.waiters -= 1
+		if (entry.waiters > 0 || entry.held) return
+		if (this.loading.get(id) === entry) this.loading.delete(id)
+		entry.controller.abort()
 	}
 
 	private trim(): void {
