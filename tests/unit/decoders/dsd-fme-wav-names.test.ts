@@ -6,8 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import {
 	type DsdFmeWavCall,
+	type DsdFmeWavEarlier,
 	dsdFmeCallWavIdentity,
 	dsdFmeCallWavPattern,
+	dsdFmeWavNotEarlierOwned,
 	dsdFmeWavStampAfterPrevious,
 } from "../../../src/decoders/builtin/dsd-fme-wav-names.js"
 import { createDecoder } from "./dsd-fme-call-first-helpers.js"
@@ -48,7 +50,9 @@ type Search = {
 		call: unknown,
 		end: Date,
 		dir: string,
+		earlier?: readonly DsdFmeWavEarlier[],
 	): Promise<string | undefined>
+	claimWavName(name: string): void
 }
 
 interface StringCall {
@@ -384,18 +388,164 @@ describe("dsd-fme per-call WAV names", () => {
 		).toBeNull()
 	})
 
-	it("a stamp before the previous same-identity end second, or its start second, is refused", () => {
+	it("a stamp up to the previous end second, or the second after its start second, is refused", () => {
 		const prev = { startWallMs: 8_200, endWallMs: 10_300 }
 		expect(dsdFmeWavStampAfterPrevious(8_000, prev)).toBe(false)
-		// Past the previous start's second, before its (lagged) end's second: admitted.
-		expect(dsdFmeWavStampAfterPrevious(9_000, prev)).toBe(true)
+		// The second after the previous start's second: dsd-fme may stamp the earlier file
+		// there too, so it cannot be told apart and is refused.
+		expect(dsdFmeWavStampAfterPrevious(9_000, prev)).toBe(false)
+		// Past it, before its (lagged) end's second: admitted.
 		expect(dsdFmeWavStampAfterPrevious(10_000, prev)).toBe(true)
 		expect(dsdFmeWavStampAfterPrevious(11_000, prev)).toBe(true)
 		// A short previous call: its end's second is the threshold.
 		const short = { startWallMs: 10_100, endWallMs: 10_300 }
 		expect(dsdFmeWavStampAfterPrevious(9_000, short)).toBe(false)
-		// The end's own second cannot be told apart (whole-second stamps): admitted.
-		expect(dsdFmeWavStampAfterPrevious(10_000, short)).toBe(true)
+		// The end's own second cannot be told apart (whole-second stamps): refused.
+		expect(dsdFmeWavStampAfterPrevious(10_000, short)).toBe(false)
+		expect(dsdFmeWavStampAfterPrevious(11_000, short)).toBe(true)
 		expect(dsdFmeWavStampAfterPrevious(0, undefined)).toBe(true)
+	})
+
+	describe("identity drift between two overs of one station", () => {
+		const at = (ms: number) => stampOf(new Date(START.getTime() + ms))
+		const p25Full: DsdFmeWavCall = {
+			protocol: "p25p1",
+			talkgroup: 56,
+			source: 1234,
+			p25: { nac: "2A5" },
+		}
+		const p25NoNac: DsdFmeWavCall = {
+			protocol: "p25p1",
+			talkgroup: 56,
+			source: 1234,
+		}
+		const earlierOf = (
+			fields: DsdFmeWavCall,
+			startMs: number,
+			endMs: number,
+		): DsdFmeWavEarlier => {
+			const pattern = dsdFmeCallWavPattern(fields)
+			if (pattern === null) throw new TypeError("no pattern")
+			return {
+				pattern,
+				startWallMs: START.getTime() + startMs,
+				endWallMs: START.getTime() + endMs,
+			}
+		}
+		async function searchAfter(
+			fields: DsdFmeWavCall,
+			files: readonly string[],
+			startMs: number,
+			earlier: readonly DsdFmeWavEarlier[],
+			claimed: readonly string[] = [],
+		): Promise<string | undefined> {
+			for (const f of files) fs.writeFileSync(path.join(root, f), "")
+			const d = createDecoder({
+				perCallRecordingDir: root,
+			}) as unknown as Search
+			for (const name of claimed) d.claimWavName(name)
+			const startAbs = START.getTime() + startMs
+			const found = await d.searchForWavFile(
+				callOf(fields, startAbs),
+				new Date(startAbs + 2000),
+				root,
+				earlier,
+			)
+			return found === undefined ? undefined : path.basename(found)
+		}
+
+		it("path A: a field one over lacks widens its pattern; the other over's file is still refused", async () => {
+			// The earlier (say encrypted) over printed its NAC; the later one did not, so their
+			// identities differ while the later wildcard pattern names the earlier file.
+			const early = `${at(0)}_00001_P25_2A5_GROUP_TGT_56_SRC_1234.wav`
+			expect(dsdFmeCallWavPattern(p25NoNac)?.test(early)).toBe(true)
+			expect(
+				await searchAfter(p25NoNac, [early], 3000, [
+					earlierOf(p25Full, 0, 2000),
+				]),
+			).toBeUndefined()
+			// The reverse drift: the earlier over lacked the NAC, the later one has it.
+			expect(
+				await searchAfter(p25Full, [early], 3000, [
+					earlierOf(p25NoNac, 0, 2000),
+				]),
+			).toBeUndefined()
+			// Its own file, stamped past the earlier over, still links.
+			const own = `${at(3000)}_00002_P25_2A5_GROUP_TGT_56_SRC_1234.wav`
+			expect(
+				await searchAfter(p25NoNac, [early, own], 3000, [
+					earlierOf(p25Full, 0, 2000),
+				]),
+			).toBe(own)
+		})
+
+		it("path A: an NXDN over without its RAN and a D-STAR over without UR refuse the other's file", async () => {
+			const nxFull: DsdFmeWavCall = {
+				protocol: "nxdn48",
+				talkgroup: 5678,
+				source: 1234,
+				nxdn: { ran: 5 },
+			}
+			const nxNoRan: DsdFmeWavCall = {
+				protocol: "nxdn48",
+				talkgroup: 5678,
+				source: 1234,
+			}
+			const nxFile = `${at(0)}_00001_NXDN_RAN_5_GROUP_TGT_5678_SRC_1234.wav`
+			expect(
+				await searchAfter(nxNoRan, [nxFile], 3000, [
+					earlierOf(nxFull, 0, 2000),
+				]),
+			).toBeUndefined()
+			const dsFull: DsdFmeWavCall = {
+				protocol: "dstar",
+				talkgroup: 0,
+				source: 0,
+				dstar: { my: "N0CALL", ur: "CQCQCQ" },
+			}
+			const dsNoUr: DsdFmeWavCall = {
+				protocol: "dstar",
+				talkgroup: 0,
+				source: 0,
+				dstar: { my: "N0CALL" },
+			}
+			const dsFile = `${at(0)}_00001_DSTAR__TGT_CQCQCQ___SRC_N0CALL______.wav`
+			expect(dsdFmeCallWavPattern(dsNoUr)?.test(dsFile)).toBe(true)
+			expect(
+				await searchAfter(dsNoUr, [dsFile], 3000, [earlierOf(dsFull, 0, 2000)]),
+			).toBeUndefined()
+		})
+
+		it("path B: the earlier file stamped one second after the earlier start second is refused", async () => {
+			// The adapter saw the earlier over start at 200 ms; dsd-fme stamped its file at 1 s.
+			const early = `${at(1000)}_00001_P25_2A5_GROUP_TGT_56_SRC_1234.wav`
+			expect(
+				await searchAfter(p25Full, [early], 3000, [
+					earlierOf(p25Full, 200, 2000),
+				]),
+			).toBeUndefined()
+		})
+
+		it("a name already linked to a call is never linked again, whatever its stamp", async () => {
+			const file = `${at(3000)}_00002_P25_2A5_GROUP_TGT_56_SRC_1234.wav`
+			expect(
+				await searchAfter(p25Full, [file], 3000, [], [file]),
+			).toBeUndefined()
+		})
+
+		it("only an earlier call whose own pattern names the file refuses it", () => {
+			const file = `${at(0)}_00001_P25_2A5_GROUP_TGT_56_SRC_1234.wav`
+			const other = earlierOf({ ...p25Full, source: 99 }, 0, 2000)
+			expect(dsdFmeWavNotEarlierOwned(file, START.getTime(), [other])).toBe(
+				true,
+			)
+			expect(
+				dsdFmeWavNotEarlierOwned(file, START.getTime(), [
+					other,
+					earlierOf(p25Full, 0, 2000),
+				]),
+			).toBe(false)
+			expect(dsdFmeWavNotEarlierOwned(file, START.getTime(), [])).toBe(true)
+		})
 	})
 })

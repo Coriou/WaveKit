@@ -63,7 +63,11 @@ import { registerSourceFeedMock, withSourcePaused } from "./source-feed.ts"
 import type { SourceFeedMock } from "./source-feed.ts"
 import type { ReceiverMockControls } from "./receiver.ts"
 import { registerScannerMock } from "./scanner.ts"
-import { registerTransmissionsMock } from "./transmissions.ts"
+import {
+	mockCallLinkedKey,
+	redactMockCallRecord,
+	registerTransmissionsMock,
+} from "./transmissions.ts"
 import {
 	type Activity429Mode,
 	activity429RetryAfter,
@@ -2922,7 +2926,17 @@ export async function buildMockServer(
 					code: "NOT_FOUND",
 					message: "Activity event not found",
 				})
-			return recordOf(item, decodedById.get(item.eventId))
+			const record = recordOf(item, decodedById.get(item.eventId))
+			// A digital call row names its file only while its decoder link stands (rule six, as the
+			// core's detail and the transmissions mock).
+			if (
+				record.kind !== "decoder-reception" ||
+				(record.payload.outputType !== "call_start" &&
+					record.payload.outputType !== "call_end")
+			)
+				return record
+			const linkedKey = mockCallLinkedKey({ summary: item, record })
+			return redactMockCallRecord(record, key => key === linkedKey)
 		},
 	)
 

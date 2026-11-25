@@ -7,7 +7,6 @@
  */
 import type {
 	ActivityRecord,
-	JsonValue,
 	RecordingInventoryItem,
 	RecordingTone,
 	TransmissionArtefact,
@@ -18,6 +17,7 @@ import type {
 	TransmissionPrivacy,
 	TransmissionTone,
 } from "@wavekit/api-types"
+import { redactCallRecordingRefs } from "./redact.js"
 import { deriveTone } from "./tone.js"
 import { isTxId } from "./types.js"
 import type { TxToneReading, TxView } from "./types.js"
@@ -270,62 +270,17 @@ function memberOf(
 	}
 }
 
-/** The dsd-fme keep key of a call file name (`dsd~<name>`), as the catalogue and links name it. */
-const dsdKeyOf = (name: string): string => `dsd~${name}`
-
-/** A field key or value that names a recording file (a dsd-fme `.wav` call file or its key). */
-const RECORDING_FIELD_KEY = /wav|recording|^file(name)?$|path/i
-const namesRecording = (v: unknown): boolean =>
-	typeof v === "string" && (/\.wav$/i.test(v) || v.startsWith("dsd~"))
-
 /**
- * Rule six for the raw Activity block: a call row's stored record names its dsd-fme file
- * (`decodedData.wavFile`, kept by the ingress whatever the call's clearance). That name is the
- * unlisted key without its `dsd~` prefix, so it stays only when `keep` admits that key (a clear
- * call's decoder link); otherwise every file reference goes: the wavFile, a field naming a
- * recording and a `recording` link on the record. Other record kinds pass unchanged.
+ * Rule six for the raw Activity block: a call row's stored record names its dsd-fme file, which
+ * stays only when `keep` admits its key (a clear call's decoder link); redactCallRecordingRefs,
+ * shared with the Activity detail route.
  */
 function rawActivityOf(
 	record: ActivityRecord | undefined,
 	keep: (key: string) => boolean,
 ): ActivityRecord | null {
 	if (record === undefined) return null
-	if (record.kind !== "decoder-reception") return record
-	const payload = record.payload
-	const fields = payload.fields.filter(
-		f =>
-			!(
-				(RECORDING_FIELD_KEY.test(f.key) || namesRecording(f.value)) &&
-				!(typeof f.value === "string" && keep(dsdKeyOf(f.value)))
-			),
-	)
-	let decodedData = payload.decodedData
-	if (
-		typeof decodedData === "object" &&
-		decodedData !== null &&
-		!Array.isArray(decodedData)
-	) {
-		const rest: { [key: string]: JsonValue } = {}
-		for (const [field, value] of Object.entries(decodedData)) {
-			if (field === "wavFile") {
-				if (typeof value === "string" && keep(dsdKeyOf(value)))
-					rest[field] = value
-				continue
-			}
-			if (
-				(RECORDING_FIELD_KEY.test(field) || namesRecording(value)) &&
-				!(typeof value === "string" && keep(dsdKeyOf(value)))
-			)
-				continue
-			rest[field] = value
-		}
-		decodedData = rest
-	}
-	const out: Record<string, unknown> = { ...payload, fields, decodedData }
-	const link = (payload as { recording?: { id?: unknown } }).recording
-	if (link !== undefined && !(typeof link.id === "string" && keep(link.id)))
-		delete out["recording"]
-	return { ...record, payload: out as unknown as typeof payload }
+	return redactCallRecordingRefs(record, keep)
 }
 
 export function buildTransmissionDto(

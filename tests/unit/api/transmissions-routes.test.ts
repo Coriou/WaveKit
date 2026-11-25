@@ -298,7 +298,8 @@ describe("GET /api/transmissions/:ref", () => {
 				encryptionKnown: known,
 				encrypted,
 				flags: { encrypted },
-				// dsd-fme names the call's file whatever its clearance: the ingress keeps the name.
+				// dsd-fme names the call's file whatever its clearance; the ingress stores the name
+				// only for a call proven clear.
 				wavFile: `/rec/${DSD_NAME}`,
 				txId,
 			},

@@ -399,6 +399,29 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 			expect(trace.files).toEqual([LATE_FILE])
 		})
 
+		it("an encrypted earlier over's file stamped in the second after its start is never taken", async () => {
+			// dsd-fme stamped the earlier (encrypted) over's file one second after the start second
+			// the adapter saw (path B): the later clear over, its own file missing, links nothing.
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_ENC), ...LATE],
+				[[...P1_FILE(), 1000]],
+			)
+			expect(trace.ends).toBe(2)
+			expectNeverLinked(trace)
+		})
+
+		it("a clear earlier over's file stamped in the second after its start links once, to its own over", async () => {
+			const trace = await replay(
+				"p25",
+				[...EARLY(LDU2_CLEAR), ...LATE],
+				[[...P1_FILE(), 1000]],
+			)
+			expect(trace.ends).toBe(2)
+			expectLinked(trace, ["56/1234"])
+			expect(trace.files).toEqual([wavName("P25_2A5", 56, 1234, 1000)])
+		})
+
 		it("a lagged previous end past the re-key's stamp second: the re-key still links its own file", async () => {
 			// The earlier over ends at 4 160 ms as the adapter saw it (a lagging stdout), while
 			// dsd-fme stamped the re-key's file at 3 000: before the end's second, after the

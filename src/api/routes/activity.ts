@@ -25,6 +25,7 @@ import {
 import { parseDecimalInteger } from "../../core/activity/query/validate.js"
 import { withActivityClient } from "../../core/activity/query/service.js"
 import type { ActivityUnavailableState } from "../../core/activity/runtime.js"
+import { redactActivityDetail } from "../../core/transmissions/redact.js"
 import { TX_ID } from "../../core/transmissions/types.js"
 import { errorResponseSchema, looseObjectSchema } from "./scanner-schemas.js"
 import {
@@ -1059,7 +1060,8 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 						message: "Activity event not found",
 					})
 				}
-				return record
+				// A digital call names its file only when its own trust admits the recording.
+				return redactActivityDetail(record)
 			} catch (error) {
 				return sendError(reply, request, error)
 			}

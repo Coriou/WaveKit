@@ -394,16 +394,22 @@ function callEndFile(output: DecoderOutput): CallEndFile | null {
 		flags !== null &&
 		(flags as Record<string, unknown>)["wavFileUpdate"] === true
 	const wav = body["wavFile"]
+	const clear = callTrustAdmits(body["protocol"], body)
 	let key: string | null = null
 	let clean: unknown = data
-	if (typeof wav === "string") {
-		const name = recordingBaseName(wav)
-		key = dsdFmeKeepKey(name)
+	if (wav !== undefined) {
+		const name = typeof wav === "string" ? recordingBaseName(wav) : null
+		key = name === null ? null : dsdFmeKeepKey(name)
 		const rest: Record<string, unknown> = {}
 		for (const [field, value] of Object.entries(body))
 			if (field !== "wavFile") rest[field] = value
-		// A name that is not a call file name (or a path elsewhere) is not kept at all.
-		clean = key === null ? rest : { ...rest, wavFile: name }
+		// A name that is not a call file name (or a path elsewhere) is not kept at all, nor the
+		// name of a call not proven clear or of a file the recordings route never serves (a DMR
+		// name while those are parked): an unproven or encrypted call stores no file name.
+		clean =
+			key === null || name === null || !clear || !dsdFmeCallRecordable(name)
+				? rest
+				: { ...rest, wavFile: name }
 	}
 	return {
 		callId: callIdOf(body["callId"]),
@@ -411,7 +417,7 @@ function callEndFile(output: DecoderOutput): CallEndFile | null {
 		data: clean,
 		key,
 		durationMs: body["duration"],
-		clear: callTrustAdmits(body["protocol"], body),
+		clear,
 	}
 }
 

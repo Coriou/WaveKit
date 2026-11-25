@@ -227,5 +227,7 @@ an unknown frequency, a proven discovery), each built through the same summary.
 
 - Transmissions (`transmissions.ts`): `GET /api/transmissions/:ref` answers `rec:` and `evt:` refs from the
   mock's recordings and Activity rows with `id` null (the mock mints no transmission ids); a `tx_` or `obs:`
-  ref is 404, a malformed one 400. A digital call lists its file only when its row links it. An analog
+  ref is 404, a malformed one 400. A digital call lists its file only when its row links it; an unlinked
+  call file's `rec:` ref is 404 like an unknown one, and an unproven or encrypted call's `raw` block and
+  `GET /api/activity/:eventId` row name no file, key or recording link (as the core). An analog
   recording's `copy` names the original its `copyOf` names and the copies naming it, from the catalogue items.
