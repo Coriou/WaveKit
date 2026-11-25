@@ -561,11 +561,11 @@ describe("copy detector: intermod evidence must name the root", () => {
 		}
 	})
 
-	it("rule B ties only its strong parent fa, never the mirror", async () => {
+	it("rule B ties fa and the mirror (fa's mixing partner fb): a ghost whose twin is fb is marked", async () => {
 		const mirror: CopyFingerprint["intermod"] = {
 			rule: "symmetric",
 			parents: [{ hz: 1_300_000 }, { hz: 1_500_000 }],
-			roots: [1_300_000],
+			roots: [1_300_000, 1_500_000],
 			tolHz: 4_000,
 		}
 		const { det } = detector()
@@ -576,7 +576,10 @@ describe("copy detector: intermod evidence must name the root", () => {
 			intermod: mirror,
 		})
 		await keep(det, atMirror, ghost)
-		expect(det.stateOf(keyOf(ghost))).toEqual({ kind: "root" })
+		expect(det.stateOf(keyOf(ghost))).toEqual({
+			kind: "copy",
+			of: keyOf(atMirror),
+		})
 	})
 })
 
@@ -657,5 +660,54 @@ describe("copy detector: a mark the store does not accept", () => {
 		await turn()
 		expect(det.status().copyWriteSkipped).toBe(1)
 		expect(det.stateOf(keyOf(ghost))).toEqual({ kind: "copy", of: keyOf(n) })
+	})
+
+	it("a skipped re-point restores the member's previous state, as on disk", async () => {
+		const long = talk(17, 30)
+		const files = () => ({
+			root: fingerprint(heardAgain(slice(long, 0, sec(20)), 103, -15), {
+				snrDb: 20,
+				raster: "off",
+			}),
+			ghost: fingerprint(heardAgain(slice(long, 0, sec(20)), 104, -25), {
+				snrDb: 8,
+				raster: "off",
+			}),
+			n: fingerprint(slice(long, 0, sec(20)), { snrDb: 40 }),
+		})
+		// Writes: 1 ghost → root, 2 root → n, 3 ghost → n. `skip` lists the skipped ones.
+		for (const [skip, ghostAfter, rootAfter] of [
+			// Both re-marks skipped: on disk the ghost still names the root, which is still a root.
+			[[2, 3], "root", "root"],
+			// Only the ghost's: on disk it names the root, which is now n's copy (no copy).
+			[[3], "none", "n"],
+		] as const) {
+			let calls = 0
+			const { det } = refusing(() =>
+				Promise.resolve(
+					(skip as readonly number[]).includes(++calls) ? "skipped" : "written",
+				),
+			)
+			const { root, ghost, n } = files()
+			await keep(det, root, ghost)
+			expect(det.stateOf(keyOf(ghost))).toEqual({
+				kind: "copy",
+				of: keyOf(root),
+			})
+			await keep(det, n)
+			await turn()
+			expect(calls).toBe(3)
+			expect(det.status().copyWriteSkipped).toBe(skip.length)
+			expect(det.stateOf(keyOf(ghost))).toEqual(
+				ghostAfter === "root"
+					? { kind: "copy", of: keyOf(root) }
+					: { kind: "root" },
+			)
+			expect(det.stateOf(keyOf(root))).toEqual(
+				rootAfter === "root"
+					? { kind: "root" }
+					: { kind: "copy", of: keyOf(n) },
+			)
+		}
 	})
 })

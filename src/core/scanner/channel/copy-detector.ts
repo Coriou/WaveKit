@@ -43,9 +43,11 @@
  * aborted or failed file never does, and nothing is written for it). Writes (`write`) go to the
  * store, which writes or removes the file's copy.json under its lock; a skipped or failed write
  * leaves the file served as before. The detector sets a file's copy state before the store
- * answers: a mark the store skips (or a failed write) turns the file back into a root in the ring
- * (copyWriteSkipped), unless a later job changed its state meanwhile; a root has no members, so
- * nothing is orphaned. A skipped REMOVAL (null) changes nothing: the store skips it when there is
+ * answers: a mark the store skips (or a failed write) returns the file to its previous state in
+ * the ring (copyWriteSkipped), so the ring matches what is on disk, unless a later job changed
+ * its state meanwhile: a former root stays a root (it has no members, so nothing is orphaned),
+ * a former copy stays a copy of its former root while that one is still a root in the ring, and
+ * becomes a root otherwise (on disk it names a root gone or now a copy: no copy). A skipped REMOVAL (null) changes nothing: the store skips it when there is
  * no mark to remove, and a mark it could not remove names a root that is now a copy or gone,
  * which the catalogue reads as no copy.
  */
@@ -126,7 +128,7 @@ export interface CopyCounters {
 	copyUnlinked: number
 	copyRingOverflow: number
 	copyQueueDropped: number
-	/** Copy marks the store skipped or failed to write: the file was turned back into a root. */
+	/** Copy marks the store skipped or failed to write: the file returned to its previous state. */
 	copyWriteSkipped: number
 	copyComparisonMsMax: number
 }
@@ -394,21 +396,33 @@ export class CopyDetector {
 		ring.splice(i, 1)
 	}
 
+	/** Removes `e`'s mark from the store (its state already set). */
+	private unmark(e: Entry): void {
+		void this.deps.write(e.fp.operationId, null).catch(() => undefined)
+	}
+
 	/**
-	 * Asks the store for `e`'s mark (`copy`, e.state already set to it) or its removal (null). A
-	 * mark the store skips or fails turns `e` back into a root, when its state is still the one
-	 * this write set.
+	 * Marks `e` a copy of `of` and asks the store for the mark. A mark the store skips or fails
+	 * leaves what is on disk as it was, so `e` returns to its PREVIOUS state (when its state is
+	 * still the one this mark set): a root stays a root, and a copy stays a copy of its former
+	 * root while that one is still a root in the ring. A former root gone from the ring (forget)
+	 * or turned into a copy since reads on disk as no copy (the catalogue reads a named root that
+	 * is gone or itself a copy as no copy), so `e` returns to a root then.
 	 */
-	private write(e: Entry, copy: CopyRecord | null): void {
-		if (copy === null) {
-			void this.deps.write(e.fp.operationId, null).catch(() => undefined)
-			return
-		}
+	private mark(e: Entry, of: Entry, copy: CopyRecord): void {
+		const prev = e.state
+		const set: State = { kind: "copy", of }
+		e.state = set
 		this.counters.copyMarked++
-		const set = e.state
 		const refused = (): void => {
 			this.counters.copyWriteSkipped++
-			if (e.state === set) e.state = { kind: "root" }
+			if (e.state !== set) return
+			e.state =
+				prev.kind === "copy" &&
+				prev.of.state.kind === "root" &&
+				this.ringOf(prev.of.fp.sourceId).includes(prev.of)
+					? prev
+					: { kind: "root" }
 		}
 		let pending: Promise<unknown>
 		try {
@@ -463,23 +477,23 @@ export class CopyDetector {
 		for (const p of passing) if (strongerThan(p.root, best.root)) best = p
 		const star = best.root
 		if (!strongerThan(n, star)) {
-			n.state = { kind: "copy", of: star }
-			this.write(n, this.recordOf(star, best.r))
+			this.mark(n, star, this.recordOf(star, best.r))
 			return
 		}
 		// N is the stronger: it becomes the root, R* its copy (pass held with R* the weaker).
 		const members = this.membersOf(ring, star)
-		star.state = { kind: "copy", of: n }
-		this.write(star, this.recordOf(n, best.r))
+		this.mark(star, n, this.recordOf(n, best.r))
+		// The writer never throws synchronously (its contract: a rejection only), so every member
+		// below is visited and the invariant holds after the loop; a writer that does throw fails
+		// the job (mark reverts its own entry) and the remaining members keep their old state.
 		for (const m of members) {
 			const r = await this.pass(m, n)
 			if (r.ok && !strongerThan(m, n)) {
-				m.state = { kind: "copy", of: n }
-				this.write(m, this.recordOf(n, r))
+				this.mark(m, n, this.recordOf(n, r))
 			} else {
 				m.state = { kind: "root" }
 				this.counters.copyUnlinked++
-				this.write(m, null)
+				this.unmark(m)
 			}
 		}
 	}
@@ -496,17 +510,16 @@ export class CopyDetector {
 			let m0 = members[0]!
 			for (const m of members) if (strongerThan(m, m0)) m0 = m
 			m0.state = { kind: "root" }
-			this.write(m0, null)
+			this.unmark(m0)
 			for (const m of members) {
 				if (m === m0) continue
 				const r = await this.pass(m, m0)
 				if (r.ok && !strongerThan(m, m0)) {
-					m.state = { kind: "copy", of: m0 }
-					this.write(m, this.recordOf(m0, r))
+					this.mark(m, m0, this.recordOf(m0, r))
 				} else {
 					m.state = { kind: "root" }
 					this.counters.copyUnlinked++
-					this.write(m, null)
+					this.unmark(m)
 				}
 			}
 			return

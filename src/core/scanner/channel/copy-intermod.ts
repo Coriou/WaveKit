@@ -11,12 +11,15 @@
  * - Rule B (symmetric pair): a parent fa and another concurrent track fc′ (overlapping the
  *   file's span by INTERMOD_MIN_OVERLAP_SHARE, like a parent, and with a parent's SNR floor of
  *   INTERMOD_PARENT_MIN_SNR_DB, so an unrelated weak carrier never stands in for the mirror) at
- *   least INTERMOD_PARENT_MARGIN_DB under fa with |fc + fc′ − 2·fa| ≤ tol (the two products 2·fa − fb
- *   and 2·fb − fa of fa with an unseen fb sit symmetric around fa only when fb is fa's own
- *   mixing partner; two on-raster channels symmetric around a close strong one are ordinary
- *   traffic), AND fc or fc′ is off its raster (fc′ by its span's median centre, not its latest
- *   snapshot) or |fc − fa| ≥ INTERMOD_WIDE_HZ (100 kHz).
+ *   least INTERMOD_PARENT_MARGIN_DB under fa with |fc + fc′ − 2·fa| ≤ tol: fc = 2·fa − fb puts the
+ *   mixing partner fb at 2·fa − fc, so the mirror fc′ IS fb, heard too weak to be a parent (Rule A
+ *   with a weak partner). Two on-raster channels symmetric around a close strong one are ordinary
+ *   traffic, so it also needs fc or fc′ off its raster (fc′ by its span's median centre, not its
+ *   latest snapshot) or |fc − fa| ≥ INTERMOD_WIDE_HZ (100 kHz).
  * - tol = 4·max(binHz, 1 000 Hz): four FFT bins of centroid error, at least 4 kHz.
+ * - Every track frequency the rules read (the matches, the roots) is its span's median centre
+ *   (medianHz, `hz` when absent), not its latest snapshot: a track drifting at its tail is judged
+ *   where it settled.
  *
  * The parent set is captured when the file ENDS (the recorder's finishFile), from a per-source,
  * per-epoch ring of recent track spans (TrackSpans): a parent whose observation closed long
@@ -24,14 +27,15 @@
  *
  * The evidence names the frequencies it ties the file to (`roots`): a copy is only ever of one
  * of them (copy-detector.ts reads the root's centre against them within `tolHz`). Rule A ties
- * the file to both parents of every pair that lands on it, Rule B to the strong parent fa of
- * every mirror (its unseen partner fb is never heard). On a band with several strong carriers a
+ * the file to both parents of every pair that lands on it, Rule B to both fa and the mirror fc′
+ * (the partner fb itself) of every match. On a band with several strong carriers a
  * weaker real recording can land on some product of two unrelated ones by chance: that evidence
  * names neither of the recording's simulcast twins, so it never makes it their copy.
  *
  * Bounds (arithmetic): Rule A checks 16 × 15 = 240 ordered pairs; Rule B 16 parents × at most
  * TRACK_SPANS_MAX others = 16 × 1 024 = 16 384 checks (subtractions only), every pair visited
- * (the roots are all the matches); `roots` holds at most the 16 parents. TrackSpans holds at
+ * (the roots are all the matches); `roots` holds at most the 16 parents plus one mirror per
+ * parent, 32. TrackSpans holds at
  * most TRACK_SPANS_MAX = 1 024 spans per source (least recently heard dropped first) and forgets
  * spans that ended more than COPY_HORIZON_MS before the newest one heard on that source. Each
  * span keeps a centre sampler of at most SPAN_HZ_SAMPLES_MAX = 16 values (a partner's raster fit
@@ -70,8 +74,7 @@ export const TRACK_SPANS_OPEN_MAX = 512
  * Spans held per source (least recently heard dropped): every open track the tracker can hold
  * (TRACK_SPANS_OPEN_MAX = 512) plus as many ended ones inside the copy horizon, 2 × 512 = 1 024.
  * The former 256 was half the open cap: on a busy band (more than 256 tracks heard within the
- * horizon, live diagnostics counted 1 124 drops in 30 min, about 0.6 a second) it dropped spans
- * still inside the horizon, among them ended parents a later file end still needs, and a live
+ * horizon) it dropped spans still inside the horizon, among them ended parents a later file end still needs, and a live
  * track dropped and heard again restarted its span (its overlap with the file cut short). With
  * 1 024, a live track is dropped only after 1 024 other tracks were heard since its own last
  * snapshot, and at most 511 of those can be open with it.
@@ -164,8 +167,9 @@ export interface IntermodEvidence {
 	readonly rule: "2f1-f2" | "symmetric"
 	readonly parents: readonly { readonly hz: number }[]
 	/**
-	 * The frequencies a copy may be of (Hz, at most INTERMOD_PARENTS_MAX): both parents of every
-	 * Rule A pair, fa of every Rule B mirror. Never empty.
+	 * The frequencies a copy may be of (Hz, span median centres, at most 2 × INTERMOD_PARENTS_MAX):
+	 * both parents of every Rule A pair, fa and the mirror (the partner fb) of every Rule B match.
+	 * Never empty.
 	 */
 	readonly roots: readonly number[]
 	/** The tolerance the evidence was matched with (intermodTolerance of the file's bins). */
@@ -191,8 +195,8 @@ export interface TrackSpan {
 	readonly obwHz?: number | null
 	/**
 	 * The median of the centres heard over the span (TrackSpans' bounded sampler); absent: `hz`.
-	 * Rule B's partner raster fit reads it, so a partner drifting at its tail is judged where it
-	 * settled.
+	 * The evidence reads it for every match, root and raster fit, so a track drifting at its tail
+	 * is judged where it settled.
 	 */
 	readonly medianHz?: number
 }
@@ -241,7 +245,7 @@ export function intermodEvidenceOf(
 	const tol = intermodTolerance(file.binHz)
 	const concurrent = tracks.filter(
 		t =>
-			Math.abs(t.hz - file.hz) > tol &&
+			Math.abs(settledHz(t) - file.hz) > tol &&
 			overlapShare(t, file) >= INTERMOD_MIN_OVERLAP_SHARE,
 	)
 	const parents = concurrent
@@ -253,42 +257,53 @@ export function intermodEvidenceOf(
 		.sort((a, b) => b.peakDbfs - a.peakDbfs)
 		.slice(0, INTERMOD_PARENTS_MAX)
 	let first: Pick<IntermodEvidence, "rule" | "parents"> | null = null
-	// The parents a copy may be of (each at most once: they are `parents`' own entries).
+	// The tracks a copy may be of (each at most once: they are `concurrent`'s own entries).
 	const roots = new Set<TrackSpan>()
 	for (const f1 of parents)
 		for (const f2 of parents) {
 			if (f1 === f2) continue
-			if (Math.abs(2 * f1.hz - f2.hz - file.hz) > tol) continue
-			first ??= { rule: "2f1-f2", parents: [{ hz: f1.hz }, { hz: f2.hz }] }
+			if (Math.abs(2 * settledHz(f1) - settledHz(f2) - file.hz) > tol) continue
+			first ??= {
+				rule: "2f1-f2",
+				parents: [{ hz: settledHz(f1) }, { hz: settledHz(f2) }],
+			}
 			roots.add(f1)
 			roots.add(f2)
 		}
 	const fileRaster = rasterOf(file.hz, file.obwHz ?? null)
 	for (const fa of parents) {
-		// fa already ties the file (a Rule A pair): a mirror of it adds nothing.
+		// fa already ties the file (a Rule A pair or another's mirror): a mirror of it adds nothing.
 		if (roots.has(fa)) continue
 		for (const other of concurrent) {
 			if (other === fa) continue
 			// The mirror must be a real signal: a parent's SNR floor (its overlap is `concurrent`'s).
 			if (other.snrDb < INTERMOD_PARENT_MIN_SNR_DB) continue
 			if (other.peakDbfs > fa.peakDbfs - INTERMOD_PARENT_MARGIN_DB) continue
-			if (Math.abs(file.hz + other.hz - 2 * fa.hz) > tol) continue
+			if (Math.abs(file.hz + settledHz(other) - 2 * settledHz(fa)) > tol)
+				continue
 			if (
 				fileRaster === "off" ||
-				rasterOf(other.medianHz ?? other.hz, other.obwHz ?? null) === "off" ||
-				Math.abs(file.hz - fa.hz) >= INTERMOD_WIDE_HZ
+				rasterOf(settledHz(other), other.obwHz ?? null) === "off" ||
+				Math.abs(file.hz - settledHz(fa)) >= INTERMOD_WIDE_HZ
 			) {
 				first ??= {
 					rule: "symmetric",
-					parents: [{ hz: fa.hz }, { hz: other.hz }],
+					parents: [{ hz: settledHz(fa) }, { hz: settledHz(other) }],
 				}
+				// The mirror is fa's mixing partner fb (2·fa − fb = fc): a copy may be of either.
 				roots.add(fa)
+				roots.add(other)
 				break
 			}
 		}
 	}
 	if (first === null) return null
-	return { ...first, roots: [...roots].map(t => t.hz), tolHz: tol }
+	return { ...first, roots: [...roots].map(settledHz), tolHz: tol }
+}
+
+/** A track's settled centre: its span's median (`hz` when absent). */
+function settledHz(t: TrackSpan): number {
+	return t.medianHz ?? t.hz
 }
 
 interface SpanEntry {
@@ -312,9 +327,11 @@ interface SourceSpans {
 
 /**
  * Recent track spans per source and epoch (the evidence's input): every snapshot the recorder
- * hears, its close included, by track id. A new epoch on a source starts its ring afresh (a
- * retune moves every frequency); a snapshot of an OLDER epoch (a late close after the retune)
- * is ignored, so it never wipes the current ring. Spans whose end is older than COPY_HORIZON_MS
+ * hears, its close included, by track id. A snapshot of the engine's current epoch, when the
+ * ring holds another, starts the ring afresh (a retune moves every frequency); a snapshot of any
+ * other epoch (a late close after the retune) is ignored, so it never wipes the current ring.
+ * Epochs are compared by equality with the engine's current one, never by order: a recreated
+ * engine restarts its epochs at 1 under the same source id. Spans whose end is older than COPY_HORIZON_MS
  * before the newest end heard on the source are forgotten; at most TRACK_SPANS_MAX per source.
  *
  * Cost per snapshot (arithmetic): O(1) amortised, no allocation for a track already held. The
@@ -345,6 +362,11 @@ export class TrackSpans {
 			readonly binHz?: number | undefined
 			readonly obwHz?: number | undefined
 		},
+		/**
+		 * The source engine's current epoch (its currentEpoch().epoch); absent: the snapshot's
+		 * own (a caller without an engine).
+		 */
+		currentEpoch: number = track.epoch,
 	): void {
 		if (
 			!Number.isFinite(track.centreHz) ||
@@ -353,9 +375,14 @@ export class TrackSpans {
 		)
 			return
 		let src = this.sources.get(sourceId)
-		// A late snapshot of an older epoch never resets the current ring.
-		if (src !== undefined && track.epoch < src.epoch) return
-		if (src === undefined || src.epoch !== track.epoch) {
+		if (src !== undefined && src.epoch !== track.epoch) {
+			// A late snapshot of another epoch (a close after the retune) never resets the ring;
+			// only one of the engine's CURRENT epoch does. Compared by equality, not order: a
+			// recreated engine restarts its epochs at 1 under the same source id.
+			if (track.epoch !== currentEpoch) return
+			src = undefined
+		}
+		if (src === undefined) {
 			src = {
 				epoch: track.epoch,
 				fs,

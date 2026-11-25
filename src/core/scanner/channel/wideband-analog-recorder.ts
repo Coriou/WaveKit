@@ -3550,8 +3550,9 @@ export class WidebandAnalogRecorder {
 	): void {
 		if (this.deps.copies === undefined) return
 		try {
-			const fs = this.deps.engine(sourceId)?.currentEpoch().sampleRateHz
-			if (typeof fs === "number") this.spans.note(sourceId, fs, track)
+			const cur = this.deps.engine(sourceId)?.currentEpoch()
+			if (cur !== undefined)
+				this.spans.note(sourceId, cur.sampleRateHz, track, cur.epoch)
 			const id = this.byObservation.get(observationId)
 			const s = id === undefined ? undefined : this.sessions.get(id)
 			if (s === undefined) return

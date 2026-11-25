@@ -136,7 +136,7 @@ describe("intermod evidence: rule B (symmetric pair)", () => {
 		expect(ev).toEqual({
 			rule: "symmetric",
 			parents: [{ hz: fa }, { hz: twin }],
-			roots: [fa],
+			roots: [fa, twin],
 			tolHz: 4_000,
 		})
 	})
@@ -255,7 +255,7 @@ describe("intermod evidence: rule B's mirror must be a real concurrent signal", 
 		).toEqual({
 			rule: "symmetric",
 			parents: [{ hz: fa }, { hz: mirror }],
-			roots: [fa],
+			roots: [fa, mirror],
 			tolHz: 4_000,
 		})
 	})
@@ -392,12 +392,36 @@ describe("intermod evidence: the track-span ring", () => {
 
 	it("ignores a late snapshot of an older epoch (a close after the retune): the current ring stays", () => {
 		const r = new TrackSpans()
-		r.note("s", FS, t("a", FC, 0, 10, 2))
-		r.note("s", FS, t("old-close", FC, 0, 5, 1))
+		r.note("s", FS, t("a", FC, 0, 10, 2), 2)
+		r.note("s", FS, t("old-close", FC, 0, 5, 1), 2)
 		expect(r.spansOf("s", 2)).toHaveLength(1)
 		expect(r.spansOf("s", 1)).toEqual([])
-		r.note("s", FS, t("b", FC, 0, 12, 2))
+		r.note("s", FS, t("b", FC, 0, 12, 2), 2)
 		expect(r.spansOf("s", 2)).toHaveLength(2)
+	})
+
+	it("a recreated engine (epochs restart at 1) starts the ring afresh at its current epoch", () => {
+		const r = new TrackSpans()
+		r.note("s", FS, t("a", FC, 0, 10, 5), 5)
+		// The engine is recreated under the same source id: its current epoch is 1.
+		r.note("s", FS, t("b", FC + 25_000, 0, 20, 1), 1)
+		r.note("s", FS, t("c", FC + 50_000, 0, 30, 1), 1)
+		expect(r.spansOf("s", 1).map(x => x.hz)).toEqual([FC + 25_000, FC + 50_000])
+		expect(r.spansOf("s", 5)).toEqual([])
+	})
+
+	it("a late close of the old engine's newer-numbered epoch never wipes the recreated engine's ring", () => {
+		const r = new TrackSpans()
+		r.note("s", FS, t("a", FC, 0, 10, 5), 5)
+		r.note("s", FS, t("b", FC, 0, 20, 1), 1)
+		// A late close from epoch 5 (the old engine) while the current epoch is 1.
+		r.note("s", FS, t("a", FC, 0, 25, 5), 1)
+		expect(r.spansOf("s", 1)).toHaveLength(1)
+		// And a late close of an older epoch while the current one is newer.
+		r.note("s", FS, t("c", FC, 0, 30, 2), 2)
+		r.note("s", FS, t("b", FC, 0, 35, 1), 2)
+		expect(r.spansOf("s", 2)).toHaveLength(1)
+		expect(r.spansOf("s", 1)).toEqual([])
 	})
 
 	it("starts afresh on a new epoch (a retune moves every frequency)", () => {
@@ -410,7 +434,7 @@ describe("intermod evidence: the track-span ring", () => {
 })
 
 describe("intermod evidence: its roots (what a copy may be of)", () => {
-	it("rule A names both parents of every pair landing on the file, rule B only fa", () => {
+	it("rule A names both parents of every pair landing on the file", () => {
 		// Two pairs land on FC: (FC + 60k, FC + 120k) and (FC + 200k, FC + 400k).
 		const tracks = [
 			span(FC + 60_000),
@@ -426,6 +450,42 @@ describe("intermod evidence: its roots (what a copy may be of)", () => {
 			FC + 200_000,
 			FC + 400_000,
 		])
+	})
+
+	it("rule B names both fa and the mirror: the mirror is fa's mixing partner fb (2·fa − fb = fc)", () => {
+		// fb at 2·fa − fc mixes with fa onto the file; its same-audio twin is fb itself.
+		const fa = FC + 600_000
+		const fb = 2 * fa - FC
+		const ev = intermodEvidenceOf(
+			file,
+			[span(fa), span(fb, { peakDbfs: -40, snrDb: 20 })],
+			onRaster,
+		)!
+		expect(ev.rule).toBe("symmetric")
+		expect(intermodTiedTo(ev, fb)).toBe(true)
+		expect(intermodTiedTo(ev, fa)).toBe(true)
+	})
+
+	it("roots are span median centres: a parent drifting 6 kHz at its tail still ties its settled twin", () => {
+		const f1 = FC + 60_000
+		const f2 = FC + 120_000
+		// f1's latest snapshot is 6 kHz up (past the 4 kHz tolerance), its median at f1.
+		const ev = intermodEvidenceOf(
+			file,
+			[span(f1 + 6_000, { medianHz: f1 }), span(f2)],
+			onRaster,
+		)
+		expect(ev).toEqual({
+			rule: "2f1-f2",
+			parents: [{ hz: f1 }, { hz: f2 }],
+			roots: [f1, f2],
+			tolHz: 4_000,
+		})
+		expect(intermodTiedTo(ev!, f1)).toBe(true)
+		// Judged by its latest snapshot the pair would not even land on the file.
+		expect(
+			intermodEvidenceOf(file, [span(f1 + 6_000), span(f2)], onRaster),
+		).toBeNull()
 	})
 
 	it(`intermodTiedTo: within tolHz of a root ties, 1 Hz past does not`, () => {
