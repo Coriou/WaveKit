@@ -32,6 +32,7 @@ import {
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
+import { RECORDING_FACTS_FILE } from "../../../../src/core/scanner/store/recording-facts.js"
 import type { RecordingBinding } from "../../../../src/core/scanner/store/recording-operation.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
@@ -186,8 +187,13 @@ describe("analog inventory without store scans", () => {
 		reads.length = 0
 		const receipt = await life.record()
 		expect(receipt.outcome).toBe("finalized")
-		// Only the new operation's own intent.json, read back by its settlement.
-		expect(reads).toEqual([join(ops(root), receipt.operationId, "intent.json")])
+		// Only the new operation's own files, read back by its settlement: intent.json, and its
+		// receipt and facts sidecar for its admission eviction class (one bounded read each).
+		expect(reads).toEqual(
+			["intent.json", "receipt.json", RECORDING_FACTS_FILE].map(name =>
+				join(ops(root), receipt.operationId, name),
+			),
+		)
 	})
 
 	it("an audit fails closed on a foreign file in an operation folder, as the full scan does", async () => {

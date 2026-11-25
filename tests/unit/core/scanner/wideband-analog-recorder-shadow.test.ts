@@ -38,8 +38,11 @@ const SHADOW: Partial<WidebandTrackInput> = {
 	shadowAllowed: true,
 }
 
-/** Expected frames of a whole file: pre-roll 300 ms + transmission + hang 2000 ms. */
-const wholeFrames = (txMs: number): number => 8 * (300 + txMs + 2000)
+/**
+ * Expected frames of a whole file: pre-roll + transmission + hang 2000 ms. The pre-roll (300 ms) is
+ * static before the carrier, trimmed to 150 ms before the onset (onset-trim.ts).
+ */
+const wholeFrames = (txMs: number): number => 8 * (150 + txMs + 2000)
 
 /**
  * One transmission reported every chunk as a shadow; snapshots from `classAtS` on (seconds

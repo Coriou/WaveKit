@@ -56,6 +56,7 @@
  * it writes).
  */
 import { Fft } from "../../spectrum/fft.js"
+import { QuietingMeter, type QuietingReading } from "./quieting.js"
 import {
 	COPY_MAX_FRAMES,
 	COPY_MAX_ZEROS,
@@ -310,13 +311,24 @@ export class SpeechContentMeter {
 	 */
 	private readonly env: Uint8Array | null
 	private readonly voiced: Uint8Array | null
+	/** The carrier quieting measure (quieting.ts), only when asked for (`quieting: true`). */
+	private readonly quiet: QuietingMeter | null
 
-	constructor(options?: { readonly envelope?: boolean }) {
+	constructor(options?: {
+		readonly envelope?: boolean
+		readonly quieting?: boolean
+	}) {
 		const capture = options?.envelope === true
 		this.env = capture ? new Uint8Array(COPY_MAX_FRAMES) : null
 		this.voiced = capture
 			? new Uint8Array(Math.ceil(COPY_MAX_FRAMES / 8))
 			: null
+		this.quiet = options?.quieting === true ? new QuietingMeter() : null
+	}
+
+	/** The carrier quieting reading so far (quieting.ts); null when not asked for or nothing heard. */
+	quieting(): QuietingReading | null {
+		return this.quiet?.reading() ?? null
 	}
 
 	/** The copy fingerprint's envelope so far (views, not copies); null when not captured. */
@@ -335,8 +347,10 @@ export class SpeechContentMeter {
 	}
 
 	push(pcm: Int16Array): void {
+		const quiet = this.quiet
 		for (let i = 0; i < pcm.length; i++) {
 			this.frame[this.fill++] = pcm[i]!
+			quiet?.sample(pcm[i]!)
 			if (this.fill === SPEECH_FRAME_SAMPLES) {
 				this.fill = 0
 				this.measureFrame()
@@ -390,8 +404,9 @@ export class SpeechContentMeter {
 			(this.heard - SPEECH_WINDOW_FRAMES) % SPEECH_WINDOW_HOP === 0
 		)
 			this.measureWindow()
-		if (this.frameZeroHeavy) return
 		const pitched = peak >= SPEECH_PERIODIC_MIN_CORRELATION
+		this.quiet?.frame(pitched, this.frameZeroHeavy)
+		if (this.frameZeroHeavy) return
 		if (pitched) this.periodic++
 		const slot = this.levelHeard % SPEECH_WINDOW_FRAMES
 		this.levelRing[slot] = this.frameLevel
@@ -660,8 +675,11 @@ export function speechReadings(c: SpeechContent | null): {
  * pitched or peaked like syllables and the loudest window is at full-deviation level, data bursts
  * on a quiet carrier whose quieting the first branch reads as voice. The rule applies under any
  * prior strength, a roll-over file (past the file length limit) included, except to a tone-classed
- * file (its own CTCSS tone or classed by it), a file shared with a joined voice of another discovery
- * and any file of a channel where analog voice is proven (recording-verdict.ts analogVoiceHeard).
+ * file (its own CTCSS tone or classed by it) and a file shared with a joined voice of another
+ * discovery; on a channel where analog voice is proven (recording-verdict.ts analogVoiceHeard) only
+ * to a file whose periodic share is also under SPEECH_NOISE_MAX_PERIODIC_SHARE, a few of them kept
+ * as evidence (noise-evidence.ts), and there only a file of 47 to 93 level frames is judged too
+ * (ADMISSION_PROVEN_VOICE).
  */
 export interface AdmissionThresholds {
 	/** Level frames needed to judge at all; fewer: not measured (null, kept). */
@@ -683,6 +701,17 @@ export interface AdmissionThresholds {
 }
 /** 94 level frames × 32 ms = 3.008 s: one whole level window. */
 export const ADMISSION_MIN_FRAMES = SPEECH_WINDOW_FRAMES
+/**
+ * 47 level frames × 32 ms = 1.504 s: half a level window (SPEECH_WINDOW_HOP), the floor of
+ * ADMISSION_PROVEN_VOICE only. On a channel with proven analog voice (recording-verdict.ts
+ * analogVoiceHeard, where the spur-like noise emitter lives) a file of 47 to 93 frames is judged on
+ * its one partial window (SpeechContent's partial spread, p10 and burst; the data-buzz branch
+ * reads whole windows only, so such a file can match the `noise` branch alone), and then also
+ * needs a periodic share under SPEECH_NOISE_MAX_PERIODIC_SHARE. Elsewhere a file under
+ * ADMISSION_MIN_FRAMES stays unmeasured (kept): weak NFM voice of 1.5 to 3 s near the FM threshold
+ * can read as one flat partial window, and nothing else there would tell it from noise.
+ */
+export const ADMISSION_PROVEN_VOICE_MIN_FRAMES = SPEECH_WINDOW_HOP
 /**
  * 10 dB: synthetic open-squelch noise and 4FSK/GMSK-like buzz spread a few dB per window (a frame's
  * 118 bins hold about 236 degrees of freedom, 4.34·√(2/236) ≈ 0.4 dB rms); speech with quieting
@@ -737,6 +766,15 @@ export const ADMISSION_DEFAULTS: AdmissionThresholds = Object.freeze({
 	maxLoudPitchShare: ADMISSION_MAX_LOUD_PITCH_SHARE,
 	maxTopSpreadDb: ADMISSION_MAX_TOP_SPREAD_DB,
 	minLoudLevelDbfs: ADMISSION_MIN_LOUD_LEVEL_DBFS,
+})
+/**
+ * The admission bounds on a channel with proven analog voice: ADMISSION_DEFAULTS with the
+ * partial-window floor (ADMISSION_PROVEN_VOICE_MIN_FRAMES, 47 frames). Read by finishPath only
+ * there (FinishInput.admission.partialNoise); a file of 94 frames or more reads the same under both.
+ */
+export const ADMISSION_PROVEN_VOICE: AdmissionThresholds = Object.freeze({
+	...ADMISSION_DEFAULTS,
+	minFrames: ADMISSION_PROVEN_VOICE_MIN_FRAMES,
 })
 
 /** Which admission branch measured a file as noise (admissionBranch). */

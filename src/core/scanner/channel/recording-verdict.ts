@@ -30,8 +30,16 @@ import {
 	notAnalogVoiceProtocol,
 	type DecodedLabel,
 } from "./voice-veto.js"
-import { admissionBranch, type SpeechContent } from "./speech-content.js"
+import {
+	ADMISSION_DEFAULTS,
+	ADMISSION_PROVEN_VOICE,
+	admissionBranch,
+	SPEECH_NOISE_MAX_PERIODIC_SHARE,
+	type AdmissionThresholds,
+	type SpeechContent,
+} from "./speech-content.js"
 import type { NoiseQuarantineFacts } from "../store/noise-quarantine.js"
+import { DISCOVERY_NOISE_GATE } from "./noise-evidence.js"
 
 /** Why a snapshot bars a recording (encrypted, opted out, unclean track), or null when it does not. */
 export function barredSnapshot(
@@ -1089,8 +1097,9 @@ export type FinishVerdict =
  * keeps, so an audit can tell each file's path): `no-voice` (discarded by noVoiceChannel),
  * `own-tone`, `late-non-voice`, `joined-decode` (a decode of its own signal, another
  * transmission's joined voice on the air), `known-non-voice`, `prior-none` (kept at once), `content` (discarded by the content
- * check), `noise` (discarded by the recording admission rule), `held`, `final` (kept at the end of
- * its grace or with no room to hold).
+ * check), `noise` (discarded by the recording admission rule), `noise-evidence` (a noise file of a
+ * channel with proven analog voice kept by its discovery's evidence budget, noise-evidence.ts),
+ * `held`, `final` (kept at the end of its grace or with no room to hold).
  */
 export type FinishReason =
 	| "no-voice"
@@ -1101,6 +1110,7 @@ export type FinishReason =
 	| "prior-none"
 	| "content"
 	| "noise"
+	| "noise-evidence"
 	| "held"
 	| "final"
 
@@ -1119,6 +1129,15 @@ export interface FinishPath {
 	readonly noVoice: boolean | null
 	readonly joinedOther: boolean
 	readonly speechHeard: boolean | null
+	/**
+	 * The file counts in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate,
+	 * noted once per file by the recorder): the proven-channel noise rule judged it (finishPath
+	 * reached it: a channel with proven analog voice, admission noise, no joined voice of another
+	 * transmission, no decoded tone, noiseRuleJudges: a whole-file share under 0.10 and not
+	 * voice-like, no quieted run and no quieted share at or over 0.10), kept or discarded, gated
+	 * or not. False for every other path.
+	 */
+	readonly noiseCounted: boolean
 }
 
 /** finishVerdict's input (see there). */
@@ -1139,12 +1158,52 @@ export interface FinishInput {
 	 * The recording admission rule (scanner.admission): `enabled` its setting, `noise` the file's
 	 * speech-content.ts admissionNoise (null: not measured, or a file classed by its own tone: kept).
 	 * Its own field, not a speech reading: it applies to a classed session's roll-over file too.
-	 * Absent: not applied.
+	 * `periodicShare`: the file's SpeechContent.periodicShare, read only on a channel with proven
+	 * analog voice (absent or null there: the file is kept as before). `partialNoise`: admissionNoise
+	 * under ADMISSION_PROVEN_VOICE (its 47-frame partial-window floor), read in place of `noise`
+	 * only on a channel with proven analog voice (absent: `noise` is read there too). Absent: not
+	 * applied.
 	 */
 	readonly admission?: {
 		readonly enabled: boolean
 		readonly noise: boolean | null
+		readonly periodicShare?: number | null
+		readonly partialNoise?: boolean | null
+		/**
+		 * The file's carrier quieting (quieting.ts QuietingReading), read only on a channel with
+		 * proven analog voice: a file with a `quietedRun` (300 ms quieted) or a
+		 * `quietedPeriodicShare` (null: under 16 quieted frames) of 0.10 or more is never judged as
+		 * noise there, whatever the gate (noiseRuleJudges). Absent or null: the whole-file
+		 * `periodicShare` decides.
+		 */
+		readonly quieting?: {
+			readonly quietedPeriodicShare: number | null
+			readonly quietedRun: boolean
+		} | null
 	}
+	/**
+	 * A CTCSS or DCS tone was decoded over the file (recording-facts.ts toneFactOf: a tone object):
+	 * it is never discarded as noise. Absent: none.
+	 */
+	readonly decodedTone?: boolean
+	/**
+	 * The file's discovery has room in its noise evidence budget (noise-evidence.ts
+	 * NoiseEvidenceBudget.room): a noise file of a channel with proven analog voice is kept as
+	 * `noise-evidence` instead of discarded. Absent: no room.
+	 */
+	readonly noiseEvidence?: boolean
+	/**
+	 * Noise-read files of the file's discovery in the rolling hour before it (noise-evidence.ts
+	 * DiscoveryNoiseRate.before): the proven-channel noise discard applies only at or over
+	 * DISCOVERY_NOISE_GATE. Absent: 0 (never gated).
+	 */
+	readonly discoveryNoiseReads?: number
+	/**
+	 * The discovery's gate is latched closed (noise-evidence.ts DiscoveryNoiseRate.latched: it
+	 * reached DISCOVERY_NOISE_GATE under DISCOVERY_NOISE_LATCH_MS, 24 h, ago): the discard applies
+	 * whatever `discoveryNoiseReads`. Absent: false.
+	 */
+	readonly discoveryNoiseLatched?: boolean
 	readonly final: boolean
 	readonly now: number
 }
@@ -1170,7 +1229,19 @@ export interface FinishInput {
  * then, whatever the prior's strength (so a weak prior never holds noise), a file the recording
  * admission rule measures as noise (`admission`: enabled, `noise` true; roll-over files included)
  * that no joined voice of another transmission shares (joinedOtherVoice) is discarded
- * (`discarded:noise`);
+ * (`discarded:noise`), never a file with a decoded CTCSS or DCS tone (`decodedTone`); on a
+ * channel with proven analog voice (analogVoiceHeard) only when its discovery made
+ * DISCOVERY_NOISE_GATE (15) or more noise-read files in the hour before it
+ * (`discoveryNoiseReads`; under it the file is kept as before the rule), or its gate is latched
+ * closed (`discoveryNoiseLatched`: in memory, see DISCOVERY_NOISE_LATCH_MS), and its whole-file
+ * periodic share is under SPEECH_NOISE_MAX_PERIODIC_SHARE (0.10: measured, the spur-like
+ * emitter's noise files at most 0.099, real voice at least 0.14) and it is not voice-like (no
+ * quieted run, no quieted share, 16 or more quieted frames, at or over 0.10: noiseRuleJudges; any
+ * other file, or no whole-file share, falls through as before the rule, `prior-none`), and
+ * then kept as `noise-evidence` while its discovery's
+ * evidence budget has room (`noiseEvidence`, at most NOISE_EVIDENCE_PER_HOUR per rolling hour);
+ * there only, a file of 47 to 93 level frames is judged too (`partialNoise`, ADMISSION_PROVEN_VOICE),
+ * elsewhere it stays unmeasured (kept);
  * a classed session's roll-over file (`rollOver`: it continues a voiced over) gets that speech
  * check only, and only on a no-voice channel (elsewhere its readings are ignored: kept as its
  * session); where the content check applies (contentChecked: a
@@ -1209,6 +1280,8 @@ export function finishPath(input: FinishInput): FinishPath {
 	const speechHeard =
 		rolled && noVoice !== true ? null : (input.speechHeard ?? null)
 	const notSpeech = !rolled && input.notSpeech
+	// Set where the proven-channel noise rule judges the file (noiseCounted); every later path keeps it.
+	let noiseCounted = false
 	const path = (verdict: FinishVerdict, reason: FinishReason): FinishPath => ({
 		verdict,
 		reason,
@@ -1217,6 +1290,7 @@ export function finishPath(input: FinishInput): FinishPath {
 		noVoice,
 		joinedOther,
 		speechHeard,
+		noiseCounted,
 	})
 	if (input.ownTone) return path("finish", "own-tone")
 	if (input.decodedOwn)
@@ -1231,14 +1305,43 @@ export function finishPath(input: FinishInput): FinishPath {
 		!joinedOtherKnownVoice(input.prior, input.joinedVoice, input.joinedVoiceIds)
 	)
 		return path("discarded:not-speech", "no-voice")
+	const admission = input.admission
+	const partial =
+		admission?.partialNoise === undefined
+			? (admission?.noise ?? null)
+			: admission.partialNoise
 	if (
-		input.admission?.enabled === true &&
-		input.admission.noise === true &&
+		admission?.enabled === true &&
+		(admission.noise === true || partial === true) &&
 		!joinedOther &&
-		// A channel with proven analog voice keeps weak speech the noise measure cannot tell apart.
-		(input.prior === null || !analogVoiceHeard(input.prior))
-	)
-		return path("discarded:noise", "noise")
+		// A decoded CTCSS or DCS tone is a radio keyed on the channel: never noise.
+		input.decodedTone !== true
+	) {
+		// analogVoiceHeard walks cached proofs: asked only for a file read as noise.
+		const proven = input.prior !== null && analogVoiceHeard(input.prior)
+		if (!proven) {
+			// The whole-window floor (94 frames) only: a shorter file is never measured here.
+			if (admission.noise === true) return path("discarded:noise", "noise")
+		} else if (noiseRuleJudges(admission, false)) {
+			// Counted kept or discarded (a voice-like file, noiseRateCounts, is never judged).
+			noiseCounted = true
+			// A channel with proven analog voice: static and a weak over read the same (equal
+			// speech readings, the same pitch), so the rule applies only to a discovery that makes
+			// noise at an emitter's rate (DISCOVERY_NOISE_GATE, 15 an hour: the busiest voice
+			// discovery of the corpus at most 9, the emitter at least 20), or that reached it under
+			// 24 h ago (the latch: the warm-up once per process start); otherwise every file is kept
+			// as before the rule. A file with a quieted run or a quieted share of 0.10 or more is
+			// never judged (noiseRuleJudges), whatever the gate: it is kept as before the rule.
+			// Files of 47 to 93 frames are judged on their partial window.
+			if (
+				(input.discoveryNoiseReads ?? 0) >= DISCOVERY_NOISE_GATE ||
+				input.discoveryNoiseLatched === true
+			)
+				return input.noiseEvidence === true
+					? path("finish", "noise-evidence")
+					: path("discarded:noise", "noise")
+		}
+	}
 	if (strength === "none") return path("finish", "prior-none")
 	if (
 		notSpeech &&
@@ -1249,6 +1352,71 @@ export function finishPath(input: FinishInput): FinishPath {
 	)
 		return path("discarded:not-speech", "content")
 	return input.final ? path("finish", "final") : path("hold", "held")
+}
+
+/**
+ * Whether the proven-channel noise rule judges a file (finishPath), whatever its discovery's
+ * rate: the admission is enabled and reads noise (its partial-window `partialNoise` when given,
+ * else `noise`), no CTCSS or DCS tone was decoded over it (`decodedTone`), its whole-file
+ * periodic share is measured and under SPEECH_NOISE_MAX_PERIODIC_SHARE (0.10), and it does not
+ * read voice-like (noiseRateCounts: no quieted run, and a quieted share under 0.10 or none, under
+ * 16 quieted frames). Every other file is never judged: never discarded as noise, never spends the
+ * evidence budget, never counted, whatever the gate (it falls through as before the rule). Where
+ * finishPath reaches the rule (a proven-voice channel, no joined voice of another transmission),
+ * a judged file counts in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate,
+ * FinishPath.noiseCounted), kept or discarded.
+ */
+export function noiseRuleJudges(
+	admission: FinishInput["admission"],
+	decodedTone: boolean,
+): boolean {
+	if (admission?.enabled !== true || decodedTone) return false
+	const partial =
+		admission.partialNoise === undefined
+			? admission.noise
+			: admission.partialNoise
+	if (partial !== true) return false
+	const whole = admission.periodicShare
+	if (
+		whole === null ||
+		whole === undefined ||
+		!(whole < SPEECH_NOISE_MAX_PERIODIC_SHARE)
+	)
+		return false
+	// A voice-like file (a quieted run, or a quieted share at or over 0.10) is never judged.
+	return noiseRateCounts(admission)
+}
+
+/**
+ * Whether a file does not read voice-like (noiseRuleJudges requires it): no quieted run (300 ms
+ * quieted, quieting.ts) and a quieted periodic share under SPEECH_NOISE_MAX_PERIODIC_SHARE (0.10)
+ * or none (no quieting reading, or under 16 quieted frames). A voice-like file is neither judged
+ * nor counted in its discovery's noise-read rate (noise-evidence.ts DiscoveryNoiseRate;
+ * FinishPath.noiseCounted), so a busy voice channel's weak overs never push it to the gate
+ * (replay of 2026-11-25: the busiest voice discovery's counted reads 104 → 51 over the day) and
+ * are never discarded as noise on a gated one.
+ */
+export function noiseRateCounts(admission: FinishInput["admission"]): boolean {
+	const q = admission?.quieting
+	if (q === null || q === undefined) return true
+	if (q.quietedRun) return false
+	const share = q.quietedPeriodicShare
+	return share === null || share < SPEECH_NOISE_MAX_PERIODIC_SHARE
+}
+
+/**
+ * The noise-rate fields of a file's kept or noise-discard log line: its discovery's noise-read
+ * count before it (`discoveryNoiseReads`, DiscoveryNoiseRate.before; null: not read) and whether
+ * its gate was latched closed then (`latched`). Numbers and booleans only.
+ */
+export function noiseRateLog(file: {
+	readonly noiseReadsBefore: number | null
+	readonly noiseLatchedBefore: boolean
+}): { discoveryNoiseReads: number | null; latched: boolean } {
+	return {
+		discoveryNoiseReads: file.noiseReadsBefore,
+		latched: file.noiseLatchedBefore,
+	}
 }
 
 /**
@@ -1302,9 +1470,20 @@ export function noiseLog(
 		frequencyHz: Math.round(session.targetHz),
 		reason: path.reason,
 		strength: path.strength,
-		branch: admissionBranch(c),
+		branch: admissionBranch(c, branchBounds(path)),
 		...admissionNumbers(c),
 	}
+}
+
+/**
+ * The bounds a file's admission branch is read with: ADMISSION_PROVEN_VOICE for a file the noise
+ * rule took (`noise`, `noise-evidence`: only a channel with proven analog voice judges a file
+ * under 94 frames, and a longer one reads the same under both), ADMISSION_DEFAULTS otherwise.
+ */
+function branchBounds(path: FinishPath): AdmissionThresholds {
+	return path.reason === "noise" || path.reason === "noise-evidence"
+		? ADMISSION_PROVEN_VOICE
+		: ADMISSION_DEFAULTS
 }
 
 /** The admission rule's measured numbers of a noise file, rounded (noiseLog, noiseFacts). */
@@ -1343,7 +1522,7 @@ export function noiseFacts(
 	c: SpeechContent,
 	session: { readonly targetHz: number },
 ): NoiseQuarantineFacts {
-	const branch = admissionBranch(c)
+	const branch = admissionBranch(c, branchBounds(path))
 	return {
 		frequencyHz: Number.isFinite(session.targetHz)
 			? Math.round(session.targetHz)

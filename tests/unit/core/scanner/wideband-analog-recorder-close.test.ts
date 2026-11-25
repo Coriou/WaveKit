@@ -149,8 +149,9 @@ describe("WidebandAnalogRecorder retune before the close", () => {
 			expect(h.ops).toHaveLength(1)
 			expect(h.ops[0]!.outcome).toBe("finalized")
 			expect(h.ops[0]!.cut).toBe("epoch-changed")
-			// Pre-roll 300 ms + 3 s of transmission, ended at the retune.
-			expect(Math.abs(h.ops[0]!.frames - 8 * 3_300)).toBeLessThanOrEqual(8 * 60)
+			// Pre-roll 300 ms + 3 s of transmission, ended at the retune, less the onset trim: the
+			// pre-roll is open-squelch static before the carrier keys, cut to its last 150 ms.
+			expect(Math.abs(h.ops[0]!.frames - 8 * 3_150)).toBeLessThanOrEqual(8 * 60)
 			expect(h.engine.tapCount).toBe(0)
 		}
 	}, 120_000)

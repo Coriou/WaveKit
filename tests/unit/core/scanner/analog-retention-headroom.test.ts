@@ -15,6 +15,7 @@ import {
 	mkdtemp,
 	realpath,
 	rm,
+	unlink,
 	utimes,
 	writeFile,
 } from "node:fs/promises"
@@ -37,6 +38,7 @@ import {
 	isStorageBytesRefusal,
 	isStorageCountRefusal,
 	type AnalogMetadataAdapter,
+	type AnalogOperationIo,
 	type LegacyRetentionFile,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
@@ -131,7 +133,12 @@ interface Stored {
 }
 
 async function harness(
-	opts: { protectedName?: () => string | null; pad?: number } = {},
+	opts: {
+		protectedName?: () => string | null
+		pad?: number
+		serialise?: <T>(id: string, job: () => Promise<T>) => Promise<T>
+		io?: AnalogOperationIo
+	} = {},
 ) {
 	const pad = opts.pad ?? PAD
 	const root = await tempRoot()
@@ -149,11 +156,12 @@ async function harness(
 		root,
 		adapter: adapterOf(store),
 		admits: () => true,
-		serialise: async (_id, job) => job(),
+		serialise: opts.serialise ?? (async (_id, job) => job()),
 		legacyBytes: async () => legacy.bytes,
 		limits: () => ({ maxBytes: limit.maxBytes, minFreeBytes: 0 }),
 		freeBytes: async () => 1e12,
 		...(opts.protectedName ? { protection } : {}),
+		...(opts.io ? { io: opts.io } : {}),
 	})
 	await ops.recover()
 	const begin = () =>
@@ -1510,6 +1518,205 @@ describe("a shortfall a pass's own tail created is not 'nothing removable'", () 
 		expect(next.again).toBeUndefined()
 		expect(t.ev.recordingsQuotaExceeded).not.toBeNull()
 		expect(t.warned()).toHaveLength(1)
+		// B2: nothing changed since the exceeded pass, so no early pass while exceeded...
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
+		// ...until the inventory changes (a finalized file): the state stays until the next pass.
+		t.ev.setCaps({
+			maxRecordingsMb: 2048,
+			maxEvidenceMb: 20,
+			maxAgeDays: 30,
+			minFreeDiskMb: 0,
+		})
+		await t.record(Date.now() - 30_000)
+		expect(t.ev.recordingsQuotaExceeded).not.toBeNull()
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(true)
+		await t.ev.retention(keep)
+		expect(t.ev.recordingsQuotaExceeded).toBeNull()
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
 		await t.ev.stopAnalog()
 	}, 120_000)
+
+	it("B2: refused, cancelled and capacity-refused operations never bump the epoch; a finalized file does", async () => {
+		const t = await tailHarness()
+		await t.fill()
+		// Every file is the kept discovery's: nothing removable, and one more admission does not fit.
+		const keep = new Set([t.first])
+		t.ev.setCaps({
+			maxRecordingsMb: (t.analog.managedBytes! + RESERVATION - 1) / MIB,
+			maxEvidenceMb: 20,
+			maxAgeDays: 30,
+			minFreeDiskMb: 0,
+		})
+		await t.ev.retention(keep)
+		expect(t.ev.recordingsQuotaExceeded).not.toBeNull()
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
+		const epoch = t.analog.inventoryEpoch
+		// The real refusal path, repeated (each would have asked a full pass every 30 s before).
+		for (let i = 0; i < 3; i++) {
+			const refused = t.begin()
+			await expect(refused.ready).rejects.toBeDefined()
+			const receipt = await refused.settled
+			expect(receipt.outcome).not.toBe("finalized")
+			expect(t.analog.inventoryEpoch).toBe(epoch)
+			expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
+		}
+		// An audit that finds everything as it was does not count either.
+		await t.analog.audit()
+		expect(t.analog.inventoryEpoch).toBe(epoch)
+		// Room again: an admitted then cancelled operation does not count...
+		t.ev.setCaps({
+			maxRecordingsMb: 2048,
+			maxEvidenceMb: 20,
+			maxAgeDays: 30,
+			minFreeDiskMb: 0,
+		})
+		const cancelled = t.begin()
+		await cancelled.ready
+		cancelled.cancel()
+		expect((await cancelled.settled).outcome).not.toBe("finalized")
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
+		// ...nor does the capacity refusal (the active limit), never admitted at all.
+		const active = [t.begin(t.second, "o2"), t.begin(t.second, "o2")]
+		await Promise.allSettled(active.map(op => op.ready))
+		const epochActive = t.analog.inventoryEpoch
+		const over = t.begin(t.second, "o2")
+		await expect(over.ready).rejects.toBeDefined()
+		expect((await over.settled).outcome).not.toBe("finalized")
+		expect(t.analog.inventoryEpoch).toBe(epochActive)
+		for (const op of active) op.cancel()
+		await Promise.all(active.map(op => op.settled))
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
+		// A finalized file counts.
+		await t.record(Date.now() - 30_000)
+		expect(t.analog.inventoryEpoch).toBeGreaterThan(epoch)
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(true)
+		await t.ev.stopAnalog()
+	}, 120_000)
+
+	it("an eviction's empty-folder removal skips a discovery with an active operation", async () => {
+		const t = await tailHarness()
+		const internals = t.ev as unknown as {
+			afterEviction(artifacts: readonly string[]): Promise<void>
+		}
+		const root = (t.ev as unknown as { root: string }).root
+		const folder = join(root, "recordings", "analog", t.second)
+		// Admitted and active: its (still empty) final folder exists.
+		const op = t.begin(t.second, "o2")
+		await op.ready
+		expect(existsSync(folder)).toBe(true)
+		const gone = `recordings/analog/${t.second}/analog-${randomUUID()}.wav`
+		await internals.afterEviction([gone])
+		// An active finalize may link into it: never rmdir'd while protected.
+		expect(existsSync(folder)).toBe(true)
+		op.cancel()
+		await op.settled
+		await internals.afterEviction([gone])
+		expect(existsSync(folder)).toBe(false)
+		await t.ev.stopAnalog()
+	}, 120_000)
+})
+
+/** A per-id promise chain, as EvidenceStore.serialise. */
+function serialiser() {
+	const tails = new Map<string, Promise<unknown>>()
+	return async <T>(id: string, job: () => Promise<T>): Promise<T> => {
+		const run = (tails.get(id) ?? Promise.resolve()).then(job, job)
+		tails.set(
+			id,
+			run.then(
+				() => undefined,
+				() => undefined,
+			),
+		)
+		return run
+	}
+}
+
+describe("an active operation holds only its own files (B1)", () => {
+	// Regression: the hold was discovery-wide, so an always-active noise discovery kept every
+	// older file of it; retention then removed the newest real recordings of other discoveries
+	// and a voiced admission was refused.
+	it("a cap pass removes the older files of a discovery with an active operation, never the operation's own", async () => {
+		const h = await harness()
+		const files = await shuffledFour(h)
+		const active = h.begin()
+		await active.ready
+		await active.push(new Int16Array(16_000))
+		// One byte past the trigger, counting the active reservation (quotaShortfall does).
+		h.limit.maxBytes += (h.shortfall() ?? 0) - 1
+		expect(h.shortfall()).toBe(1)
+		const deleted = await h.retain()
+		expect(deleted.length).toBeGreaterThan(0)
+		expect(deleted).toEqual(oldestFirst(files).slice(0, deleted.length))
+		const receipt = await active.finish()
+		expect(receipt.outcome).toBe("finalized")
+		expect(existsSync(join(h.root, receipt.artifact!))).toBe(true)
+		await h.ops.stop()
+	}, 60_000)
+
+	it("removableNow counts the active discovery's finalized files (so the quota is not entered as exceeded: `again`)", async () => {
+		const h = await harness()
+		await shuffledFour(h)
+		const active = h.begin()
+		await active.ready
+		// A pass with room tries nothing: all four are left removable now.
+		expect(await h.retain()).toEqual([])
+		expect(h.ops.removableNow()).toBe(4)
+		await active.finish()
+		// The finalized operation is removable too once settled.
+		expect(h.ops.removableNow()).toBe(5)
+		await h.ops.stop()
+	}, 60_000)
+
+	it("a sibling retire queued while the active operation finishes (gate at 'prepared') leaves its commit current; both settle", async () => {
+		let gateId: string | null = null
+		let reached: () => void = () => undefined
+		const atGate = new Promise<void>(done => {
+			reached = done
+		})
+		let release: () => void = () => undefined
+		const gate = new Promise<void>(done => {
+			release = done
+		})
+		const io: AnalogOperationIo = {
+			unlink: path => unlink(path),
+			checkpoint: async (name, id) => {
+				if (name === "prepared" && id === gateId) {
+					reached()
+					await gate
+				}
+			},
+		}
+		const h = await harness({ serialise: serialiser(), io })
+		const files = await shuffledFour(h)
+		const active = h.begin()
+		await active.ready
+		await active.push(new Int16Array(16_000))
+		gateId = active.operationId
+		const finishing = active.finish()
+		await atGate
+		// The pass's retires queue behind the finish's turn of the same discovery.
+		h.limit.maxBytes += (h.shortfall() ?? 0) - 1
+		const pass = h.retain()
+		release()
+		const [receipt, deleted] = await Promise.all([finishing, pass])
+		expect(receipt.outcome).toBe("finalized")
+		expect(existsSync(join(h.root, receipt.artifact!))).toBe(true)
+		expect(deleted.length).toBeGreaterThan(0)
+		expect(deleted).toEqual(oldestFirst(files).slice(0, deleted.length))
+		for (const artifact of deleted)
+			expect(existsSync(join(h.root, artifact))).toBe(false)
+		await h.ops.stop()
+	}, 60_000)
+
+	it("hasCleanup still holds a discovery with an active operation (deletion waits for it)", async () => {
+		const h = await harness()
+		const active = h.begin()
+		await active.ready
+		await expect(h.ops.hasCleanup(h.discoveryId)).resolves.toBe(true)
+		active.cancel()
+		await active.settled
+		await expect(h.ops.hasCleanup(h.discoveryId)).resolves.toBe(false)
+		await h.ops.stop()
+	}, 60_000)
 })

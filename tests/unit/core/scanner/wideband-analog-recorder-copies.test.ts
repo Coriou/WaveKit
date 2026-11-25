@@ -8,6 +8,7 @@
  * kept gets no fingerprint. The fake engine, synthetic NFM and made-up frequencies of
  * wideband-recorder-harness.ts.
  */
+import { Writable } from "node:stream"
 import pino from "pino"
 import { describe, expect, it } from "vitest"
 import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
@@ -40,6 +41,30 @@ import {
 } from "./wideband-recorder-harness.js"
 
 type Harness = ReturnType<typeof harness>
+
+/**
+ * A logger whose "Analog file kept" lines are read back: their `headTrimmedMs` is the static the
+ * head trim cut (onset-trim.ts). The fingerprint's envelope is the speech meter's, which hears the
+ * untrimmed audio: its frames are the written frames plus the cut ones.
+ */
+function keptLog() {
+	const trims: number[] = []
+	const sink = new Writable({
+		write(chunk: Buffer, _enc, done) {
+			for (const line of chunk.toString().split("\n")) {
+				if (line.trim() === "") continue
+				const l = JSON.parse(line) as Record<string, unknown>
+				if (l["msg"] === "Analog file kept")
+					trims.push(Number(l["headTrimmedMs"] ?? 0))
+			}
+			done()
+		},
+	})
+	return { trims, logger: pino({ level: "info" }, sink) }
+}
+/** The frames of a fingerprint over `written` 8 kHz frames after a head trim of `trimmedMs`. */
+const heardFrames = (written: number, trimmedMs: number): number =>
+	Math.floor((written + (trimmedMs * 8_000) / 1000) / COPY_FRAME_SAMPLES)
 
 const FC = CENTRE + LOW_OFFSET
 /** Two strong made-up parents whose 2·f1 − f2 product lands on the file's frequency. */
@@ -131,7 +156,9 @@ async function overWithParents(
 describe("WidebandAnalogRecorder: copy detection", () => {
 	it("captures the intermod parents when the file ends: parents closed more than 10 s before the held keep still mark it", async () => {
 		const copies = fakeCopies()
+		const log = keptLog()
 		const h = harness({
+			logger: log.logger,
 			fs: LOW_FS,
 			offset: LOW_OFFSET,
 			source: { ctcssHz: null, syllables: true },
@@ -165,8 +192,10 @@ describe("WidebandAnalogRecorder: copy detection", () => {
 		expect(fp.snrDb).toBe(30)
 		expect(fp.samplesPerFrame).toBe((256 * LOW_FS) / 8_000)
 		expect(fp.frames).toBeGreaterThan(150)
-		// The fingerprint is read once the queue is flushed: every frame the file wrote is in it.
-		expect(fp.frames).toBe(Math.floor(h.ops[0]!.frames / COPY_FRAME_SAMPLES))
+		// The fingerprint is read once the queue is flushed: every frame the file wrote is in it,
+		// and the head its trim cut (the meter hears the untrimmed audio).
+		expect(log.trims).toHaveLength(1)
+		expect(fp.frames).toBe(heardFrames(h.ops[0]!.frames, log.trims[0]!))
 		const settled = await copies.kept[0]!.settled
 		expect(settled.outcome).toBe("finalized")
 	}, 120_000)
@@ -268,7 +297,9 @@ const voiceChannel: VoicePrior = {
 describe("WidebandAnalogRecorder: copy detection of own-audio classes", () => {
 	it("a ghost classed by its own speech (toneOnly) is fingerprinted, and marked a copy of the stronger root", async () => {
 		const copies = fakeCopies()
+		const log = keptLog()
 		const h = harness({
+			logger: log.logger,
 			fs: LOW_FS,
 			offset: LOW_OFFSET,
 			source: { syllables: true, ctcssHz: null },
@@ -299,7 +330,8 @@ describe("WidebandAnalogRecorder: copy detection of own-audio classes", () => {
 		expect(copies.kept).toHaveLength(1)
 		const ghost = copies.kept[0]!.fp
 		expect(ghost.raster).toBe("off")
-		expect(ghost.frames).toBe(Math.floor(h.ops[0]!.frames / COPY_FRAME_SAMPLES))
+		expect(log.trims).toHaveLength(1)
+		expect(ghost.frames).toBe(heardFrames(h.ops[0]!.frames, log.trims[0]!))
 		// The eligibility and evidence gates decide as for any analog file: against a stronger root
 		// carrying the same audio, the ghost is marked its copy.
 		const writes: { operationId: string; copy: CopyRecord | null }[] = []

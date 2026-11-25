@@ -269,12 +269,14 @@ describe("finishPath: the recording admission row", () => {
 	})
 
 	it("a reading neither branch matches carries no branch in its facts (null in the log)", () => {
+		// 46 level frames: under both admission floors (94, and 47 on a proven-voice channel, the
+		// bounds a noise path's branch is read with), so neither branch reads it.
 		const c: SpeechContent = {
 			frames: 50,
 			maxRangeDb: 3,
 			periodicShare: 0.01,
 			maxBurstFrames: 0,
-			levelFrames: 50,
+			levelFrames: 46,
 			maxWindowSpreadDb: 3,
 			minWindowP10Dbfs: -10,
 			maxLoudPitchShare: 0,

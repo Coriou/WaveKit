@@ -161,7 +161,9 @@ describe("WidebandAnalogRecorder ring backlog while a retune is held", () => {
 		expect(opA.cut).toBe("epoch-changed")
 		// No gap or silence: the old tuning's final samples were demodulated, not overwritten.
 		expect(opA.gaps).toBe(0)
-		const expected = Math.round(((at - fileStartA) * AUDIO) / LOW_FS)
+		// Less the onset trim: A's 300 ms pre-roll is static before its carrier keys, cut to its
+		// last 150 ms (1 200 frames).
+		const expected = Math.round(((at - fileStartA) * AUDIO) / LOW_FS) - 1_200
 		expect(opA.frames).toBeLessThanOrEqual(expected)
 		expect(opA.frames).toBeGreaterThanOrEqual(expected - 8 * 60)
 	}, 120_000)

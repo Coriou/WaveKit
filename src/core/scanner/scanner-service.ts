@@ -1711,6 +1711,11 @@ export class ScannerService extends EventEmitter {
 				logger: deps.logger,
 				now: this.now,
 				isDiscoveryLive: id => this.store.get(id) !== undefined,
+				// The keep retention reads (maintenance: operator.keep), live for admission eviction.
+				// An alias folder (a merged-away id) is its survivor's: kept when the survivor is.
+				isDiscoveryKept: id =>
+					this.store.get(this.store.aliasOwner(id) ?? id)?.operator?.keep ===
+					true,
 				aliases: {
 					aliasOwner: id => this.store.aliasOwner(id),
 					aliasesOf: id => this.store.aliasesOf(id),
@@ -1778,6 +1783,10 @@ export class ScannerService extends EventEmitter {
 				write: (operationId, copy) =>
 					this.evidence.writeCopy(operationId, copy),
 				logger: deps.logger,
+			})
+			// An analog admission's eviction removed files: the same as retention's `deleted`.
+			this.evidence.onRecordingsEvicted(artifacts => {
+				this.recordingsRemoved(artifacts)
 			})
 			this.evidence.onAnalogNotice(n => {
 				if (n.kind === "removed") copies.forget(n.operationId)
@@ -9770,11 +9779,15 @@ export class ScannerService extends EventEmitter {
 	/**
 	 * Brings the next maintenance pass (whose retention frees room oldest first) forward to the
 	 * next tick: at most once per EARLY_RETENTION_EVERY_MS (30 s), and not for a shortage the
-	 * last pass already left with nothing removable (bytes: the quota stayed exceeded; count: the
-	 * held operations alone fill the inventory); the regular 5 min cadence retries those.
+	 * last pass already left with nothing removable (bytes: the quota stayed exceeded and the
+	 * analog inventory has not changed since that pass, recordingsQuotaInventoryChanged; count:
+	 * the held operations alone fill the inventory); the regular 5 min cadence retries those.
 	 */
 	private requestRetentionSoon(short: AnalogRoomShort): void {
-		const bytes = short.bytes && this.evidence.recordingsQuotaExceeded === null
+		const bytes =
+			short.bytes &&
+			(this.evidence.recordingsQuotaExceeded === null ||
+				this.evidence.recordingsQuotaInventoryChanged)
 		const count = short.count && !this.evidence.operationsHeldFull
 		if (!bytes && !count) return
 		const now = this.now()
@@ -9852,17 +9865,7 @@ export class ScannerService extends EventEmitter {
 		// catalogue hears it here (folder ids only).
 		// Short of room with files the pass did not try still removable: another pass, soon.
 		if (retained?.again === true) this.retentionAgain()
-		if (retained !== null && retained.deleted.length > 0) {
-			const folderIds = recordingFolderIdsOf(retained.deleted)
-			if (folderIds.length > 0) this.emit("recordings-removed", folderIds)
-		}
-		// Ownership of recordings listed in other folders ends with their files.
-		if (!this.ownershipLost())
-			this.store.pruneHeldRecordings(
-				id => this.evidence.recordingFileExists(id),
-				// A folder the last listing did not find holds nothing: its overflow mark ends.
-				id => this.evidence.folders.holds(id),
-			)
+		this.recordingsRemoved(retained?.deleted ?? [])
 		await this.captures
 			.retention(s.storage.maxCapturesMb * 1024 * 1024)
 			.catch((err: unknown) =>
@@ -9880,6 +9883,24 @@ export class ScannerService extends EventEmitter {
 			this.log.warn({ err }, "Free disk check failed")
 			return this.disk
 		})
+	}
+
+	/**
+	 * Files retention or an analog admission's eviction removed (root-relative artifacts): the
+	 * recordings catalogue hears their folder ids, and ownership of recordings listed in other
+	 * folders ends with their files (pruneHeldRecordings; a folder the last listing did not find
+	 * holds nothing, so its overflow mark ends).
+	 */
+	private recordingsRemoved(deleted: readonly string[]): void {
+		if (deleted.length > 0) {
+			const folderIds = recordingFolderIdsOf(deleted)
+			if (folderIds.length > 0) this.emit("recordings-removed", folderIds)
+		}
+		if (!this.ownershipLost())
+			this.store.pruneHeldRecordings(
+				id => this.evidence.recordingFileExists(id),
+				id => this.evidence.folders.holds(id),
+			)
 	}
 
 	/**

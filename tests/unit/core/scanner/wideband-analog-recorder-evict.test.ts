@@ -142,9 +142,12 @@ describe("WidebandAnalogRecorder unclassed signals and slots", () => {
 		expect(voice.map(o => [o.cut, o.outcome])).toEqual([
 			["completed", "finalized"],
 		])
-		expect(
-			Math.abs(voice[0]!.frames - wholeFrames(28_000)),
-		).toBeLessThanOrEqual(8 * 30)
+		// The whole over; its pre-roll is static before the carrier keys, which the head trim
+		// (onset-trim.ts) may cut to 150 ms before the measured onset: at most the 300 ms pre-roll.
+		expect(voice[0]!.frames).toBeLessThanOrEqual(wholeFrames(28_000) + 8 * 30)
+		expect(voice[0]!.frames).toBeGreaterThanOrEqual(
+			wholeFrames(28_000) - 8 * 300 - 8 * 30,
+		)
 		// The shadows were never written.
 		expect(h.ops).toHaveLength(1)
 	}, 300_000)

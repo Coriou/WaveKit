@@ -604,7 +604,11 @@ two-reservation trigger; a pass removes while either the trigger holds or the ta
 free, so there it stops at two reservations under the cap. A cap under two reservations
 (3,872,856 B) keeps the trigger on even over an empty store, so every pass removes every
 removable recording; under one reservation (1 MiB, say) every analog recording is also refused. Between the
-two points nothing is removed. Kept, held and recent files are never removed for room. A store
+two points nothing is removed. Kept, held and recent files are never removed for room. An analog
+admission short of room removes up to 8 removable finished analog recordings itself (never other
+recordings; noise-like first, then other, then voice-like; none before the first retention pass
+after a start) and is refused only when none is left, one failed to go, 8 were not enough, or
+recordings in flight took the room it freed. A recording being written holds only its own files, not its discovery's older ones. A store
 without analog operations, or whose analog inventory is not ready yet (before recovery
 finishes), trims its other recordings only to the cap itself. Details:
 [SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings).

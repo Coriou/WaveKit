@@ -1166,7 +1166,8 @@ describe("minor 1: an own veto keeps only the files overlapping a joined voice",
 		expect(kept).toHaveLength(1)
 		// From the pre-roll to the reading's end, and at most what was already written when the
 		// decode came (writes trail the edge by 1 s): never the 12 s owner and its hang.
-		expect(kept[0]!.frames).toBeGreaterThanOrEqual((0.3 + 2) * 8000 - 400)
+		// (The pre-roll's static is trimmed to 150 ms before the onset, onset-trim.ts.)
+		expect(kept[0]!.frames).toBeGreaterThanOrEqual((0.15 + 2) * 8000 - 400)
 		expect(kept[0]!.frames).toBeLessThanOrEqual((0.3 + 4) * 8000 + 400)
 		expect(
 			(h.rec.diagnostics().recentRefusals ?? [])
@@ -1258,9 +1259,10 @@ describe("minor 2 and 4: continuations at decoded joins", () => {
 		expect(kept.map(o => o.input.observationId)).toEqual(["o", "o"])
 		const total = kept.reduce((n, o) => n + o.frames, 0)
 		// The pre-roll, the 14 s over and its hang, each sample at most once (two chunks of rounding),
-		// and nothing of it lost past the first file's written end.
+		// and nothing of it lost past the first file's written end. The pre-roll is static before the
+		// carrier: the head trim (onset-trim.ts) may cut it to 150 ms before the onset (0.3 − 0.15 s).
 		expect(total).toBeLessThanOrEqual((0.3 + 14 + 2) * 8000 + 400)
-		expect(total).toBeGreaterThanOrEqual((0.3 + 14 + 2) * 8000 - 800)
+		expect(total).toBeGreaterThanOrEqual((0.15 + 14 + 2) * 8000 - 800)
 		expect(refused(h)).toEqual(["j1"])
 	}, 120_000)
 

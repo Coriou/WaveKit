@@ -196,8 +196,9 @@ describe("WidebandAnalogRecorder retune cut: on the air or only the hang", () =>
 			cutActive: true,
 			outcome: "finalized",
 		})
-		// Pre-roll 300 ms + the 3 s voice + 0.3 s to the command: [onset − 0.3 s, command).
-		expect(Math.abs(h.ops[0]!.frames - 6 * 4_800)).toBeLessThanOrEqual(8 * 60)
+		// Pre-roll 300 ms + the 3 s voice + 0.3 s to the command: [onset − 0.3 s, command), less
+		// the onset trim: the pre-roll is static before the carrier keys, cut to its last 150 ms.
+		expect(Math.abs(h.ops[0]!.frames - 8 * 3_450)).toBeLessThanOrEqual(8 * 60)
 		expect(h.engine.tapCount).toBe(0)
 	}, 120_000)
 })

@@ -76,9 +76,12 @@ async function settle(h: ReturnType<typeof harness>): Promise<void> {
 	).widebandAnalog.idle()
 }
 
-/** Transmission + pre-roll (300 ms) + hang (2000 ms), the default hold settings. */
+/**
+ * Transmission + pre-roll + hang (2000 ms), the default hold settings: the 300 ms pre-roll is static
+ * before the carrier, trimmed to 150 ms before the onset (onset-trim.ts).
+ */
 function expectedMs(txSeconds: number): number {
-	return txSeconds * 1000 + 300 + 2000
+	return txSeconds * 1000 + 150 + 2000
 }
 
 describe("wideband analog recording with the default config", () => {
