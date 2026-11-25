@@ -78,7 +78,11 @@ export interface RecordingLinkWiringOptions {
 	/** The store's links (ActivityRuntime.recordingLinks()); null when Activity is off. */
 	links: ActivityRecordingLinks | null
 	/** The recordings catalogue (memory only): null answers mean "cannot tell". */
-	catalogue?: { hasKey?(key: string): boolean | null } | null
+	catalogue?: {
+		hasKey?(key: string): boolean | null
+		/** Hears every committed link change, so a per-call file shown by its link bumps the revision. */
+		linksChanged?(keys: readonly string[]): void
+	} | null
 	scanner?: RecordingKeptSource | null
 	logger: Logger
 	now?: () => number
@@ -236,6 +240,15 @@ export function wireRecordingLinks(
 	}
 
 	options.scanner?.on("recording-kept", onKept)
+	const offLinks =
+		links?.onLinks(events => {
+			if (closed) return
+			try {
+				options.catalogue?.linksChanged?.(events.map(e => e.recordingId))
+			} catch {
+				// A catalogue notice must not stop the link listeners.
+			}
+		}) ?? null
 	const timer = setInterval(sweep, sweepMs)
 	timer.unref()
 
@@ -250,6 +263,7 @@ export function wireRecordingLinks(
 			closed = true
 			clearInterval(timer)
 			options.scanner?.off("recording-kept", onKept)
+			offLinks?.()
 			missing.clear()
 		},
 	}

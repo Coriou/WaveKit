@@ -1,7 +1,8 @@
 /**
  * The mock's recordings routes apply the core's rule six: a per-call file (dsd-fme's YSF calls,
  * the call recorder's) is listed, counted and served only while its call's Activity row links
- * it (`activityEventId`); unlinked, it is absent and its file route answers 404 by id and by key.
+ * it (`activityEventId`) or it is Kept with its Keep's clear verdict; otherwise it is absent and its
+ * file route answers 404 by id and by key.
  */
 import Fastify from "fastify"
 import type { FastifyInstance } from "fastify"
@@ -45,13 +46,18 @@ describe("mock recordings: a call file only with its call row's link", () => {
 				})
 			).statusCode
 
+		// Kept call seeds carry their Keep's clear verdict: listed without a row.
+		const keptCalls = calls.filter(c => c.kept)
 		const before = await list()
-		expect(before.items.filter(i => isCall(i.kind))).toEqual([])
-		expect(before.counts?.byKind["dsd-fme-call"]).toBe(0)
-		expect(before.counts?.byKind["dv-call"]).toBe(0)
-		const [linked, unlinked] = calls
-		if (!linked || !unlinked) throw new Error("two call seeds expected")
-		for (const c of calls) {
+		expect(
+			before.items
+				.filter(i => isCall(i.kind))
+				.map(i => i.id)
+				.sort(),
+		).toEqual(keptCalls.map(c => c.id).sort())
+		const [linked, unlinked] = calls.filter(c => !c.kept)
+		if (!linked || !unlinked) throw new Error("two unkept call seeds expected")
+		for (const c of calls.filter(i => !i.kept)) {
 			expect(await file(c.id)).toBe(404)
 			if (c.key) expect(await file(c.key)).toBe(404)
 		}
@@ -62,12 +68,42 @@ describe("mock recordings: a call file only with its call row's link", () => {
 			"00000000-0000-4000-8000-0000000000aa",
 		)
 		const after = await list()
-		expect(after.items.filter(i => isCall(i.kind)).map(i => i.id)).toEqual([
-			linked.id,
-		])
+		expect(
+			after.items.filter(i => isCall(i.kind) && !i.kept).map(i => i.id),
+		).toEqual([linked.id])
 		expect(after.scannedFiles).toBe(before.scannedFiles + 1)
 		expect(await file(linked.id)).toBe(200)
 		if (linked.key) expect(await file(linked.key)).toBe(200)
 		expect(await file(unlinked.id)).toBe(404)
+	})
+
+	it("a Kept call file stays without its row until unkept", async () => {
+		const state = createRecordingsState()
+		const kept = recordingSeeds(state).find(i => isCall(i.kind) && i.kept)
+		if (!kept) throw new Error("a kept call seed expected")
+		app = Fastify({ logger: false })
+		stop = registerRecordingsMock(app, { state, newCallMs: 3_600_000 }).stop
+		await app.ready()
+		const file = async (id: string) =>
+			(
+				await app!.inject({
+					method: "GET",
+					url: `/api/recordings/${encodeURIComponent(id)}/file`,
+				})
+			).statusCode
+		expect(kept.activityEventId ?? null).toBeNull()
+		expect(await file(kept.id)).toBe(200)
+		const unkeep = await app.inject({
+			method: "DELETE",
+			url: `/api/recordings/${encodeURIComponent(kept.id)}/keep`,
+		})
+		expect(unkeep.statusCode).toBe(200)
+		// Unkept and unlinked: rule six hides it again, and it cannot be kept back.
+		expect(await file(kept.id)).toBe(404)
+		const rekeep = await app.inject({
+			method: "PUT",
+			url: `/api/recordings/${encodeURIComponent(kept.id)}/keep`,
+		})
+		expect(rekeep.statusCode).toBe(404)
 	})
 })

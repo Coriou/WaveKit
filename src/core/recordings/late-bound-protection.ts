@@ -28,5 +28,13 @@ export function lateBoundRecordingProtection(
 			ask(p => p.isScannerFileProtected(discoveryId, basename)),
 		discoveryHoldsKept: discoveryId =>
 			ask(p => p.discoveryHoldsKept(discoveryId)),
+		// Visibility fails the other way: unbound or throwing answers false (not shown).
+		isCallClearKept: key => {
+			try {
+				return current()?.isCallClearKept?.(key) === true
+			} catch {
+				return false
+			}
+		},
 	}
 }

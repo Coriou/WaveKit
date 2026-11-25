@@ -7249,9 +7249,16 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   and the file route then answer 404 `RECORDING_NOT_FOUND`, as an unknown
   recording, and `counts` and `scannedFiles` leave it out. The answer is read
   from the Activity store's link index in memory (one map read per item) at
-  every listing and download, so a call's file appears once its row is linked
-  (the `recordings` channel sends no notice for it). Keep and delete of such a
-  file answer 404 too; it stays on disk under the usual retention. Scanner
+  every listing and download, so a call's file appears once its row is linked:
+  a link that comes, goes or changes for an indexed call file raises
+  `revision` and sends a `recordings:changed` notice. The same rule holds for a
+  link stored with the row, for a file found after the row (a late file) and
+  for links an older store gains at open, before and after a restart. Keep and
+  delete of such a file answer 404 too; it stays on disk under the usual
+  retention. A Keep of a listed call file records that its call was proven
+  clear, so a Kept call file stays listed and served once its row is pruned
+  (until it is unkept); a file kept before 2026-11-25 has no such record and
+  shows only while linked. Scanner
   probe call files (`scanner-dv`) keep their own rules
   ([SCANNER](SCANNER.md#digital-voice-recordings)).
 - Catalogue: the list is served from memory, never from a walk of the disk per

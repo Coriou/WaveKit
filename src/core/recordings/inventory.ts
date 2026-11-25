@@ -108,6 +108,9 @@ function receiptMayFollow(mtimeMs: number, at: number): boolean {
  * Under the 1 s "usable" budget.
  */
 export const RECORDINGS_INDEXING_WAIT_MS = 750
+/** Link change keys linksChanged reads per call at most (one store batch is ≤ 1 024 ops). */
+export const RECORDINGS_LINK_CHANGES_MAX = 4_096
+
 /** A writer's notices within this window are refreshed together. */
 export const RECORDINGS_TOUCH_DEBOUNCE_MS = 250
 /** `recordings:changed` at most once per this interval. */
@@ -356,6 +359,13 @@ export interface RecordingInventory {
 	discoveriesRemoved?(ids: readonly string[]): void
 	/** Merges: these folders' owner or frequency changed (no file changed). */
 	ownersChanged?(folderIds: readonly string[]): void
+	/**
+	 * Activity link changes (ActivityLinkEvent.recordingId of each): an indexed per-call file
+	 * whose link came, went or changed verdict is listed or hidden from now on (callFileLinked
+	 * reads the link at list time), so each one counts as changed and the revision bumps
+	 * (`recordings:changed`). Memory only; at most RECORDINGS_LINK_CHANGES_MAX keys read.
+	 */
+	linksChanged?(keys: readonly string[]): void
 	/** `recordings:changed` notices (at most one a second); returns the unsubscribe. */
 	onChange?(listener: (e: RecordingsChangedEventData) => void): () => void
 	/** `refreshing`: an urgent refresh (invalidate, source change, settling file) is running. */
@@ -1970,17 +1980,30 @@ export function createRecordingInventory(
 	 * marks every other `dsd~` link refused and answers it null (activityEventId). An unproven or
 	 * encrypted call, an unlinked file and Activity off are not listed and answer 404.
 	 *
+	 * A Kept file whose Keep recorded that verdict (RecordingProtection.isCallClearKept: Keep is
+	 * possible only while this gate admits the file) stays admitted after its link is gone (its
+	 * row pruned); a keep made before that record exists admits nothing on its own.
+	 *
 	 * Bound: memory only, one Map read per call; a listing reads at most one per catalogue entry
 	 * (RECORDINGS_CATALOGUE_MAX = 50 000 O(1) reads, a few ms), an open or a resolve one per
 	 * dsd-fme source (one per configured decoder). No Activity query, no fs call.
 	 */
 	function callFileLinked(key: string | null): boolean {
 		if (key === null || !key.startsWith("dsd~")) return false
+		let linked = false
 		try {
 			if (options.callFileLinked !== undefined)
-				return options.callFileLinked(key) === true
-			const eventId = options.activityEventId?.(key)
-			return typeof eventId === "string" && eventId.length > 0
+				linked = options.callFileLinked(key) === true
+			else {
+				const eventId = options.activityEventId?.(key)
+				linked = typeof eventId === "string" && eventId.length > 0
+			}
+		} catch {
+			linked = false
+		}
+		if (linked) return true
+		try {
+			return options.protection?.isCallClearKept?.(key) === true
 		} catch {
 			return false
 		}
@@ -2750,6 +2773,24 @@ export function createRecordingInventory(
 			for (const state of folders.values())
 				if (state.spec.discoveryId !== null && set.has(state.spec.discoveryId))
 					n += state.files.size
+			changed("changed", n)
+		},
+
+		linksChanged(keys) {
+			// A per-call file's link decides whether it is listed (callFileLinked): a link that
+			// came or went for an indexed `dsd~` file changes the listing, so the revision bumps.
+			let n = 0
+			try {
+				for (const key of keys.slice(0, RECORDINGS_LINK_CHANGES_MAX))
+					if (
+						typeof key === "string" &&
+						key.startsWith("dsd~") &&
+						(byKey.get(key)?.size ?? 0) > 0
+					)
+						n++
+			} catch {
+				n = 0
+			}
 			changed("changed", n)
 		},
 

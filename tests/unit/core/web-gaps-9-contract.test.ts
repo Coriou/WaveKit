@@ -218,6 +218,7 @@ describe("web-gaps-9 contract", () => {
 				| "isDsdFmeFileProtected"
 				| "isScannerFileProtected"
 				| "discoveryHoldsKept"
+				| "isCallClearKept"
 			>(true),
 		).toBe(true)
 		expect(extendsType<RecordingKeepService, RecordingProtection>(true)).toBe(

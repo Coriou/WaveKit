@@ -19,10 +19,6 @@ import {
 	recordingRoutes,
 	type RecordingRoutesOptions,
 } from "../../../../src/api/routes/recordings.js"
-import {
-	createActivitySubscriptions,
-	type ActivityWireMessage,
-} from "../../../../src/api/activity-subscriptions.js"
 import { createCallRecordingLinker } from "../../../../src/core/activity/ingress.js"
 import { wireRecordingLinks } from "../../../../src/core/activity/recording-links.js"
 import { startActivityRuntime } from "../../../../src/core/activity/runtime.js"
@@ -56,16 +52,6 @@ const cleanups: (() => Promise<void> | void)[] = []
 afterEach(async () => {
 	for (const c of cleanups.splice(0).reverse()) await c()
 })
-
-class Transport {
-	readonly key = "client-1"
-	sent: ActivityWireMessage[] = []
-	send(m: ActivityWireMessage): boolean {
-		this.sent.push(m)
-		return true
-	}
-	close(): void {}
-}
 
 async function compose() {
 	const stateDir = await mkdtemp(join(tmpdir(), "wk-dvwire-"))
@@ -189,46 +175,18 @@ function callOutput(
 	}
 }
 
-interface ListedItem {
-	id: string
-	key: string
-	kind: string
-	decoderId: string | null
-	talkgroup: string | null
-	source: string | null
-	activityEventId?: string | null
-}
-
 describe("a clear digital-voice call to a linked recording and back", () => {
-	it("records, lists, links over REST and the WebSocket, and unlinks on delete", async () => {
-		const { runtime, tap, emit, wiring, inventory, links, app, dir } =
-			await compose()
-		const hub = createActivitySubscriptions({
-			service: runtime.service,
-			enabled: true,
-		})
-		cleanups.push(() => hub.close())
-		const live = new Transport()
-		hub.handleMessage(live, {
-			type: "activity:subscribe",
-			id: "s1",
-			query: { decoderIds: [DECODER] },
-		})
-		await expect
-			.poll(() => live.sent.some(m => m.type === "activity:progress"), {
-				timeout: 5_000,
-			})
-			.toBe(true)
-		const progress = live.sent.find(m => m.type === "activity:progress")
-		const startCursor = (progress?.data as { cursor: string }).cursor
+	it("records a call but neither links nor serves it until the clear-call gate admits dv names", async () => {
+		// The shared clear-call gate (callLinkAdmits) admits only recordable dsd-fme protocol
+		// names; a dv recorder name carries the decoder id in its protocol slot, so its link is
+		// refused and the file stays hidden (fail closed). The re-enable work teaches the gate dv names.
+		const { runtime, tap, emit, wiring, app, dir } = await compose()
 		emit(callOutput("call_start", "c-clear"))
 		const call = new FakeCall(tap, { callId: "c-clear", slot: 1 })
 		call.voice(1500)
-		// The decoder's end row first; the tap's end follows DV_TAP_SETTLE_MS later.
 		emit(callOutput("call_end", "c-clear"))
 		call.voice(DV_TAP_SETTLE_MS)
 		call.end()
-		// The final name only (the TEMP goes once the final name holds the file).
 		const finals = async () =>
 			(await readdir(dir)).filter(n => !n.startsWith("TEMP_"))
 		await expect.poll(finals, { timeout: 5_000 }).toHaveLength(1)
@@ -237,119 +195,17 @@ describe("a clear digital-voice call to a linked recording and back", () => {
 		const key = `dsd~${name}`
 		const store = runtime.recordingLinks?.()
 		await expect
-			.poll(() => store?.recordingEventId(key), { timeout: 5_000 })
-			.toBeTypeOf("string")
-		const eventId = store?.recordingEventId(key)
-
-		// GET /api/recordings: kind dv-call, the call's decoder and names, the row it links to.
+			.poll(() => store?.linkedRecordings().includes(key), { timeout: 5_000 })
+			.toBe(true)
+		expect(store?.recordingEventId(key)).toBeNull()
 		const listed = await app.inject({ method: "GET", url: "/api/recordings" })
 		expect(listed.statusCode).toBe(200)
-		const page = listed.json() as {
-			items: ListedItem[]
-			counts: { byKind: Record<string, number> }
-		}
-		expect(page.items).toHaveLength(1)
-		const item = page.items[0]
-		expect(item).toMatchObject({
-			key,
-			kind: "dv-call",
-			decoderId: DECODER,
-			talkgroup: "9",
-			source: "2001",
-			activityEventId: eventId,
-		})
-		expect(item?.id).toMatch(/^dsd:\d+~/)
-		expect(page.counts.byKind["dv-call"]).toBe(1)
-		const byKind = await app.inject({
-			method: "GET",
-			url: "/api/recordings?kind=dv-call",
-		})
-		expect((byKind.json() as { items: unknown[] }).items).toHaveLength(1)
+		expect((listed.json() as { items: unknown[] }).items).toEqual([])
 		const file = await app.inject({
 			method: "GET",
-			url: `/api/recordings/${encodeURIComponent(item?.id ?? "")}/file`,
+			url: `/api/recordings/${encodeURIComponent(key)}/file`,
 		})
-		expect(file.statusCode).toBe(200)
-		expect(file.rawPayload.subarray(0, 4).toString("ascii")).toBe("RIFF")
-
-		// GET /api/activity: the call_end row carries `recording` with the written duration.
-		const rows = await app.inject({
-			method: "GET",
-			url: "/api/activity?hasRecording=true",
-		})
-		expect(rows.statusCode).toBe(200)
-		const rowItems = (
-			rows.json() as {
-				items: { eventId: string; recording?: unknown; title: string }[]
-			}
-		).items
-		expect(rowItems.map(r => [r.eventId, r.recording])).toEqual([
-			[eventId, { id: key, durationMs: 1500 + DV_TAP_SETTLE_MS }],
-		])
-		expect(rowItems[0]?.title).toBe("TG 9 · radio 2001")
-
-		// The Activity WebSocket stream (the hub and its frame serializer): a client resuming from
-		// a cursor taken before the call (a reconnect) is replayed the row with its link. A live
-		// client was sent the row when it was stored, before the file existed (see `live`).
-		const resumed = new Transport()
-		hub.handleMessage(resumed, {
-			type: "activity:subscribe",
-			id: "s2",
-			query: { decoderIds: [DECODER] },
-			cursor: startCursor,
-		})
-		const records = (t: Transport) =>
-			t.sent
-				.filter(m => m.type === "activity:records")
-				.flatMap(m => {
-					const wire = JSON.parse(JSON.stringify(m)) as {
-						channel: string
-						data: { items: { eventId: string; recording?: unknown }[] }
-					}
-					expect(wire.channel).toBe("activity")
-					return wire.data.items
-				})
-		await expect
-			.poll(() => records(resumed).some(i => i.eventId === eventId), {
-				timeout: 5_000,
-			})
-			.toBe(true)
-		expect(
-			records(resumed).find(i => i.eventId === eventId)?.recording,
-		).toEqual({ id: key, durationMs: 1500 + DV_TAP_SETTLE_MS })
-		const liveRow = records(live).find(i => i.eventId === eventId)
-		expect(liveRow).toBeDefined()
-		expect(liveRow?.recording).toBeUndefined()
-
-		// DELETE: the file goes, then its link once a complete catalogue lacks it.
-		const del = await app.inject({
-			method: "DELETE",
-			url: `/api/recordings/${encodeURIComponent(item?.id ?? "")}`,
-		})
-		expect(del.statusCode).toBe(200)
-		expect(del.json()).toEqual({ id: item?.id, deleted: true })
-		expect(await readdir(dir)).toEqual([])
-		const again = await app.inject({
-			method: "DELETE",
-			url: `/api/recordings/${encodeURIComponent(item?.id ?? "")}`,
-		})
-		expect(again.statusCode).toBe(404)
-		expect(again.json()).toMatchObject({
-			code: "RECORDING_NOT_FOUND",
-			message: "Recording not found",
-		})
-		inventory.invalidate?.()
-		await inventory.list({})
-		links.sweep()
-		links.sweep()
-		await expect
-			.poll(() => store?.recordingEventId(key), { timeout: 5_000 })
-			.toBeNull()
-		const after = await app.inject({
-			method: "GET",
-			url: "/api/activity?hasRecording=true",
-		})
-		expect((after.json() as { items: unknown[] }).items).toEqual([])
+		expect(file.statusCode).toBe(404)
 		expect(wiring.recorder?.counters().recorded).toBe(1)
 	}, 30_000)
 

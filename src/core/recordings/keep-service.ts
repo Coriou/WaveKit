@@ -180,6 +180,18 @@ export async function openRecordingKeepService(
 	}
 	if (store && ready()) for (const e of store.snapshot().keeps) protect(e.key)
 
+	/**
+	 * Committed keeps of per-call files whose Keep recorded a clear call verdict
+	 * (RecordingKeepEntry.callClear): what isCallClearKept answers. Rebuilt per write.
+	 */
+	let callClear = new Set<string>()
+	function setCallClear(file: RecordingKeepsFile): void {
+		const next = new Set<string>()
+		for (const e of file.keeps) if (e.callClear === true) next.add(e.key)
+		callClear = next
+	}
+	if (store && ready()) setCallClear(store.snapshot())
+
 	/** WG10 req 1.8: count and byte sum of the committed keeps (recomputed per write, O(1) read). */
 	let totals: RecordingKeepTotals = { recordings: 0, bytes: 0 }
 	function setTotals(file: RecordingKeepsFile): void {
@@ -226,6 +238,7 @@ export async function openRecordingKeepService(
 			const next = change(s.snapshot())
 			await s.write(next)
 			setTotals(next)
+			setCallClear(next)
 		}
 		const result = commitChain.then(run)
 		commitChain = result.catch(() => undefined)
@@ -304,7 +317,31 @@ export async function openRecordingKeepService(
 				log.warn({ err: safeErrorFields(error) }, "Recording Keep failed")
 				throw unavailable()
 			}
-			if (alreadyKept) return { id: inventoryId, kept: true, changed: false }
+			// A per-call file opens only while the clear call gate admits it (the inventory's
+			// callFileLinked), so its Keep records that verdict: the file stays listed and served
+			// once its call's Activity row is pruned.
+			const clearCall = key.startsWith("dsd~")
+			if (alreadyKept) {
+				// A keep made before the verdict was recorded gains it now, while admitted.
+				if (clearCall && !callClear.has(key))
+					try {
+						await commit(file => {
+							if (!file.keeps.some(e => e.key === key && e.callClear !== true))
+								return file
+							return {
+								schemaVersion: file.schemaVersion,
+								revision: nextRevision(file),
+								keeps: file.keeps.map(e =>
+									e.key === key ? { ...e, callClear: true as const } : e,
+								),
+							}
+						})
+					} catch (error: unknown) {
+						log.warn({ err: safeErrorFields(error) }, "Recording Keep failed")
+						throw unavailable()
+					}
+				return { id: inventoryId, kept: true, changed: false }
+			}
 			try {
 				await commit(file => {
 					if (file.keeps.some(e => e.key === key)) return file
@@ -316,6 +353,7 @@ export async function openRecordingKeepService(
 						key,
 						keptAt: keptAtNow(),
 						bytes,
+						...(clearCall ? { callClear: true as const } : {}),
 					}
 					return {
 						schemaVersion: file.schemaVersion,
@@ -487,6 +525,9 @@ export async function openRecordingKeepService(
 		discoveryHoldsKept(discoveryId) {
 			if (!ready()) return true
 			return (discoveryCounts.get(discoveryId) ?? 0) > 0
+		},
+		isCallClearKept(key) {
+			return ready() && typeof key === "string" && callClear.has(key)
 		},
 		keep,
 		unkeep,

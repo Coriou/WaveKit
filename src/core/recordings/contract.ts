@@ -62,6 +62,12 @@ export interface RecordingKeepEntry {
 	readonly keptAt: string
 	/** File size when kept (counts against RECORDING_KEEPS_MAX_BYTES). */
 	readonly bytes: number
+	/**
+	 * A per-call (`dsd~`) file kept while a clear call's link admitted it (the inventory's
+	 * callFileLinked gate, which a Keep's open passes through): it stays listed and served after
+	 * that link is gone. Absent (a keep made before this field, or any other file): nothing.
+	 */
+	readonly callClear?: true
 }
 
 /** `<stateDir>/recording-keeps.json`. */
@@ -86,6 +92,11 @@ export interface RecordingProtection {
 	isScannerFileProtected(discoveryId: string, basename: string): boolean
 	/** True when any kept scanner recording lives in the discovery, or the store state is unknown. */
 	discoveryHoldsKept(discoveryId: string): boolean
+	/**
+	 * Visibility, not deletion: true only when this `dsd~` key's committed keep recorded a clear
+	 * call verdict (RecordingKeepEntry.callClear) and the store is ready. Unknown: false.
+	 */
+	isCallClearKept?(key: string): boolean
 }
 
 /** What the routes call (protected mode only). */

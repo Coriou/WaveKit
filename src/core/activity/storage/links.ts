@@ -58,7 +58,12 @@ const META_KEY = "recordingLinkBackfill"
  * A call the backfill waits on for its late file, with whether it may be recorded: its protocol
  * is recordable and its row says it clear (callTrustAdmits).
  */
-type PendingCall = LinkedRow & { durationMs: unknown; recordable: boolean }
+type PendingCall = LinkedRow & {
+	durationMs: unknown
+	recordable: boolean
+	/** The call row's own trust (rowTrustOf): its link's `refused` is decided by it. */
+	trust: RowTrust | null
+}
 
 /**
  * Whether a backfilled row of this protocol may link this dsd-fme call file: both the row's
@@ -78,6 +83,8 @@ interface LinkedRow {
 	seq: bigint
 	eventId: string
 	summaryJson: string
+	/** The row's trust, when read with trustColumns (else null: refused for a `dsd~` key). */
+	trust?: RowTrust | null
 }
 
 function linkedRows(
@@ -96,7 +103,12 @@ function linkedRows(
 			typeof summaryJson !== "string"
 		)
 			continue
-		out.push({ seq: BigInt(seq), eventId, summaryJson })
+		out.push({
+			seq: BigInt(seq),
+			eventId,
+			summaryJson,
+			trust: rowTrustOf(row),
+		})
 	}
 	return out
 }
@@ -147,7 +159,91 @@ function setLink(
 	return true
 }
 
-const CALL_ROWS = `SELECT a.seq AS seq, a.event_id AS event_id, a.summary_json AS summary_json
+const DATA_PATH = "$.payload.decodedData"
+
+/**
+ * The trust columns of `<table>.record_json` a link's `refused` is decided by (rowTrustOf). The
+ * JSON type of each field (json_type), not its value: json_extract reads a JSON null and a
+ * missing field both as NULL, and a JSON 1 as a true, where callTrustAdmits tells them apart.
+ * A record that is not valid JSON reads no field (trust_valid 0: refused).
+ */
+function trustColumns(table: string): string {
+	const json = `${table}.record_json`
+	const valid = `json_valid(${json})`
+	const typeOf = (path: string, as: string): string =>
+		`CASE WHEN ${valid} THEN json_type(${json}, '${DATA_PATH}${path}') END AS ${as}`
+	return [
+		`${valid} AS trust_valid`,
+		`${table}.kind AS trust_kind`,
+		`${table}.protocol AS trust_row_protocol`,
+		typeOf("", "trust_data"),
+		`CASE WHEN ${valid} AND json_type(${json}, '${DATA_PATH}.protocol') = 'text'
+			THEN json_extract(${json}, '${DATA_PATH}.protocol') END AS trust_protocol`,
+		typeOf(".encrypted", "trust_encrypted"),
+		typeOf(".encryptionKnown", "trust_known"),
+		typeOf(".clearEvidence", "trust_evidence"),
+		typeOf(".flags.encrypted", "trust_flagged"),
+	].join(",\n\t\t")
+}
+
+/** A row's trust as read back from trustColumns: what callLinkRefused is asked with. */
+interface RowTrust {
+	kind: unknown
+	protocol: unknown
+	data: CallTrustFields
+}
+
+/**
+ * The JSON value a json_type stands for, as far as callTrustAdmits looks: true, false and null
+ * as themselves, a missing field as undefined, any other type as a value that is none of them.
+ */
+function trustValueOf(type: unknown): unknown {
+	if (type === "true") return true
+	if (type === "false") return false
+	if (type === "null") return null
+	if (type === null || type === undefined) return undefined
+	return "other"
+}
+
+/**
+ * The trust of a row read with trustColumns, or null when its record is not valid JSON or its
+ * decodedData is not an object (refused, as builtRowLinkRefused refuses them at commit).
+ */
+function rowTrustOf(
+	row: Record<string, SqliteValue> | undefined,
+): RowTrust | null {
+	const valid = cell(row, "trust_valid")
+	if (valid !== 1 && valid !== 1n) return null
+	if (cell(row, "trust_data") !== "object") return null
+	const decoded = cell(row, "trust_protocol")
+	const flagged = trustValueOf(cell(row, "trust_flagged"))
+	return {
+		kind: cell(row, "trust_kind"),
+		protocol:
+			typeof decoded === "string" && decoded.length > 0
+				? decoded
+				: cell(row, "trust_row_protocol"),
+		data: {
+			encrypted: trustValueOf(cell(row, "trust_encrypted")),
+			encryptionKnown: trustValueOf(cell(row, "trust_known")),
+			clearEvidence: trustValueOf(cell(row, "trust_evidence")),
+			...(flagged !== undefined ? { flags: { encrypted: flagged } } : {}),
+		},
+	}
+}
+
+/** callLinkRefused for a stored row's trust (rowTrustOf); unreadable trust: refused. */
+function storedLinkRefused(
+	recordingId: string,
+	trust: RowTrust | null,
+): boolean {
+	if (!recordingId.startsWith("dsd~")) return false
+	if (trust === null) return true
+	return callLinkRefused(recordingId, trust.kind, trust.protocol, trust.data)
+}
+
+const CALL_ROWS = `SELECT a.seq AS seq, a.event_id AS event_id, a.summary_json AS summary_json,
+		${trustColumns("a")}
 	FROM activity_refs r JOIN activity a ON a.seq = r.seq
 	WHERE r.ref_type = 'callId' AND r.ref_value = ? AND a.decoder_id = ? AND a.kind = 'decoder-reception'`
 
@@ -178,6 +274,10 @@ export function applyActivityLinks(
 							eventId: row.eventId,
 							seq: row.seq.toString(10),
 							linked: true,
+							// The row that carries the link decides (as at commit and at load).
+							...(storedLinkRefused(link.id, row.trust ?? null)
+								? { refused: true as const }
+								: {}),
 						})
 				}
 				continue
@@ -263,10 +363,6 @@ export function builtRowLinkRefused(
 	)
 }
 
-/** JSON booleans read back from json_extract as 1 / 0. */
-const sqlBool = (v: unknown): unknown =>
-	v === 1 || v === 1n ? true : v === 0 || v === 0n ? false : v
-
 /**
  * Every link, newest row first, at most `max`: the parent's index after open. A `dsd~` link
  * carries `refused` when its row's own call trust does not admit it (callLinkRefused), so a link
@@ -280,12 +376,7 @@ export function readRecordingLinks(
 	const rows = db
 		.prepare(
 			`SELECT r.ref_value AS ref_value, a.event_id AS event_id, CAST(a.seq AS TEXT) AS seq,
-				a.kind AS kind, a.protocol AS row_protocol,
-				json_extract(a.record_json, '$.payload.decodedData.protocol') AS protocol,
-				json_extract(a.record_json, '$.payload.decodedData.encrypted') AS encrypted,
-				json_extract(a.record_json, '$.payload.decodedData.encryptionKnown') AS known,
-				json_extract(a.record_json, '$.payload.decodedData.clearEvidence') AS evidence,
-				json_extract(a.record_json, '$.payload.decodedData.flags.encrypted') AS flagged
+				${trustColumns("a")}
 			 FROM activity_refs r JOIN activity a ON a.seq = r.seq
 			 WHERE r.ref_type = 'recordingId' ORDER BY r.seq DESC LIMIT ?`,
 		)
@@ -300,23 +391,7 @@ export function readRecordingLinks(
 			typeof seq !== "string"
 		)
 			continue
-		const decoded = cell(row, "protocol")
-		const flagged = sqlBool(cell(row, "flagged"))
-		const refused = callLinkRefused(
-			id,
-			cell(row, "kind"),
-			typeof decoded === "string" && decoded.length > 0
-				? decoded
-				: cell(row, "row_protocol"),
-			{
-				encrypted: sqlBool(cell(row, "encrypted")),
-				encryptionKnown: sqlBool(cell(row, "known")),
-				clearEvidence: sqlBool(cell(row, "evidence")),
-				...(flagged !== null && flagged !== undefined
-					? { flags: { encrypted: flagged } }
-					: {}),
-			},
-		)
+		const refused = storedLinkRefused(id, rowTrustOf(row))
 		out.push({
 			recordingId: id,
 			eventId,
@@ -375,10 +450,7 @@ export function backfillRecordingLinks(
 				json_extract(record_json, '$.payload.decodedData.flags.wavFileUpdate') AS late,
 				json_extract(record_json, '$.payload.decodedData.duration') AS duration,
 				json_extract(record_json, '$.payload.decodedData.protocol') AS protocol,
-				json_extract(record_json, '$.payload.decodedData.encrypted') AS encrypted,
-				json_extract(record_json, '$.payload.decodedData.encryptionKnown') AS known,
-				json_extract(record_json, '$.payload.decodedData.clearEvidence') AS evidence,
-				json_extract(record_json, '$.payload.decodedData.flags.encrypted') AS flagged
+				${trustColumns("activity")}
 			 FROM activity
 			 WHERE category = 'voice' AND kind = 'decoder-reception' AND seq > ? AND seq <= ?
 			 ORDER BY seq LIMIT ?`,
@@ -415,16 +487,9 @@ export function backfillRecordingLinks(
 			const name = typeof wav === "string" ? recordingBaseName(wav) : null
 			const key = name === null ? null : dsdFmeKeepKey(name)
 			const protocol = cell(row, "protocol")
-			// This row's own trust fields (callTrustAdmits); JSON booleans read back as 1 / 0.
-			const bool = (v: unknown): unknown =>
-				v === 1 || v === 1n ? true : v === 0 || v === 0n ? false : v
-			const flagged = bool(cell(row, "flagged"))
-			const clear = callTrustAdmits(protocol, {
-				encrypted: bool(cell(row, "encrypted")),
-				encryptionKnown: bool(cell(row, "known")),
-				clearEvidence: bool(cell(row, "evidence")),
-				...(flagged !== null ? { flags: { encrypted: flagged } } : {}),
-			})
+			// This row's own trust fields (callTrustAdmits), read as the load path reads them.
+			const trust = rowTrustOf(row)
+			const clear = trust !== null && callTrustAdmits(protocol, trust.data)
 			let target: PendingCall | undefined
 			if (late) {
 				target = callKey === null ? undefined : pending.get(callKey)
@@ -441,6 +506,7 @@ export function backfillRecordingLinks(
 							typeof protocol === "string" &&
 							protocolRecordable(protocol) &&
 							clear,
+						trust,
 					})
 					while (pending.size > BACKFILL_PENDING_CALLS) {
 						const oldest = pending.keys().next()
@@ -456,6 +522,7 @@ export function backfillRecordingLinks(
 					summaryJson,
 					durationMs: cell(row, "duration"),
 					recordable: true,
+					trust,
 				}
 			}
 			if (target === undefined || key === null || name === null) continue
@@ -478,6 +545,10 @@ export function backfillRecordingLinks(
 				eventId: target.eventId,
 				seq: target.seq.toString(10),
 				linked: true,
+				// The row that carries the link (the call's row) decides, as at load.
+				...(storedLinkRefused(link.id, target.trust ?? null)
+					? { refused: true as const }
+					: {}),
 			})
 		}
 		const done = rows.length < chunk
