@@ -163,6 +163,20 @@ function hubError(message: string, code: string): WaveKitError {
 	return new WaveKitError(message, code)
 }
 
+/** A connection reset Node itself destroyed the socket with (a read or write ECONNRESET). */
+function isReset(err: Error | undefined): err is Error {
+	return (
+		err !== undefined && (err as NodeJS.ErrnoException).code === "ECONNRESET"
+	)
+}
+
+/** The end wait expired and the hub, alive, gave no account of the stream. */
+const END_WITHOUT_ACCOUNT: EndDecision = {
+	kind: "destroy",
+	code: "ECONNRESET",
+	message: "IQ hub front ended without its stream's end",
+}
+
 type EndDecision =
 	| { kind: "end" }
 	| { kind: "destroy"; code: string; message: string }
@@ -190,6 +204,13 @@ interface Dial {
 	nodeClosed: boolean
 	failed: boolean
 	retried: boolean
+	/**
+	 * D6: a reset of the front's Unix connection held back until the hub settles whose it was
+	 * (holdResets); calling it destroys the socket with the given error. Null when none is held.
+	 */
+	heldReset: ((error: Error) => void) | null
+	/** D6: the end wait expired with no account of the stream; a liveness probe is out. */
+	probing: boolean
 	endTimer: ReturnType<typeof setTimeout> | null
 	/** When the end wait first armed (the paused-socket cap counts from it). */
 	endWaitStartedAt: number | null
@@ -334,6 +355,8 @@ export class Supervisor {
 			nodeClosed: false,
 			failed: false,
 			retried: false,
+			heldReset: null,
+			probing: false,
 			endTimer: null,
 			endWaitStartedAt: null,
 			abortTimer: null,
@@ -349,6 +372,7 @@ export class Supervisor {
 		this.bySocket.set(socket, dial)
 		socket.once("close", () => this.onNodeClose(dial))
 		socket.on("end", () => this.onNodeEnd(dial))
+		this.holdResets(dial)
 		if (this.disposed) {
 			this.fail(dial, IQHUB_UNAVAILABLE, "IQ hub intake is shut down")
 			return
@@ -366,8 +390,88 @@ export class Supervisor {
 		})
 	}
 
+	/**
+	 * D6: a reset of the front's Unix connection is the receiver's (ECONNRESET) only while the hub
+	 * lives. A killed hub resets it too (the kernel closes a front with unread commands that way),
+	 * and its exit report (S16) may arrive after the reset. So the reset's destroy, with its
+	 * `error` and `close`, waits until the hub settles which it was: its exit (markGone: IQHUB_EXITED
+	 * or IQHUB_HUNG) or its answer to a liveness probe sent after the reset (the reset itself). A
+	 * hub that answers nothing is killed by the watchdog (M1), whose exit ends the wait.
+	 */
+	private holdResets(dial: Dial): void {
+		const socket = dial.socket
+		const destroyNow = socket.destroy.bind(socket)
+		// Node destroys a socket whose read fails through its public destroy (onStreamRead).
+		// Intercepted there, the socket is not destroyed while held: a read that still completes
+		// lands in its buffer, never on a destroyed stream.
+		socket.destroy = (err?: Error) => {
+			if (dial.heldReset !== null) {
+				// A further failed read: the held reset still settles the socket.
+				if (isReset(err) && !dial.failed) return socket
+				// Any other destroy (the supervisor's own fail, SourceManager's) goes ahead.
+				dial.heldReset = null
+				return destroyNow(err)
+			}
+			// The supervisor's own failures (fail) are already labelled.
+			if (!isReset(err) || !dial.unixStarted || dial.failed || socket.destroyed)
+				return destroyNow(err)
+			dial.heldReset = label => {
+				destroyNow(label)
+			}
+			socket.pause()
+			this.settleReset(dial, err)
+			return socket
+		}
+	}
+
+	private settleReset(dial: Dial, reset: Error): void {
+		const decision = dial.decision
+		// The hub already said how the stream ended (a receiver reset, its own close, its exit).
+		if (decision?.kind === "destroy") {
+			this.releaseReset(dial, hubError(decision.message, decision.code))
+			return
+		}
+		const hub = this.hub
+		if (hub === null || hub.gone) {
+			this.releaseReset(dial, reset)
+			return
+		}
+		this.probe(hub, alive => {
+			if (alive) this.releaseReset(dial, reset)
+		})
+	}
+
+	private releaseReset(dial: Dial, error: Error): void {
+		const release = dial.heldReset
+		if (release === null) return
+		dial.heldReset = null
+		dial.failed = true
+		this.clearConnectTimer(dial)
+		this.endPlacements(dial)
+		if (dial.endTimer !== null) clearTimeout(dial.endTimer)
+		dial.endTimer = null
+		release(error)
+	}
+
+	/**
+	 * D6: asks the hub for a sign of life after an event its exit could also explain. Attempt 0 is
+	 * never an attempt id (ids start at 1), so a live hub answers `rejected unknown-attempt` and
+	 * nothing else changes; a hub that is gone answers GONE (markGone). A closed control pipe
+	 * sends nothing: the hub is exiting, and its exit (S16) answers instead.
+	 */
+	private probe(hub: Hub, onAnswer: (alive: boolean) => void): void {
+		this.send(hub, { type: "abort", attempt: 0, mode: "now" }, event =>
+			onAnswer(!(event.type === "rejected" && event.reason === GONE)),
+		)
+	}
+
 	private cancelled(dial: Dial): boolean {
-		return dial.nodeClosed || dial.socket.destroyed || dial.failed
+		return (
+			dial.nodeClosed ||
+			dial.socket.destroyed ||
+			dial.failed ||
+			dial.heldReset !== null
+		)
 	}
 
 	private async start(dial: Dial): Promise<void> {
@@ -1113,12 +1217,23 @@ export class Supervisor {
 				this.armEndTimer(dial)
 				return
 			}
-			if (dial.decision === null)
-				dial.decision = {
-					kind: "destroy",
-					code: "ECONNRESET",
-					message: "IQ hub front ended without its stream's end",
+			if (dial.decision === null) {
+				// D6: no account of the stream may mean a hub that died and has not reported its
+				// exit yet: the hub's exit (markGone) or its answer to a probe decides, not the wait.
+				const hub = this.hub
+				if (hub !== null && !hub.gone) {
+					if (dial.probing) return
+					dial.probing = true
+					this.probe(hub, alive => {
+						dial.probing = false
+						if (!alive || dial.decision !== null || this.cancelled(dial)) return
+						dial.decision = END_WITHOUT_ACCOUNT
+						this.apply(dial, true)
+					})
+					return
 				}
+				dial.decision = END_WITHOUT_ACCOUNT
+			}
 			this.apply(dial, true)
 		}, this.options.endWaitMs ?? HUB_END_WAIT_MS)
 		dial.endTimer.unref()
@@ -1242,6 +1357,11 @@ export class Supervisor {
 		if (this.hub === hub) this.hub = null
 		const { code, message } = this.goneError(hub)
 		for (const dial of [...this.dials]) {
+			// D6: a reset that waited for this exit is the hub's.
+			if (dial.heldReset !== null) {
+				this.releaseReset(dial, hubError(message, code))
+				continue
+			}
 			this.endPlacements(dial)
 			if (dial.nodeClosed) {
 				this.forgetIfDone(dial)

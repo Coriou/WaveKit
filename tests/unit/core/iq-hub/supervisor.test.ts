@@ -450,6 +450,113 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(result.error?.code).toBe("ECONNRESET")
 	})
 
+	describe("D6: a reset or an unaccounted end waits for the hub's exit or its sign of life", () => {
+		/** What Node destroys a socket with when a read fails with ECONNRESET (onStreamRead). */
+		function readReset(): NodeJS.ErrnoException {
+			return Object.assign(new Error("read ECONNRESET"), {
+				code: "ECONNRESET",
+				errno: -os.constants.errno.ECONNRESET,
+				syscall: "read",
+			})
+		}
+
+		function settledFlag(closed: Promise<unknown>): () => boolean {
+			let settled = false
+			void closed.then(() => {
+				settled = true
+			})
+			return () => settled
+		}
+
+		async function probeOf(hub: Awaited<ReturnType<typeof dialActive>>["hub"]) {
+			const probe = await hub.whenRequest(
+				"abort",
+				hub.requestsOf("abort").length + 1,
+			)
+			expect(probe).toMatchObject({ attempt: 0, mode: "now" })
+		}
+
+		it("a killed hub's reset that arrives before its exit report, the old end wait passed, is IQHUB_EXITED", async () => {
+			newFake()
+			const supervisor = makeSupervisor({ endWaitMs: 20 })
+			const { socket, hub, closed } = await dialActive(supervisor)
+			const settled = settledFlag(closed)
+			// SIGKILL: the kernel resets the front, the exit report is still to come.
+			hub.dying = true
+			const probed = probeOf(hub)
+			socket.destroy(readReset())
+			await probed
+			// Well past the old end wait: the reset is still held, nothing was emitted.
+			await new Promise(resolve => setTimeout(resolve, 100))
+			expect(settled()).toBe(false)
+			hub.exit({ code: null, signal: "SIGKILL", spawnError: null })
+			const result = await closed
+			expect(result.error?.code).toBe(IQHUB_EXITED)
+			expect(result.events).toEqual(["error", "close"])
+		})
+
+		it("a reset with the hub alive is the receiver's ECONNRESET once the hub answers", async () => {
+			newFake()
+			const supervisor = makeSupervisor()
+			const { socket, hub, closed } = await dialActive(supervisor)
+			const pid = supervisor.pid
+			const reset = readReset()
+			const probed = probeOf(hub)
+			socket.destroy(reset)
+			await probed
+			const result = await closed
+			expect(result.error).toBe(reset)
+			expect(result.events).toEqual(["error", "close"])
+			expect(hub.exited).toBe(false)
+			expect(supervisor.pid).toBe(pid)
+		})
+
+		it("a reset after the hub already reported the stream's end keeps that account", async () => {
+			newFake()
+			const supervisor = makeSupervisor({ endWaitMs: 1000 })
+			const { socket, hub, front, closed } = await dialActive(supervisor)
+			// Synchronous: the supervisor reads the line before the reset below.
+			front.frontEnded("reset", os.constants.errno.ECONNRESET)
+			const aborts = hub.requestsOf("abort").length
+			socket.destroy(readReset())
+			const result = await closed
+			expect(result.error?.code).toBe("ECONNRESET")
+			expect(hub.requestsOf("abort").slice(aborts)).not.toContainEqual(
+				expect.objectContaining({ attempt: 0 }),
+			)
+		})
+
+		it("an end with no account whose hub dies unreported past the wait is IQHUB_EXITED", async () => {
+			newFake()
+			const supervisor = makeSupervisor({ endWaitMs: 20 })
+			const { hub, front, closed } = await dialActive(supervisor)
+			const settled = settledFlag(closed)
+			hub.dying = true
+			const probed = probeOf(hub)
+			front.socket?.end()
+			// The end wait expired: the probe went out and nobody answers it.
+			await probed
+			await new Promise(resolve => setTimeout(resolve, 100))
+			expect(settled()).toBe(false)
+			hub.exit({ code: null, signal: "SIGKILL", spawnError: null })
+			const result = await closed
+			expect(result.error?.code).toBe(IQHUB_EXITED)
+		})
+
+		it("a dying hub that never reports its exit is ended by the watchdog: IQHUB_HUNG", async () => {
+			newFake()
+			const supervisor = makeSupervisor({
+				watchdog: { hungAfterMs: 200, checkEveryMs: 20 },
+			})
+			const { socket, hub, closed } = await dialActive(supervisor)
+			hub.dying = true
+			socket.destroy(readReset())
+			const result = await closed
+			expect(result.error?.code).toBe(IQHUB_HUNG)
+			expect(hub.signals).toEqual(["SIGKILL"])
+		})
+	})
+
 	it("SourceManager's end reaches the hub as the front's EOF, the commands first", async () => {
 		newFake()
 		const supervisor = makeSupervisor()

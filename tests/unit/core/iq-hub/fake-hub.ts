@@ -310,6 +310,11 @@ export class FakeHubInstance implements HubProcess {
 	sourcePos = 0
 	stream = 0
 	stopped = false
+	/**
+	 * A dying process (killed, its exit not reported yet): requests are recorded but never
+	 * answered, and no event is emitted any more.
+	 */
+	dying = false
 	exited = false
 	controlEnded = false
 	private progress: ReturnType<typeof setInterval> | null = null
@@ -337,7 +342,7 @@ export class FakeHubInstance implements HubProcess {
 	}
 
 	emit(type: string, members: Record<string, unknown>, seq?: number): void {
-		if (this.stopped || this.exited) return
+		if (this.stopped || this.dying || this.exited) return
 		const line = JSON.stringify({
 			v: 1,
 			type,
@@ -369,6 +374,7 @@ export class FakeHubInstance implements HubProcess {
 		const request = JSON.parse(line) as Request
 		this.requests.push(request)
 		for (const wake of this.requestWaiters.splice(0)) wake()
+		if (this.dying) return true
 		this.owner.onRequest(this, request)
 		return true
 	}
