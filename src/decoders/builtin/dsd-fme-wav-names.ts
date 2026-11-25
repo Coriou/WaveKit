@@ -150,18 +150,7 @@ export function dsdFmeCallWavPattern(call: DsdFmeWavCall): RegExp | null {
 	}
 }
 
-/**
- * The identity two calls share when one's recording name would match the other's: the slot and
- * the name pattern built from the protocol fields. Null when the call gets no pattern.
- */
-export function dsdFmeCallWavIdentity(
-	call: DsdFmeWavCall & { slot?: number | null | undefined },
-): string | null {
-	const pattern = dsdFmeCallWavPattern(call)
-	return pattern === null ? null : `${call.slot ?? "-"}|${pattern.source}`
-}
-
-/** The previous call of an identity, in wall ms: when it started and when the adapter saw it end. */
+/** A previous call, in wall ms: when it started and when the adapter saw it end. */
 export interface DsdFmeWavPrevious {
 	startWallMs: number
 	endWallMs: number

@@ -61,6 +61,8 @@ async function setup(): Promise<{
 	l["child"] = () => l
 	const logger = l as unknown as Logger
 	const inventory = createRecordingInventory({
+		// Not a privacy test: every call file counts as linked by a clear call row.
+		callFileLinked: () => true,
 		dsdFmeDirs: () => [{ decoderId: "a", dir: dsd }],
 		scannerRecordingsDir: () => null,
 		now: () => now,

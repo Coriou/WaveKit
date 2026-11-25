@@ -316,6 +316,8 @@ describe("recordingRoutes over a real inventory", () => {
 		}
 		logger["child"] = () => logger
 		const inventory = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [{ decoderId: "a", dir: dsd }],
 			scannerRecordingsDir: () => null,
 			now: () => now,

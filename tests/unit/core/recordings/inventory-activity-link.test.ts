@@ -47,12 +47,16 @@ describe("catalogue links to Activity", () => {
 			{ decoderId: "dsd-b", dir: b },
 		]
 		const wired = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: dirs,
 			scannerRecordingsDir: () => null,
 			logger,
 			activityEventId: key => (key === `dsd~${NAME}` ? "evt-1" : null),
 		})
 		const plain = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: dirs,
 			scannerRecordingsDir: () => null,
 			logger,
@@ -72,6 +76,8 @@ describe("catalogue links to Activity", () => {
 	it("hasKey answers from memory once built, null before", async () => {
 		const { a, b } = await callDirs()
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [
 				{ decoderId: "dsd-a", dir: a },
 				{ decoderId: "dsd-b", dir: b },
@@ -94,6 +100,8 @@ describe("catalogue links to Activity", () => {
 		const old = (Date.now() - 60_000) / 1000
 		await utimes(file, old, old)
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [
 				{ decoderId: "dsd-a", dir: a },
 				{ decoderId: "dsd-b", dir: b },
@@ -137,6 +145,8 @@ describe("catalogue links to Activity", () => {
 		const dvCalls = join(b, "dv-calls")
 		const DV = "20261012_100002_12346_dsd-a_GROUP_TGT_9_SRC_3.wav"
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [
 				{ decoderId: "dsd-a", dir: a },
 				{ decoderId: "dsd-b", dir: b },
@@ -186,6 +196,8 @@ describe("catalogue links to Activity", () => {
 			{ decoderId: "dsd-b", dir: b },
 		]
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => dirs,
 			scannerRecordingsDir: () => null,
 			logger,
@@ -209,6 +221,8 @@ describe("catalogue links to Activity", () => {
 	it("opens a dsd-fme call by its stable key in whichever dsd-fme directory holds it", async () => {
 		const { a, b } = await callDirs()
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [
 				{ decoderId: "dsd-a", dir: a },
 				{ decoderId: "dsd-b", dir: b },

@@ -7240,6 +7240,20 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   `TEMP_` files, live probe folders (`probe-*`), names that match neither the
   dsd-fme call pattern nor the scanner recording id, symbolic links and
   non-regular files. Files that vanish during a scan are skipped.
+- Digital call files (since 2026-11-25): a `dsd-fme-call` or `dv-call` file
+  (a YSF or D-STAR call; DMR, P25, NXDN, dPMR, ProVoice and M17 names are
+  refused by name) is listed, counted and served only while a stored call row
+  whose own trust fields prove the call clear links that exact file (the
+  transmissions route's rule: an unproven or encrypted call, a file no row
+  links, a pruned row and Activity off all leave it out). Its `id`, its `key`
+  and the file route then answer 404 `RECORDING_NOT_FOUND`, as an unknown
+  recording, and `counts` and `scannedFiles` leave it out. The answer is read
+  from the Activity store's link index in memory (one map read per item) at
+  every listing and download, so a call's file appears once its row is linked
+  (the `recordings` channel sends no notice for it). Keep and delete of such a
+  file answer 404 too; it stays on disk under the usual retention. Scanner
+  probe call files (`scanner-dv`) keep their own rules
+  ([SCANNER](SCANNER.md#digital-voice-recordings)).
 - Catalogue: the list is served from memory, never from a walk of the disk per
   request, and kept sorted as it changes (a listing never sorts). The core
   builds the catalogue in the background at start, newest folders first; until

@@ -85,6 +85,8 @@ async function setup() {
 	await symlink(real, configured)
 	const { logger, warn } = fakeLogger()
 	const inv = createRecordingInventory({
+		// Not a privacy test: every call file counts as linked by a clear call row.
+		callFileLinked: () => true,
 		dsdFmeDirs: () => [{ decoderId: "a", dir: configured }],
 		scannerRecordingsDir: () => null,
 		now: () => now,
@@ -144,6 +146,8 @@ describe("recordings inventory, symlinked scanner storage root", () => {
 		await symlink(real, storage)
 		const { logger } = fakeLogger()
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [],
 			scannerRecordingsDir: () => path.join(storage, "recordings"),
 			now: () => now,

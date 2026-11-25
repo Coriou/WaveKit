@@ -554,7 +554,10 @@ class ActivityStore implements ActivityStoreHandle {
 	private linkOpsInFlight: ActivityLinkOp[] = []
 	private linkOpsDropped = 0
 	/** Recording key → its newest linked row, at most ACTIVITY_LINKS_MAX (oldest seq out). */
-	private readonly links = new Map<string, { eventId: string; seq: bigint }>()
+	private readonly links = new Map<
+		string,
+		{ eventId: string; seq: bigint; refused: boolean }
+	>()
 	/** Smallest seq in `links` (a prune past it drops entries). */
 	private linksMinSeq: bigint | null = null
 	private readonly linkListeners = new Set<
@@ -655,7 +658,11 @@ class ActivityStore implements ActivityStoreHandle {
 			if (event.linked) {
 				if (known !== undefined && known.seq > seq) continue
 				this.links.delete(event.recordingId)
-				this.links.set(event.recordingId, { eventId: event.eventId, seq })
+				this.links.set(event.recordingId, {
+					eventId: event.eventId,
+					seq,
+					refused: event.refused === true,
+				})
 				if (this.linksMinSeq === null || seq < this.linksMinSeq)
 					this.linksMinSeq = seq
 			} else if (event.eventId === "" || known?.eventId === event.eventId) {
@@ -699,7 +706,8 @@ class ActivityStore implements ActivityStoreHandle {
 	}
 
 	recordingEventId(recordingId: string): string | null {
-		return this.links.get(recordingId)?.eventId ?? null
+		const link = this.links.get(recordingId)
+		return link === undefined || link.refused ? null : link.eventId
 	}
 
 	linkedRecordings(): readonly string[] {

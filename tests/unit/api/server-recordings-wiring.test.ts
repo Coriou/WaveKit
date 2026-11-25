@@ -130,6 +130,8 @@ describe("recordings inventory through the API server", () => {
 			getConfiguredDecoderConfigs: () => configs,
 		})
 		const inventory = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => dirs,
 			scannerRecordingsDir: () => null,
 			logger,
@@ -293,6 +295,8 @@ describe("recordings inventory through the API server", () => {
 			await fs.utimes(file, old, old)
 		}
 		const inventory = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [],
 			scannerRecordingsDir: () => scan,
 			logger,

@@ -19,6 +19,8 @@ import {
 	dsdFmeCallRecordable,
 	protocolRecordable,
 } from "../../../decoders/builtin/dmr-recording-gate.js"
+import type { CallTrustFields } from "../../../decoders/builtin/dmr-recording-gate.js"
+import { callLinkAdmits } from "../../transmissions/redact.js"
 import { recordingLinkOf, summaryWithRecording } from "./row.js"
 import { bindInteger, cell } from "./sqlite.js"
 import type { SqliteDatabase, SqliteStatement, SqliteValue } from "./sqlite.js"
@@ -209,7 +211,67 @@ export function applyActivityLinks(
 	return events
 }
 
-/** Every link, newest row first, at most `max`: the parent's index after open. */
+/**
+ * Whether a link of this row is refused (ActivityLinkEvent.refused): a `dsd~` call file key
+ * that is not on a decoder reception whose own trust fields admit it (callLinkAdmits, the gate
+ * the transmissions DTO and the Activity detail answer through). Other keys (a scanner `scan:`
+ * file on its `recording-change` row) are never refused here.
+ */
+export function callLinkRefused(
+	recordingId: string,
+	kind: unknown,
+	protocol: unknown,
+	data: CallTrustFields,
+): boolean {
+	if (!recordingId.startsWith("dsd~")) return false
+	return !(
+		kind === "decoder-reception" && callLinkAdmits(protocol, data, recordingId)
+	)
+}
+
+/**
+ * callLinkRefused for a row being committed: its own record's call data (record_json, parsed
+ * only for a `dsd~` link: one call file per call row). Unparseable: refused (fail closed).
+ */
+export function builtRowLinkRefused(
+	recordingId: string,
+	row: { kind: unknown; protocol: unknown; recordJson: string },
+): boolean {
+	if (!recordingId.startsWith("dsd~")) return false
+	let decoded: unknown
+	try {
+		const record = JSON.parse(row.recordJson) as unknown
+		decoded =
+			typeof record === "object" && record !== null
+				? (record as { payload?: { decodedData?: unknown } }).payload
+						?.decodedData
+				: undefined
+	} catch {
+		return true
+	}
+	if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded))
+		return true
+	const data = decoded as Record<string, unknown>
+	const protocol = data["protocol"]
+	return callLinkRefused(
+		recordingId,
+		row.kind,
+		typeof protocol === "string" && protocol.length > 0
+			? protocol
+			: row.protocol,
+		data,
+	)
+}
+
+/** JSON booleans read back from json_extract as 1 / 0. */
+const sqlBool = (v: unknown): unknown =>
+	v === 1 || v === 1n ? true : v === 0 || v === 0n ? false : v
+
+/**
+ * Every link, newest row first, at most `max`: the parent's index after open. A `dsd~` link
+ * carries `refused` when its row's own call trust does not admit it (callLinkRefused), so a link
+ * stored before the trust rule (an unproven or encrypted call) is never answered.
+ */
 export function readRecordingLinks(
 	db: SqliteDatabase,
 	max: number = ACTIVITY_LINKS_MAX,
@@ -217,7 +279,13 @@ export function readRecordingLinks(
 	const out: ActivityLinkEvent[] = []
 	const rows = db
 		.prepare(
-			`SELECT r.ref_value AS ref_value, a.event_id AS event_id, CAST(a.seq AS TEXT) AS seq
+			`SELECT r.ref_value AS ref_value, a.event_id AS event_id, CAST(a.seq AS TEXT) AS seq,
+				a.kind AS kind, a.protocol AS row_protocol,
+				json_extract(a.record_json, '$.payload.decodedData.protocol') AS protocol,
+				json_extract(a.record_json, '$.payload.decodedData.encrypted') AS encrypted,
+				json_extract(a.record_json, '$.payload.decodedData.encryptionKnown') AS known,
+				json_extract(a.record_json, '$.payload.decodedData.clearEvidence') AS evidence,
+				json_extract(a.record_json, '$.payload.decodedData.flags.encrypted') AS flagged
 			 FROM activity_refs r JOIN activity a ON a.seq = r.seq
 			 WHERE r.ref_type = 'recordingId' ORDER BY r.seq DESC LIMIT ?`,
 		)
@@ -232,7 +300,30 @@ export function readRecordingLinks(
 			typeof seq !== "string"
 		)
 			continue
-		out.push({ recordingId: id, eventId, seq, linked: true })
+		const decoded = cell(row, "protocol")
+		const flagged = sqlBool(cell(row, "flagged"))
+		const refused = callLinkRefused(
+			id,
+			cell(row, "kind"),
+			typeof decoded === "string" && decoded.length > 0
+				? decoded
+				: cell(row, "row_protocol"),
+			{
+				encrypted: sqlBool(cell(row, "encrypted")),
+				encryptionKnown: sqlBool(cell(row, "known")),
+				clearEvidence: sqlBool(cell(row, "evidence")),
+				...(flagged !== null && flagged !== undefined
+					? { flags: { encrypted: flagged } }
+					: {}),
+			},
+		)
+		out.push({
+			recordingId: id,
+			eventId,
+			seq,
+			linked: true,
+			...(refused ? { refused: true as const } : {}),
+		})
 	}
 	return out
 }

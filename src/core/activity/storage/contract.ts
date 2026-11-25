@@ -359,7 +359,10 @@ export interface ActivityStoreHandle {
 	 * at most ACTIVITY_LINK_OPS_MAX wait, the oldest is dropped (counted) past that.
 	 */
 	link?(op: ActivityLinkOp): void
-	/** The eventId of the newest row linked to a recording key, from memory; null when none. */
+	/**
+	 * The eventId of the newest row linked to a recording key, from memory; null when none or
+	 * when that link is refused (ActivityLinkEvent.refused).
+	 */
 	recordingEventId?(recordingId: string): string | null
 	/** The linked recording keys (memory, in no order): what the link sweep checks. */
 	linkedRecordings?(): readonly string[]
@@ -402,6 +405,13 @@ export interface ActivityLinkEvent {
 	/** The row's commitSeq (decimal). */
 	seq: string
 	linked: boolean
+	/**
+	 * A `dsd~` link whose row does not prove its call clear (callLinkAdmits: a row written before
+	 * the trust rule, an unproven or encrypted call, a refused protocol). The index keeps it, so
+	 * the link sweep still drops it with its file, but never answers it (recordingEventId null):
+	 * the recordings list and file route serve no call file through it.
+	 */
+	refused?: true
 }
 
 /** A scanner recording kept for good, admitted as a `recording-change` record. */

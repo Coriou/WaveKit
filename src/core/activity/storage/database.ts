@@ -18,6 +18,7 @@ import {
 	errnoCode,
 } from "./errors.js"
 import type { ActivityLimits } from "./limits.js"
+import { builtRowLinkRefused } from "./links.js"
 import { truncateUtf8 } from "./row.js"
 import type { BuiltActivityRow } from "./row.js"
 import { bindInteger, cell, sqlNumber } from "./sqlite.js"
@@ -215,6 +216,9 @@ export function commitActivityBatch(
 							eventId: row.eventId,
 							seq: String(seq),
 							linked: true,
+							...(builtRowLinkRefused(item.value, row)
+								? { refused: true as const }
+								: {}),
 						})
 				}
 				committedEventIds.push(row.eventId)

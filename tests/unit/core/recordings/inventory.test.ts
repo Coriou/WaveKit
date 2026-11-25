@@ -275,6 +275,8 @@ function fakeInventory(
 	extra: Partial<RecordingInventoryOptions> = {},
 ): ReturnType<typeof createRecordingInventory> {
 	return createRecordingInventory({
+		// Not a privacy test: every call file counts as linked by a clear call row.
+		callFileLinked: () => true,
 		dsdFmeDirs: () => [{ decoderId: "a", dir: "/r/dsd" }],
 		scannerRecordingsDir: () => "/r/scan",
 		now: () => NOW,
@@ -416,7 +418,10 @@ describe("recordings inventory on a hostile tree", () => {
 	it("lists only eligible recordings, resolves them, and leaves the tree untouched", async () => {
 		const { options, warn } = await build()
 		const before = await treeHash(root)
-		const inv = createRecordingInventory(options)
+		const inv = createRecordingInventory({
+			...options,
+			callFileLinked: () => true,
+		})
 		const page = await inv.list({ limit: "200" })
 		const ids = page.items.map(i => i.id).sort()
 		expect(ids).toEqual(
@@ -504,7 +509,10 @@ describe("recordings inventory on a hostile tree", () => {
 
 	it("refuses a file replaced by a symlink between list and resolve", async () => {
 		const { options } = await build()
-		const inv = createRecordingInventory(options)
+		const inv = createRecordingInventory({
+			...options,
+			callFileLinked: () => true,
+		})
 		const page = await inv.list({})
 		const id = "dsd:1~20261016_130000_00001_YSF_X_PRIVATE_TGT_7_SRC_8.wav"
 		expect(page.items.some(i => i.id === id)).toBe(true)
@@ -520,6 +528,8 @@ describe("recordings inventory on a hostile tree", () => {
 		await mkdir(s2)
 		await symlink(path.join(root, "scan", "dv"), path.join(s2, "dv"))
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			...options,
 			dsdFmeDirs: () => [],
 			scannerRecordingsDir: () => s2,
@@ -527,6 +537,8 @@ describe("recordings inventory on a hostile tree", () => {
 		expect((await inv.list({})).items).toEqual([])
 		expect(await inv.resolve("scan:d_abc~call-1.wav")).toBeNull()
 		const inv2 = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			...options,
 			dsdFmeDirs: () => [],
 			scannerRecordingsDir: () => path.join(root, "scanLink"),
@@ -539,6 +551,8 @@ describe("recordings inventory on a hostile tree", () => {
 	it("handles a null scanner dir and missing directories", async () => {
 		const { logger, warn } = fakeLogger()
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [{ decoderId: "a", dir: "/nonexistent/wk-rec/x" }],
 			scannerRecordingsDir: () => null,
 			logger,
@@ -547,6 +561,8 @@ describe("recordings inventory on a hostile tree", () => {
 		expect(page).toMatchObject({ items: [], scannedFiles: 0, truncated: false })
 		expect(warn).not.toHaveBeenCalled()
 		const inv2 = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [],
 			scannerRecordingsDir: () => "/nonexistent/wk-rec/scan",
 			logger,
@@ -1121,6 +1137,8 @@ describe("recordings inventory open on the real filesystem", () => {
 		fs: RecordingFsPort = nodeRecordingFs,
 	): ReturnType<typeof createRecordingInventory> {
 		return createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [{ decoderId: "a", dir: s.dsd }],
 			scannerRecordingsDir: () => s.scan,
 			now: () => s.now,
@@ -1301,6 +1319,8 @@ describe("recordings inventory WG9 kept and invalidate", () => {
 		extra: Partial<RecordingInventoryOptions> = {},
 	): ReturnType<typeof createRecordingInventory> {
 		return createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [{ decoderId: "a", dir: s.dsd }],
 			scannerRecordingsDir: () => s.scan,
 			discoveryCentreHz: () => 446_000_000,

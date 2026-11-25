@@ -42,7 +42,7 @@ import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { Logger } from "../../utils/logger.js"
-import { recordingKeepKeyOf } from "./contract.js"
+import { dsdFmeKeepKey, recordingKeepKeyOf } from "./contract.js"
 import type { RecordingKeepKey, RecordingProtection } from "./contract.js"
 import {
 	afterCursor,
@@ -259,8 +259,16 @@ export interface RecordingInventoryOptions {
 	/**
 	 * The Activity row linked to a recording key (memory only, read at list time). When given,
 	 * every listed item carries `activityEventId` (null when none); absent, no such property.
+	 * Unless callFileLinked is given it is also the per-call file gate: the Activity store's link
+	 * index answers only a link whose call row proves its call clear (callLinkAdmits).
 	 */
 	activityEventId?: (key: string) => string | null
+	/**
+	 * Whether a stored call row that proves its call clear links this `dsd~` key (the per-call
+	 * file gate, read at list and open time, memory only). Default: activityEventId answers a row
+	 * for it. Neither given: false, so no per-call file is listed or opened (fail closed).
+	 */
+	callFileLinked?: (key: string) => boolean
 }
 
 /** WG9: an opened, verified recording (the caller owns and closes `handle`). */
@@ -1956,6 +1964,34 @@ export function createRecordingInventory(
 	}
 
 	/**
+	 * Rule six for per-call files (dsd-fme's and the dv call recorder's): one is listed, opened or
+	 * named only while a stored call row links that exact key and its own trust proves the call
+	 * clear. That is the transmissions DTO's gate (callLinkAdmits): the Activity store's link index
+	 * marks every other `dsd~` link refused and answers it null (activityEventId). An unproven or
+	 * encrypted call, an unlinked file and Activity off are not listed and answer 404.
+	 *
+	 * Bound: memory only, one Map read per call; a listing reads at most one per catalogue entry
+	 * (RECORDINGS_CATALOGUE_MAX = 50 000 O(1) reads, a few ms), an open or a resolve one per
+	 * dsd-fme source (one per configured decoder). No Activity query, no fs call.
+	 */
+	function callFileLinked(key: string | null): boolean {
+		if (key === null || !key.startsWith("dsd~")) return false
+		try {
+			if (options.callFileLinked !== undefined)
+				return options.callFileLinked(key) === true
+			const eventId = options.activityEventId?.(key)
+			return typeof eventId === "string" && eventId.length > 0
+		} catch {
+			return false
+		}
+	}
+
+	/** A listed entry a listing may show: not a per-call file, or one callFileLinked admits. */
+	function entryShown(e: IndexedEntry): boolean {
+		return !isCallKind(e.item.kind) || callFileLinked(e.key)
+	}
+
+	/**
 	 * The listing's per-read helpers: owners cached per read, the protection answer, and the
 	 * listed item as a page serves it (roll-over parts computed once per observation).
 	 */
@@ -2178,7 +2214,15 @@ export function createRecordingInventory(
 		let matched = 0
 		let keptTotal = 0
 		let more = false
+		// Per-call files are shown only while linked (entryShown): any in the view, every entry is
+		// read (the slice below cannot skip the hidden ones).
+		const callFiles = v.byKind["dsd-fme-call"] + v.byKind["dv-call"]
+		/** Entries callFileLinked hides: left out of every count, as unknown files are. */
+		let hidden = 0
+		let hiddenBytes = 0
+		const hiddenByKind = { "dsd-fme-call": 0, "dv-call": 0 }
 		const filtered =
+			callFiles > 0 ||
 			q.kind !== null ||
 			q.decoderId !== null ||
 			q.talkgroup !== null ||
@@ -2229,6 +2273,13 @@ export function createRecordingInventory(
 			for (let i = 0; i < n; i++) {
 				const e = v.entries[i]
 				if (e === undefined) continue
+				if (!entryShown(e)) {
+					hidden++
+					hiddenBytes += e.item.bytes
+					if (e.item.kind === "dsd-fme-call" || e.item.kind === "dv-call")
+						hiddenByKind[e.item.kind]++
+					continue
+				}
 				const kept = keptOf(e)
 				if (kept === true) keptTotal++
 				if (!keep(e, kept)) continue
@@ -2252,7 +2303,7 @@ export function createRecordingInventory(
 				more && last
 					? encodeCursor({ m: last.e.mtimeMs, i: last.e.item.id })
 					: null,
-			scannedFiles: v.entries.length,
+			scannedFiles: v.entries.length - hidden,
 			truncated: cutoff !== null || foldersTruncated || namesTruncated,
 			scannedAt: new Date(lastFullAt ?? startedAt).toISOString(),
 			revision,
@@ -2262,10 +2313,15 @@ export function createRecordingInventory(
 				? {}
 				: { matchedByChannel: channelCounts(byChannel) }),
 			counts: {
-				total: v.entries.length,
+				total: v.entries.length - hidden,
 				kept: keptTotal,
-				bytes: v.bytes,
-				byKind: { ...v.byKind },
+				bytes: v.bytes - hiddenBytes,
+				byKind: {
+					...v.byKind,
+					"dsd-fme-call":
+						v.byKind["dsd-fme-call"] - hiddenByKind["dsd-fme-call"],
+					"dv-call": v.byKind["dv-call"] - hiddenByKind["dv-call"],
+				},
 				copiesTotal: copiesListed(keptOf),
 			},
 			truncatedBefore:
@@ -2468,6 +2524,8 @@ export function createRecordingInventory(
 			const name = key[1]
 			// Only a name the catalogue lists (a dsd-fme call name, never TEMP_): dsdId's check.
 			if (dsdId(0, name) === null) return []
+			// And only a call file a clear call row links (callFileLinked): else 404, as unknown.
+			if (!callFileLinked(dsdFmeKeepKey(name))) return []
 			const out: Location[] = []
 			for (const source of await dsdSources(newCounts())) {
 				if (!callFileServable(source.kind, name)) continue
@@ -2483,6 +2541,7 @@ export function createRecordingInventory(
 		const [, n, dsdName, recordingId] = m
 		if (n !== undefined && dsdName !== undefined) {
 			if (dsdId(Number(n), dsdName) !== id) return []
+			if (!callFileLinked(dsdFmeKeepKey(dsdName))) return []
 			const sources = await dsdSources(newCounts())
 			const source = sources[Number(n)]
 			if (!source || !callFileServable(source.kind, dsdName)) return []
@@ -2707,8 +2766,8 @@ export function createRecordingInventory(
 			const { keptOf, itemOf } = itemReader(counts)
 			for (const key of keys.slice(0, RECORDINGS_ITEMS_OF_KEYS_MAX)) {
 				for (const e of byKey.get(key) ?? []) {
-					// Only what a listing serves: the listed copy of its id.
-					if (!e.listed) continue
+					// Only what a listing serves: the listed copy of its id, a call file only linked.
+					if (!e.listed || !entryShown(e)) continue
 					out.push(itemOf(e, keptOf(e)))
 					break
 				}
