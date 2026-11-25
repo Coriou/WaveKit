@@ -9,6 +9,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { MockInstance } from "vitest"
 import {
 	DSD_FME_HELD_OUTPUTS_MAX,
 	DSD_FME_WAV_ATTEMPT_TIMEOUT_MS,
@@ -49,9 +50,59 @@ function callOf(tg: number) {
 	}
 }
 
+/**
+ * The adapter's one directory read (fs.promises.opendir) without real asynchronous I/O: the
+ * directory's names are read when the listing opens and handed out on promise turns only. A real
+ * opendir finishes on the libuv thread pool whenever the host lets it, so on a loaded host it
+ * raced the fake timers these tests advance (an attempt's timeout fired before a read that had
+ * nothing wrong with it). Here a listing completes within the microtasks of the turn that opened
+ * it, whatever the load: the tests' timers alone decide the ordering. A missing directory rejects
+ * as opendir does (ENOENT).
+ */
+function memoryOpendir(
+	dir: fs.PathLike,
+	_options?: fs.OpenDirOptions,
+): Promise<fs.Dir> {
+	let names: string[]
+	try {
+		names = fs.readdirSync(dir, "utf8")
+	} catch (err) {
+		return Promise.reject(err instanceof Error ? err : new Error(String(err)))
+	}
+	let closed = false
+	const listing = {
+		path: String(dir),
+		close: async (): Promise<void> => {
+			closed = true
+		},
+		[Symbol.asyncIterator]: async function* () {
+			try {
+				for (const name of names) {
+					if (closed) return
+					yield { name }
+				}
+			} finally {
+				closed = true
+			}
+		},
+	}
+	return Promise.resolve(listing as unknown as fs.Dir)
+}
+
+let baseOpendir: MockInstance<typeof fs.promises.opendir> | null = null
+
+/** This test's opendir spy (backed by memoryOpendir), its calls cleared; tests script it further. */
+function opendirSpy(): MockInstance<typeof fs.promises.opendir> {
+	if (baseOpendir === null) throw new Error("no opendir spy installed")
+	return baseOpendir.mockClear().mockImplementation(memoryOpendir)
+}
+
 let root = ""
 beforeEach(() => {
 	root = fs.mkdtempSync(path.join(os.tmpdir(), "wk-dsd-lookup-"))
+	baseOpendir = vi
+		.spyOn(fs.promises, "opendir")
+		.mockImplementation(memoryOpendir)
 	vi.spyOn(
 		DsdFmeDecoder.prototype as unknown as { recordingLinkable(): boolean },
 		"recordingLinkable",
@@ -59,6 +110,7 @@ beforeEach(() => {
 })
 afterEach(() => {
 	vi.restoreAllMocks()
+	baseOpendir = null
 	fs.rmSync(root, { recursive: true, force: true })
 })
 
@@ -85,12 +137,11 @@ describe("dsd-fme WAV lookup", () => {
 	it("runs one listing at a time when several calls end at once, and finds each file", async () => {
 		const tgs = [11, 12, 13, 14, 15]
 		for (const tg of tgs) fs.writeFileSync(path.join(root, fileOf(tg)), "")
-		const real = fs.promises.opendir.bind(fs.promises)
+		const real = memoryOpendir
 		let inFlight = 0
 		let peak = 0
-		const opendir = vi
-			.spyOn(fs.promises, "opendir")
-			.mockImplementation(async (...args: Parameters<typeof real>) => {
+		const opendir = opendirSpy().mockImplementation(
+			async (...args: Parameters<typeof real>) => {
 				inFlight++
 				peak = Math.max(peak, inFlight)
 				// Hold the listing open across a few turns so an overlap would show.
@@ -106,7 +157,8 @@ describe("dsd-fme WAV lookup", () => {
 						}
 					},
 				})
-			})
+			},
+		)
 		const { d, found } = decoderWithUpdates()
 		const lookup = d as unknown as Lookup
 		const end = new Date(START.getTime() + 2000)
@@ -135,7 +187,7 @@ describe("dsd-fme WAV lookup", () => {
 
 	/** A listing of `names` (the fs's order), through the adapter's opendir. */
 	function listing(names: readonly string[]) {
-		return vi.spyOn(fs.promises, "opendir").mockImplementation(
+		return opendirSpy().mockImplementation(
 			async () =>
 				({
 					close: async () => undefined,
@@ -233,22 +285,20 @@ function recorder(d: DsdFmeDecoder) {
 /** opendir that never settles (a stuck directory read). */
 /**
  * opendir whose first read under this test's root stays pending until `release()` (it then
- * fails as a missing directory: no match); later reads are real.
+ * fails as a missing directory: no match); later reads list the directory (memoryOpendir).
  */
 function heldOpendir() {
-	const real = fs.promises.opendir.bind(fs.promises)
+	const real = memoryOpendir
 	let release = (): void => undefined
 	let held = false
-	const opendir = vi
-		.spyOn(fs.promises, "opendir")
-		.mockImplementation((dir, options) => {
-			if (held || !String(dir).startsWith(root)) return real(dir, options)
-			held = true
-			return new Promise<fs.Dir>((_resolve, reject) => {
-				release = () =>
-					reject(Object.assign(new Error("gone"), { code: "ENOENT" }))
-			})
+	const opendir = opendirSpy().mockImplementation((dir, options) => {
+		if (held || !String(dir).startsWith(root)) return real(dir, options)
+		held = true
+		return new Promise<fs.Dir>((_resolve, reject) => {
+			release = () =>
+				reject(Object.assign(new Error("gone"), { code: "ENOENT" }))
 		})
+	})
 	return { opendir, release: () => release() }
 }
 
@@ -257,7 +307,7 @@ function ours(opendir: { mock: { calls: unknown[][] } }): unknown[][] {
 	return opendir.mock.calls.filter(([dir]) => String(dir).startsWith(root))
 }
 
-/** Lets real I/O run (setImmediate turns; fake time does not move) until `done`, at most 500 turns. */
+/** Lets pending reads settle (setImmediate turns; fake time does not move) until `done`, at most 500 turns. */
 async function untilReal(done: () => boolean): Promise<void> {
 	for (let i = 0; i < 500 && !done(); i++)
 		await new Promise(resolve => setImmediate(resolve))
@@ -274,40 +324,34 @@ const missingDir = (): Promise<fs.Dir> =>
 
 /**
  * opendir whose first `n` reads of this test's root itself stay pending until `release(i)` (each
- * then fails as a missing directory: no match); later reads of the root are real. Its
- * subdirectories' reads are real too, or with `missingSubdirs` fail at once as missing (no real
- * I/O: the test's turns, not the machine's load, decide when they settle). No test here creates
- * WAV/ or wav/, so `missingSubdirs` gives the same answer as a real read; a test that releases a
- * held read and then waits with `untilReal` needs it, or two real opendir calls race its 500
- * turns on a loaded host.
+ * then fails as a missing directory: no match); later reads of the root list it (memoryOpendir).
+ * Its subdirectories are listed too, or with `missingSubdirs` fail at once as missing. No test
+ * here creates WAV/ or wav/, so `missingSubdirs` gives the same answer as a listing.
  */
 function heldReads(n: number, opts: { missingSubdirs?: boolean } = {}) {
-	const real = fs.promises.opendir.bind(fs.promises)
+	const real = memoryOpendir
 	const releases: (() => void)[] = []
-	const opendir = vi
-		.spyOn(fs.promises, "opendir")
-		.mockImplementation((dir, options) => {
-			if (
-				opts.missingSubdirs === true &&
-				String(dir) !== root &&
-				String(dir).startsWith(root)
+	const opendir = opendirSpy().mockImplementation((dir, options) => {
+		if (
+			opts.missingSubdirs === true &&
+			String(dir) !== root &&
+			String(dir).startsWith(root)
+		)
+			return missingDir()
+		if (releases.length >= n || String(dir) !== root) return real(dir, options)
+		return new Promise<fs.Dir>((_resolve, reject) => {
+			releases.push(() =>
+				reject(Object.assign(new Error("gone"), { code: "ENOENT" })),
 			)
-				return missingDir()
-			if (releases.length >= n || String(dir) !== root)
-				return real(dir, options)
-			return new Promise<fs.Dir>((_resolve, reject) => {
-				releases.push(() =>
-					reject(Object.assign(new Error("gone"), { code: "ENOENT" })),
-				)
-			})
 		})
+	})
 	return { opendir, release: (i: number) => releases[i]?.() }
 }
 
 function stuckOpendir() {
-	return vi
-		.spyOn(fs.promises, "opendir")
-		.mockImplementation(() => new Promise<fs.Dir>(() => undefined))
+	return opendirSpy().mockImplementation(
+		() => new Promise<fs.Dir>(() => undefined),
+	)
 }
 
 describe("dsd-fme call_end held for its first lookup", () => {
@@ -444,7 +488,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("single flight: once the stuck read settles, the fresh search gets its own full DSD_FME_WAV_ATTEMPT_TIMEOUT_MS", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		// The subdirectories fail at once as missing: no real I/O races the frozen fake clock.
+		// The subdirectories fail at once as missing.
 		const reads = heldReads(2, { missingSubdirs: true })
 		const { d } = decoderWithUpdates()
 		const internals = d as unknown as StuckInternals
@@ -510,7 +554,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 		await d.start()
 		if (internals.callTimeoutTimer) clearInterval(internals.callTimeoutTimer)
 		internals.callTimeoutTimer = null
-		// The old run's waiter gave up; the read still holds a libuv thread, so it stays recorded.
+		// The old run's waiter gave up; the read (a libuv thread in production) stays recorded.
 		expect(old!.waiters.size).toBe(0)
 		expect(internals.stuckWavListing).toBe(old)
 		expect(rootReads()).toBe(1)
@@ -528,7 +572,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 			seen.some(e => e.startsWith(`call_end:56:${fileOf(56)}`)),
 		)
 		expect(internals.stuckWavListing).toBeNull()
-		// Free again: the new call's retries (if any) read one at a time, real reads; the old
+		// Free again: the new call's retries (if any) read one at a time; the old
 		// calls schedule none in the new run.
 		await settleWavLookups(d)
 	})
@@ -824,7 +868,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("a retry an old run scheduled reads nothing in the new run", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const opendir = vi.spyOn(fs.promises, "opendir")
+		const opendir = opendirSpy()
 		const { d, found } = decoderWithUpdates()
 		const internals = d as unknown as {
 			callTimeoutTimer: ReturnType<typeof setInterval> | null
@@ -901,7 +945,7 @@ type StopInternals = EndInternals & {
 
 /**
  * Every timer a lookup chain could still arm (each attempt's timeout, each retry) fired, with the
- * real directory reads between them completing (setImmediate is not faked).
+ * directory reads between them completing (memoryOpendir: within each turn's microtasks).
  */
 async function runOutLookups(d: DsdFmeDecoder): Promise<void> {
 	// A whole chain: 1 + DSD_FME_WAV_RETRIES attempts, each at most its timeout plus the retry gap.
@@ -914,7 +958,7 @@ async function runOutLookups(d: DsdFmeDecoder): Promise<void> {
 	}
 	for (let ms = 0; ms <= chainMs; ms += DSD_FME_WAV_RETRY_MS) {
 		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS)
-		// Small steps, so a real read finishes before its attempt's timeout fires.
+		// Small steps: each read finishes before its attempt's timeout could fire.
 		await Promise.race([settleWavLookups(d), turns(50)])
 	}
 }
