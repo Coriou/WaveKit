@@ -133,7 +133,13 @@ export function fingerprint(
 	}
 }
 
+/**
+ * Intermod evidence tied to the fixture's default centre (1 MHz, every fingerprint's `hz` unless
+ * a test sets one): a product 2·f1 − f2 of it and a carrier 100 kHz up.
+ */
 export const IM3: IntermodEvidence = {
 	rule: "2f1-f2",
-	parents: [{ hz: 1_050_000 }, { hz: 1_100_000 }],
+	parents: [{ hz: 1_000_000 }, { hz: 1_100_000 }],
+	roots: [1_000_000, 1_100_000],
+	tolHz: 4_000,
 }
