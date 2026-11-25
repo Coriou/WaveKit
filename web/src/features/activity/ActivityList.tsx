@@ -687,7 +687,6 @@ export const ActivityRow = memo(function ActivityRow({
 					{channels !== null && <span className="wka-read">{channels}</span>}
 				</span>
 			</button>
-			<ActivityDisc item={item} queue={queue} />
 			{stacked && (
 				<StackToggle
 					stack={stack}
@@ -696,6 +695,8 @@ export const ActivityRow = memo(function ActivityRow({
 					foldsId={foldsId}
 				/>
 			)}
+			{/* the disc is always last: discs line up at the item's right edge, row to row */}
+			<ActivityDisc item={item} queue={queue} />
 		</div>
 	)
 })
@@ -783,7 +784,6 @@ export const ActivityCard = memo(function ActivityCard({
 			{(stacked || channels !== null || audio) && (
 				<div className="wka-cardstack">
 					{channels !== null && <span className="wka-read">{channels}</span>}
-					<ActivityDisc item={item} queue={queue} inline />
 					{stacked && (
 						<StackToggle
 							stack={stack}
@@ -792,6 +792,7 @@ export const ActivityCard = memo(function ActivityCard({
 							foldsId={foldsId}
 						/>
 					)}
+					<ActivityDisc item={item} queue={queue} inline />
 				</div>
 			)}
 		</div>

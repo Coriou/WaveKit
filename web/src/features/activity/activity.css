@@ -380,9 +380,31 @@
 		flex: 1;
 		min-width: 0;
 	}
-	/* a row with audio: its play disc (playback.css) beside the row, before the stack count */
+	/* a row with audio: its play disc (playback.css) last, at the item's right edge, after the stack count, so
+	   discs line up row to row */
 	.wka-disc {
 		align-self: flex-start;
+		margin-left: auto;
+	}
+	/* the disc's place while the core saves its file: same footprint, nothing to press */
+	.wkp-disc[data-saving] {
+		cursor: default;
+		color: var(--wk-text-3);
+	}
+	.wkp-disc[data-saving]:hover .wkp-disc-face {
+		background: none;
+	}
+	.wka-saving-face {
+		box-sizing: border-box;
+		border-style: dashed;
+		border-color: var(--wk-text-3);
+		opacity: 0.6;
+	}
+	.wka-rec-saving {
+		margin: 0;
+		align-self: center;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-text-3);
 	}
 	/* the detail's Recording block: disc and waveform (a seek view of the dock's player), then Keep */
 	.wka-rec {

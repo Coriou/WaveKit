@@ -100,7 +100,7 @@ describe("a kept recording's event in words", () => {
 		])
 	})
 
-	it("keeps every id and raw number for the expert section, the measured centre in whole Hz", () => {
+	it("keeps every id and raw number for the expert section, the measured centre in MHz", () => {
 		const d = recordingChangeDetails(KEPT.payload)
 		const by = Object.fromEntries(d.map(r => [r.term, r.value]))
 		expect(by).toMatchObject({
@@ -109,7 +109,7 @@ describe("a kept recording's event in words", () => {
 			"Owner discovery": "d_B",
 			Observation: "o_A",
 			Receiver: "rx-1",
-			Measured: "measured 145 562 753 Hz (+253 Hz)",
+			Measured: "145.562753 MHz (+253 Hz)",
 			"Observation start (UTC)": "2026-11-23T17:30:21.000Z",
 			"Duration ms": "8181",
 		})

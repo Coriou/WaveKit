@@ -1,7 +1,7 @@
 // The one table that turns a transmission's codes into sentences, and the formatting every surface that leads to
 // the Transmission view uses: the channel on its raster in MHz, local times (the date only when not today),
 // durations in seconds, one rounded number per row with what it is relative to. A code the table lacks shows
-// nothing in "What we know" and its raw value in Details.
+// nothing in "What we know" and its readable form in Details (humanCode: never the raw code).
 import type {
 	ActivitySummary,
 	DecodeField,
@@ -11,7 +11,7 @@ import type {
 } from "@wavekit/api-types"
 
 import { clockText, dateText, sameDay } from "../display.ts"
-import { formatMHz } from "../format.ts"
+import { formatDb, formatMHz } from "../format.ts"
 import { channelMHz } from "../naming.ts"
 import type { TransmissionTone } from "./contract.ts"
 import { readTone } from "./contract.ts"
@@ -207,17 +207,165 @@ export function signalText(snrDb: number | null | undefined): string | null {
 	return `${word}, ${db} dB over the noise`
 }
 
-/** "measured 145 612 753 Hz (+253 Hz)": the measured centre in whole Hz and its offset from the channel. */
+/**
+ * "145.612753 MHz (+253 Hz)": the measured centre in MHz as the app writes frequencies (formatMHz), and its offset
+ * from the channel in whole Hz (kHz past 10 kHz). The row's label says it is measured: the value never repeats it.
+ */
 export function measuredText(
 	measuredHz: number,
 	channelHz: number | null,
 ): string {
 	const whole = Math.round(measuredHz)
-	const spaced = String(whole).replace(/\B(?=(\d{3})+(?!\d))/g, " ")
-	if (channelHz === null) return `measured ${spaced} Hz`
+	const mhz = `${formatMHz(whole)} MHz`
+	if (channelHz === null) return mhz
 	const off = whole - Math.round(channelHz)
 	const sign = off > 0 ? "+" : off < 0 ? "−" : "±"
-	return `measured ${spaced} Hz (${sign}${Math.abs(off)} Hz)`
+	const size = Math.abs(off)
+	const amount =
+		size >= 10_000
+			? `${(size / 1000).toFixed(1)} kHz`
+			: `${String(size).replace(/\B(?=(\d{3})+(?!\d))/g, " ")} Hz`
+	return `${mhz} (${sign}${amount})`
+}
+
+/** "−12.3 dB": one decimal, a true minus; null when not a finite number. */
+export function dbText(db: number | null | undefined): string | null {
+	if (typeof db !== "number" || !Number.isFinite(db)) return null
+	return `${formatDb(db, 1)} dB`
+}
+
+/** "−41.2 dBFS": one decimal, a true minus; null when not a finite number. */
+export function dbfsText(db: number | null | undefined): string | null {
+	if (typeof db !== "number" || !Number.isFinite(db)) return null
+	return `${formatDb(db, 1)} dBFS`
+}
+
+/** "12 %": a 0..1 share as a whole percentage; null when not a finite number. */
+export function shareText(share: number | null | undefined): string | null {
+	if (typeof share !== "number" || !Number.isFinite(share)) return null
+	return `${Math.round(share * 100)} %`
+}
+
+/** "25 Nov 2026, 17:30:21" on the chosen clock (Settings › Display); "" with no valid time. */
+export function dateTimeText(iso: string | null | undefined): string {
+	if (typeof iso !== "string" || !Number.isFinite(Date.parse(iso))) return ""
+	const date = dateText(iso, {
+		day: "numeric",
+		month: "short",
+		year: "numeric",
+	})
+	const time = clockText(iso, { seconds: true })
+	return date === "" || time === "" ? "" : `${date}, ${time}`
+}
+
+/** "2026-11-25 16:30:21 UTC": the same instant in UTC, for the tooltip and the secondary line. */
+export function utcText(iso: string | null | undefined): string {
+	if (typeof iso !== "string") return ""
+	const ms = Date.parse(iso)
+	if (!Number.isFinite(ms)) return ""
+	return `${new Date(ms).toISOString().slice(0, 19).replace("T", " ")} UTC`
+}
+
+/**
+ * A code nobody wrote a sentence for, in a safe readable form: "offRaster" → "Off raster", "prior-none" →
+ * "Prior none", "duration_limit" → "Duration limit". Only letters, digits and spaces survive, at most 60
+ * characters; "Unknown" when nothing does.
+ */
+export function humanCode(code: string | null | undefined): string {
+	if (typeof code !== "string") return "Unknown"
+	const words = code
+		.slice(0, 120)
+		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+		.replace(/[^A-Za-z0-9]+/g, " ")
+		.trim()
+		.toLowerCase()
+		.slice(0, 60)
+		.trim()
+	if (words === "") return "Unknown"
+	return words.charAt(0).toUpperCase() + words.slice(1)
+}
+
+/** The sentence of `code` in the first table that has it, else its readable form; null with no code. */
+export function codeText(
+	code: string | null | undefined,
+	...tables: readonly Readonly<Record<string, string>>[]
+): string | null {
+	if (typeof code !== "string" || code === "") return null
+	for (const table of tables) {
+		const words = wordsFor(table, code)
+		if (words !== null) return words
+	}
+	return humanCode(code)
+}
+
+/** What an observation's signal flag says (the scanner's measurement flags). */
+export const FLAG_WORDS: Readonly<Record<string, string>> = {
+	overload: "Receiver overloaded",
+	gap: "Gap in the stream",
+	offRaster: "Off the channel raster",
+	obwBiased: "Bandwidth estimate biased",
+	adjacentLeak: "Leak from an adjacent channel",
+	suspectedIntermod: "Suspected intermodulation",
+	edge: "At the edge of the band",
+}
+
+/** What the view could not read any more (TransmissionDto.gone). */
+export const GONE_WORDS: Readonly<Record<string, string>> = {
+	activity: "Activity record",
+	observation: "Observation",
+	discovery: "Discovery",
+	audio: "Audio file",
+}
+
+/** Who measured the tone (TransmissionTone.from). */
+export const TONE_FROM_WORDS: Readonly<Record<string, string>> = {
+	recorder: "measured by the recorder",
+	"live-demod": "measured live while listening",
+}
+
+/** The recording admission's numbers and codes, labelled and rounded (Details only). */
+export function admissionRows(
+	a: Readonly<Record<string, unknown>> | null,
+): { term: string; value: string }[] {
+	if (a === null) return []
+	const num = (k: string): number | null => {
+		const v = a[k]
+		return typeof v === "number" && Number.isFinite(v) ? v : null
+	}
+	const str = (k: string): string | null => {
+		const v = a[k]
+		return typeof v === "string" && v !== "" ? v : null
+	}
+	const count = (k: string): string | null => {
+		const v = num(k)
+		return v === null ? null : String(Math.round(v))
+	}
+	const hz = num("frequencyHz")
+	const rows: [string, string | null][] = [
+		["Decision", codeText(str("reason"))],
+		["Strength", codeText(str("strength"))],
+		["Branch", codeText(str("branch"))],
+		["Frequency", hz === null ? null : `${formatMHz(hz)} MHz`],
+		["Level spread", dbText(num("spreadDb"))],
+		["Top spread", dbText(num("topSpreadDb"))],
+		["Quiet level (10th percentile)", dbfsText(num("p10Dbfs"))],
+		["Loud level", dbfsText(num("loudLevelDbfs"))],
+		["Periodic share", shareText(num("periodicShare"))],
+		["Loud pitch share", shareText(num("loudPitchShare"))],
+		["Level frames", count("levelFrames")],
+		["Burst frames", count("burstFrames")],
+	]
+	return rows
+		.filter((r): r is [string, string] => r[1] !== null)
+		.map(([term, value]) => ({ term, value }))
+}
+
+/**
+ * An id cut into the pieces it may wrap between: after each separator (`~ : _ - . /`), so a long key breaks at
+ * its token boundaries, never mid-token (a token longer than the line still breaks, as a last resort).
+ */
+export function idSegments(id: string): string[] {
+	return id.split(/(?<=[~:_\-./])/).filter(x => x !== "")
 }
 
 /** Why there is no audio, in one plain sentence (the Listen section's place). */

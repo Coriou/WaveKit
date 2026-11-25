@@ -26,6 +26,7 @@ import {
 	RECORDINGS_CHANNELS_MAX,
 	RECORDINGS_NEAR_MAX_TOLERANCE_HZ,
 	RECORDINGS_PAGE_LIMIT_DEFAULT,
+	RECORDINGS_IN_PROGRESS_MS,
 	RECORDINGS_PAGE_LIMIT_MAX,
 } from "@wavekit/api-types"
 import type {
@@ -289,6 +290,11 @@ interface Rec {
 	 * `callClear`): listed and served without its call's row. Seeded kept call files have it.
 	 */
 	callClear?: boolean
+	/**
+	 * As the core's catalogue: a file still being written (modified under RECORDINGS_IN_PROGRESS_MS ago) is
+	 * neither listed nor served (404) until then, though its Activity row already links it. Only new calls.
+	 */
+	listedAt?: number
 }
 
 const pad = (n: number, w = 2) => String(n).padStart(w, "0")
@@ -642,9 +648,10 @@ export function registerRecordingsMock(
 	const state = options.state ?? createRecordingsState(now)
 	const recs = state.recs
 	const files = new Map<string, Buffer>()
+	const settled = (r: Rec) => r.listedAt === undefined || now() >= r.listedAt
 	const sorted = () =>
 		[...recs.values()]
-			.filter(callFileShown)
+			.filter(r => callFileShown(r) && settled(r))
 			.map(r => r.item)
 			.sort(compare)
 
@@ -679,6 +686,8 @@ export function registerRecordingsMock(
 		const s = NEW_CALLS[fresh++ % NEW_CALLS.length] ?? NEW_CALLS[0]
 		if (!s) throw new Error("no new call seed")
 		const r = makeRec(s, new Date(now() - s.durationS * 1000 - 2000))
+		// linked at once (its call row), served only once quiet: the web shows "Saving", then Play
+		r.listedAt = now() + RECORDINGS_IN_PROGRESS_MS
 		recs.set(r.item.id, r)
 		const eventId = options.onRecording?.(r.item) ?? null
 		if (eventId !== null) r.item = { ...r.item, activityEventId: eventId }
@@ -695,7 +704,7 @@ export function registerRecordingsMock(
 		)
 			return null
 		const r = recs.get(id)
-		return r !== undefined && callFileShown(r) ? r : null
+		return r !== undefined && callFileShown(r) && settled(r) ? r : null
 	}
 	/** The file route also takes a dsd-fme call's stable key (an Activity row's recording id). */
 	const lookupFile = (id: unknown): Rec | null => {
@@ -703,7 +712,7 @@ export function registerRecordingsMock(
 		if (r !== null || typeof id !== "string" || !RECORDING_DSD_KEY.test(id))
 			return r
 		for (const x of recs.values())
-			if (x.item.key === id) return callFileShown(x) ? x : null
+			if (x.item.key === id) return callFileShown(x) && settled(x) ? x : null
 		return null
 	}
 	const notFound = (reply: FastifyReply) =>

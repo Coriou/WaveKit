@@ -125,7 +125,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Recording links, as the core: every dsd-fme call recording has its `call_end` Activity row and
   every scanner analog recording a `recording-change` row (seeded ones within the 45 min history,
   each new call as it lands), linked by the summary's `recording: { id, durationMs }` (the item's
-  `key`) and the item's `activityEventId`. `GET /api/activity` takes `hasRecording` and
+  `key`) and the item's `activityEventId`. As the core's catalogue, a new call is linked at once but
+  listed and served (its file route 404 until then) only `RECORDINGS_IN_PROGRESS_MS` (10 s) later,
+  so the Activity row's **Saving** disc turns into Play. `GET /api/activity` takes `hasRecording` and
   `refs=recordingId:<key>` (other ref types match nothing: mock rows carry no refs), and the file
   route plays a `dsd~<name>` key. Scanner DV files have no row, as on the core. The seeded
   dsd-fme call files are YSF (a core lists and plays no dsd-fme P25, NXDN, dPMR, ProVoice or M17
