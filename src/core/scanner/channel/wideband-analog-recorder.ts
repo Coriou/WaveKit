@@ -5421,8 +5421,9 @@ export class WidebandAnalogRecorder {
 			quieting: speech === null ? null : file.speech.quieting(),
 		}
 		const clockNow = this.clock()
-		const decodedTone = toneFactOf(file.toneHz, file.toneCoverage).tone
-		const toned = decodedTone !== undefined && decodedTone !== null
+		// The file's tone fact, built once: the verdict reads it and the receipt freezes it.
+		const toneFact = toneFactOf(file.toneHz, file.toneCoverage)
+		const toned = toneFact.tone !== undefined && toneFact.tone !== null
 		// The discovery's noise-read rate before this file, read once per file (a held file's
 		// release reuses it): the proven-channel noise gate (DISCOVERY_NOISE_GATE). Noted below,
 		// at that first verdict only, when the rule judged it (FinishPath.noiseCounted).
@@ -5511,7 +5512,7 @@ export class WidebandAnalogRecorder {
 						: {}),
 					// The file's CTCSS answer and what its bank and DCS decoder analysed (toneFrames),
 					// frozen in finishFile: the session's later activity never reached them.
-					...toneFactOf(file.toneHz, file.toneCoverage),
+					...toneFact,
 					...(file.txIds.length > 0 ? { txIds: [...file.txIds] } : {}),
 				})
 				.catch(() => undefined)
