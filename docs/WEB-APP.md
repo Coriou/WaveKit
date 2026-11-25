@@ -520,7 +520,9 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   [SCANNER.md](SCANNER.md#analog-voice-recordings)) stay in the list, each row carrying a `copy`
   chip that opens its original's Transmission view. The footer's quiet **Hide copies (n)** leaves
   them out (**Show copies (n)** lists them again) until you reload; a copy you kept is never left
-  out. With a core older than copies the toggle does not show. Copies stay on disk, play and
+  out, and `n` counts only the copies it leaves out (`copiesTotal`, which leaves out Kept copies).
+  So the toggle does not show when `copiesTotal` is 0: when the list holds no copy, when every copy
+  in it is kept, or with a core older than copies. Copies stay on disk, play and
   download like any recording. New recordings
   appear on their own (the core announces each change on the socket; nothing polls); while you
   scroll down or play one from this list, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,

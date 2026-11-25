@@ -1242,8 +1242,9 @@ Condensed + Noto Sans, Tabler-based icons).
   list on its saved scroll, Activity keeps its list mounted under the view); opening never writes
   another panel's search, so **History of …** is the channel's list only and ⋯ **Evidence** became
   **Open in Scanner**, with a notice when the discovery cannot be fetched. The view renders one DTO
-  from `loadTransmission(ref)`, which composes today's calls behind one adapter until the core
-  serves a transmission route. *Why:* the user's question about one over ("which tone was it?") had
+  from `loadTransmission(ref)`, which composes the recording, Activity, discovery and observation
+  calls behind one adapter; the core serves the same DTO at `GET /api/transmissions/:ref`, and the
+  view reads only its `copy` links from it so far. *Why:* the user's question about one over ("which tone was it?") had
   no place to be answered, and every door led to a place instead of the thing.
 - **One player model (2026-11-23).** The dock is the one transport and never shrinks under an open
   row: an expanded Recordings row, an open Activity event and the Transmission view only drive it

@@ -394,7 +394,9 @@ directory holds `activity/activity.db` (activity is on by default;
 `activity.enabled: false` turns it off). Opening the store needs Node 24
 with SQLite FTS5; a failed open leaves the API up and the activity routes
 answer 503. Inside a container without `TZ` or a locale, the region guess falls
-back to `EU`; set `WAVEKIT_REGION` (or `region:` in YAML) elsewhere.
+back to `EU`; set `WAVEKIT_REGION` (or `region:` in YAML) elsewhere. Before
+starting an older image on this directory, follow
+[SCANNER.md, Rolling back across versions](SCANNER.md#rolling-back-across-versions).
 
 ## Health checks
 

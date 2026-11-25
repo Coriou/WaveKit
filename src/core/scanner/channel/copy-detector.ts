@@ -4,8 +4,10 @@
  * per source, and the one group record of which file is a copy of which root.
  *
  * pass(A, B): same source and epoch, the overlap rule, the same audio (sameAudio), and the WEAKER
- * of the two (total order below) carries evidence of its own: intermod evidence, or a frequency
- * off its band's raster. Level difference is never evidence (it only ranks), and an unknown
+ * of the two (total order below) carries evidence of its own: intermod evidence TIED TO THE
+ * STRONGER (one of the evidence's roots within its tolerance of the stronger's centre:
+ * copy-intermod.ts intermodTiedTo; a product of two unrelated carriers says nothing about this
+ * pair), or a frequency off its band's raster. Level difference is never evidence (it only ranks), and an unknown
  * raster (no scan range covers the file) gives none: same audio without evidence changes
  * nothing (copySameAudioNoEvidence).
  *
@@ -40,7 +42,14 @@
  * A fingerprint enters the ring only once its operation settled `finalized` (a discarded,
  * aborted or failed file never does, and nothing is written for it). Writes (`write`) go to the
  * store, which writes or removes the file's copy.json under its lock; a skipped or failed write
- * leaves the file served as before.
+ * leaves the file served as before. The detector sets a file's copy state before the store
+ * answers: a mark the store skips (or a failed write) returns the file to its previous state in
+ * the ring (copyWriteSkipped), so the ring matches what is on disk, unless a later job changed
+ * its state meanwhile: a former root stays a root (it has no members, so nothing is orphaned),
+ * a former copy stays a copy of its former root while that one is still a root in the ring, and
+ * becomes a root otherwise (on disk it names a root gone or now a copy: no copy). A skipped REMOVAL (null) changes nothing: the store skips it when there is
+ * no mark to remove, and a mark it could not remove names a root that is now a copy or gone,
+ * which the catalogue reads as no copy.
  */
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import {
@@ -52,6 +61,7 @@ import {
 } from "./copy-fingerprint.js"
 import {
 	COPY_HORIZON_MS,
+	intermodTiedTo,
 	type IntermodEvidence,
 	type RasterFit,
 } from "./copy-intermod.js"
@@ -97,7 +107,10 @@ export interface CopySettled {
 }
 
 export interface CopyDetectorDeps {
-	/** Writes (`copy`) or removes (null) the operation's copy.json; never throws synchronously. */
+	/**
+	 * Writes (`copy`) or removes (null) the operation's copy.json; never throws synchronously.
+	 * Resolving "skipped" (or rejecting) means nothing was written.
+	 */
 	write(operationId: string, copy: CopyRecord | null): Promise<unknown>
 	logger: Logger
 	/** Next-turn scheduler; default setImmediate. */
@@ -115,6 +128,8 @@ export interface CopyCounters {
 	copyUnlinked: number
 	copyRingOverflow: number
 	copyQueueDropped: number
+	/** Copy marks the store skipped or failed to write: the file returned to its previous state. */
+	copyWriteSkipped: number
 	copyComparisonMsMax: number
 }
 
@@ -143,10 +158,17 @@ interface Passed {
 }
 type PassResult = Passed | { readonly ok: false }
 
-/** The file's own evidence of being a copy: intermod and/or off its raster. */
-export function evidenceOf(fp: CopyFingerprint): CopyEvidence[] {
+/**
+ * The file's own evidence of being a copy of `root`: intermod tied to the root (one of its roots
+ * within its tolerance of the root's centre) and/or off its raster.
+ */
+export function evidenceOf(
+	fp: CopyFingerprint,
+	root: { readonly hz: number },
+): CopyEvidence[] {
 	const out: CopyEvidence[] = []
-	if (fp.intermod !== null) out.push("intermod")
+	if (fp.intermod !== null && intermodTiedTo(fp.intermod, root.hz))
+		out.push("intermod")
 	if (fp.raster === "off") out.push("off-raster")
 	return out
 }
@@ -218,6 +240,7 @@ export class CopyDetector {
 		copyUnlinked: 0,
 		copyRingOverflow: 0,
 		copyQueueDropped: 0,
+		copyWriteSkipped: 0,
 		copyComparisonMsMax: 0,
 	}
 	/** Resolves when the queue is empty (tests and stop). */
@@ -328,8 +351,8 @@ export class CopyDetector {
 			return { ok: false }
 		}
 		if (!sameAudio(c)) return { ok: false }
-		const weaker = strongerThan(a, b) ? b : a
-		const evidence = evidenceOf(weaker.fp)
+		const [weaker, stronger] = strongerThan(a, b) ? [b, a] : [a, b]
+		const evidence = evidenceOf(weaker.fp, stronger.fp)
 		if (evidence.length === 0) {
 			this.counters.copySameAudioNoEvidence++
 			this.log.debug(
@@ -373,9 +396,45 @@ export class CopyDetector {
 		ring.splice(i, 1)
 	}
 
-	private write(e: Entry, copy: CopyRecord | null): void {
-		if (copy !== null) this.counters.copyMarked++
-		void this.deps.write(e.fp.operationId, copy).catch(() => undefined)
+	/** Removes `e`'s mark from the store (its state already set). */
+	private unmark(e: Entry): void {
+		void this.deps.write(e.fp.operationId, null).catch(() => undefined)
+	}
+
+	/**
+	 * Marks `e` a copy of `of` and asks the store for the mark. A mark the store skips or fails
+	 * leaves what is on disk as it was, so `e` returns to its PREVIOUS state (when its state is
+	 * still the one this mark set): a root stays a root, and a copy stays a copy of its former
+	 * root while that one is still a root in the ring. A former root gone from the ring (forget)
+	 * or turned into a copy since reads on disk as no copy (the catalogue reads a named root that
+	 * is gone or itself a copy as no copy), so `e` returns to a root then.
+	 */
+	private mark(e: Entry, of: Entry, copy: CopyRecord): void {
+		const prev = e.state
+		const set: State = { kind: "copy", of }
+		e.state = set
+		this.counters.copyMarked++
+		const refused = (): void => {
+			this.counters.copyWriteSkipped++
+			if (e.state !== set) return
+			e.state =
+				prev.kind === "copy" &&
+				prev.of.state.kind === "root" &&
+				this.ringOf(prev.of.fp.sourceId).includes(prev.of)
+					? prev
+					: { kind: "root" }
+		}
+		let pending: Promise<unknown>
+		try {
+			pending = this.deps.write(e.fp.operationId, copy)
+		} catch (cause) {
+			// A writer breaking its contract: the mark is reverted and the job fails (logged).
+			refused()
+			throw cause
+		}
+		void pending.then(outcome => {
+			if (outcome === "skipped") refused()
+		}, refused)
 	}
 
 	private recordOf(of: Entry, r: Passed): CopyRecord {
@@ -418,23 +477,23 @@ export class CopyDetector {
 		for (const p of passing) if (strongerThan(p.root, best.root)) best = p
 		const star = best.root
 		if (!strongerThan(n, star)) {
-			n.state = { kind: "copy", of: star }
-			this.write(n, this.recordOf(star, best.r))
+			this.mark(n, star, this.recordOf(star, best.r))
 			return
 		}
 		// N is the stronger: it becomes the root, R* its copy (pass held with R* the weaker).
 		const members = this.membersOf(ring, star)
-		star.state = { kind: "copy", of: n }
-		this.write(star, this.recordOf(n, best.r))
+		this.mark(star, n, this.recordOf(n, best.r))
+		// The writer never throws synchronously (its contract: a rejection only), so every member
+		// below is visited and the invariant holds after the loop; a writer that does throw fails
+		// the job (mark reverts its own entry) and the remaining members keep their old state.
 		for (const m of members) {
 			const r = await this.pass(m, n)
 			if (r.ok && !strongerThan(m, n)) {
-				m.state = { kind: "copy", of: n }
-				this.write(m, this.recordOf(n, r))
+				this.mark(m, n, this.recordOf(n, r))
 			} else {
 				m.state = { kind: "root" }
 				this.counters.copyUnlinked++
-				this.write(m, null)
+				this.unmark(m)
 			}
 		}
 	}
@@ -451,17 +510,16 @@ export class CopyDetector {
 			let m0 = members[0]!
 			for (const m of members) if (strongerThan(m, m0)) m0 = m
 			m0.state = { kind: "root" }
-			this.write(m0, null)
+			this.unmark(m0)
 			for (const m of members) {
 				if (m === m0) continue
 				const r = await this.pass(m, m0)
 				if (r.ok && !strongerThan(m, m0)) {
-					m.state = { kind: "copy", of: m0 }
-					this.write(m, this.recordOf(m0, r))
+					this.mark(m, m0, this.recordOf(m0, r))
 				} else {
 					m.state = { kind: "root" }
 					this.counters.copyUnlinked++
-					this.write(m, null)
+					this.unmark(m)
 				}
 			}
 			return

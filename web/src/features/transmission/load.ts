@@ -1,9 +1,10 @@
-// loadTransmission(ref): one transmission as the Transmission DTO, composed in the web from the calls that exist
-// today (the recording, its Activity record, its discovery, its observation and its neighbours) until the core
-// serves GET /api/transmissions/:ref. Only the first reads are required, under one overall deadline (they fail, the
+// loadTransmission(ref): one transmission as the Transmission DTO, composed in the web from the recording, its Activity
+// record, its discovery, its observation and its neighbours. The core serves the same DTO at
+// GET /api/transmissions/:ref, but the view reads only its `copy` from it so far (transmissionCopy: optional, absent
+// from a core without the route). Only the first reads are required, under one overall deadline (they fail, the
 // read still running is aborted, and the view offers Retry); each optional one has its own short deadline and fails to "absent", so the view never waits
 // on it. One open reads a channel's recordings once (the file's folder is also its neighbours). This composition is
-// the only place that knows the four calls, and it goes when the route arrives.
+// the only place that knows these calls, and it goes once the view reads the core's DTO whole.
 import type {
 	ActivityRecord,
 	ActivitySummary,

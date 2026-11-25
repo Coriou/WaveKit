@@ -1,9 +1,9 @@
-// The one adapter between the web and the transmission contract the core does not serve yet: the facts sidecar
-// of a kept scanner analog recording (`RecordingInventoryItem.facts`, read here with Zod because older cores
-// lack it and the shape is not on main yet), the Transmission DTO a future GET /api/transmissions/:ref returns,
-// and the refs that name one before a transmission id exists (`rec:` a recording key, `evt:` an Activity
-// event, `obs:` a scanner observation). Everything else in the web imports these types from here, so the day
-// the shapes land in @wavekit/api-types only this file changes.
+// The one adapter between the web and the transmission contract: the facts sidecar of a kept scanner analog
+// recording (`RecordingInventoryItem.facts`, RecordingFacts in @wavekit/api-types, read here with Zod because
+// older cores lack it), the web's Transmission DTO (the shape GET /api/transmissions/:ref serves, TransmissionDto in
+// @wavekit/api-types; the web still composes it itself, load.ts) and the alias refs the route also accepts besides a
+// `tx_` id (`rec:` a recording key, `evt:` an Activity event, `obs:` a scanner observation). Everything else in the
+// web imports these types from here, so moving the view onto the api-types shapes changes only this file.
 import type { RecordingInventoryItem } from "@wavekit/api-types"
 import { z } from "zod"
 
@@ -197,7 +197,7 @@ export type TransmissionRef =
 	| { event: string }
 	| { observation: string }
 
-/** "rec:<key>", "evt:<id>", "obs:<id>": the alias forms the future route accepts. */
+/** "rec:<key>", "evt:<id>", "obs:<id>": the alias forms GET /api/transmissions/:ref accepts. */
 export function refText(ref: TransmissionRef): string {
 	if ("recording" in ref) return `rec:${ref.recording}`
 	if ("event" in ref) return `evt:${ref.event}`
@@ -217,7 +217,7 @@ export function sameRef(a: TransmissionRef, b: TransmissionRef): boolean {
 	return refText(a) === refText(b)
 }
 
-// ---- the Transmission DTO (what GET /api/transmissions/:ref will serve)
+// ---- the Transmission DTO (the shape GET /api/transmissions/:ref serves; composed by the web, load.ts)
 
 export type TransmissionKind =
 	| "voice-analog"

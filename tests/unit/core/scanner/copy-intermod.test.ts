@@ -10,8 +10,10 @@ import {
 	INTERMOD_PARENTS_MAX,
 	SPAN_HZ_SAMPLES_MAX,
 	TRACK_SPANS_MAX,
+	TRACK_SPANS_OPEN_MAX,
 	TrackSpans,
 	intermodEvidenceOf,
+	intermodTiedTo,
 	intermodTolerance,
 	type IntermodFile,
 	type RasterFit,
@@ -45,6 +47,8 @@ describe("intermod evidence: rule A (2·f1 − f2)", () => {
 		expect(intermodEvidenceOf(file, [span(f1), span(f2)], onRaster)).toEqual({
 			rule: "2f1-f2",
 			parents: [{ hz: f1 }, { hz: f2 }],
+			roots: [f1, f2],
+			tolHz: 4_000,
 		})
 	})
 
@@ -132,6 +136,8 @@ describe("intermod evidence: rule B (symmetric pair)", () => {
 		expect(ev).toEqual({
 			rule: "symmetric",
 			parents: [{ hz: fa }, { hz: twin }],
+			roots: [fa, twin],
+			tolHz: 4_000,
 		})
 	})
 
@@ -246,7 +252,12 @@ describe("intermod evidence: rule B's mirror must be a real concurrent signal", 
 				[span(fa), span(mirror, { peakDbfs: -40, snrDb: 20 })],
 				onRaster,
 			),
-		).toEqual({ rule: "symmetric", parents: [{ hz: fa }, { hz: mirror }] })
+		).toEqual({
+			rule: "symmetric",
+			parents: [{ hz: fa }, { hz: mirror }],
+			roots: [fa, mirror],
+			tolHz: 4_000,
+		})
 	})
 })
 
@@ -317,11 +328,175 @@ describe("intermod evidence: the track-span ring", () => {
 		expect(r.overflow).toBe(1)
 	})
 
+	it(`the bound mirrors the tracker: every open track (TRACK_SPANS_OPEN_MAX = ${TRACK_SPANS_OPEN_MAX}) plus as many ended, ${TRACK_SPANS_MAX}`, () => {
+		expect(TRACK_SPANS_MAX).toBe(2 * TRACK_SPANS_OPEN_MAX)
+		expect(TRACK_SPANS_OPEN_MAX).toBe(512)
+		// A busy band: the tracker's full 512 open tracks heard every round, and 4 short tracks
+		// ending each round. No live span is ever dropped or restarted.
+		const r = new TrackSpans()
+		let ended = 0
+		for (let round = 0; round < 300; round++) {
+			const at = round * 100
+			for (let i = 0; i < TRACK_SPANS_OPEN_MAX; i++)
+				r.note("s", FS, t(`live${i}`, FC + i, 0, at + 1))
+			for (let k = 0; k < 4; k++)
+				r.note("s", FS, t(`short${ended++}`, FC, at, at + 1))
+		}
+		const spans = r.spansOf("s", 1)
+		const live = spans.filter(
+			x => x.startSample === 0 && x.lastSample === 29_901,
+		)
+		expect(live).toHaveLength(TRACK_SPANS_OPEN_MAX)
+		expect(spans).toHaveLength(TRACK_SPANS_MAX)
+		expect(r.overflow).toBe(ended - (TRACK_SPANS_MAX - TRACK_SPANS_OPEN_MAX))
+	})
+
+	it("the former bound (256) would have dropped a live parent: 257 live tracks all keep their spans", () => {
+		const r = new TrackSpans()
+		for (let round = 0; round < 3; round++)
+			for (let i = 0; i < 257; i++)
+				r.note("s", FS, t(`live${i}`, FC + i, round * 10, round * 10 + 5))
+		const spans = r.spansOf("s", 1)
+		expect(spans).toHaveLength(257)
+		expect(spans.every(x => x.startSample === 0)).toBe(true)
+		expect(r.overflow).toBe(0)
+	})
+
+	it("prunes expired spans from the front and never returns one past the horizon", () => {
+		const horizon = (COPY_HORIZON_MS * FS) / 1000
+		const r = new TrackSpans()
+		// Heard in this order: "late" ends after "early" but was heard first.
+		r.note("s", FS, t("late", FC, 0, 2_000))
+		r.note("s", FS, t("early", FC, 0, 1_000))
+		r.note("s", FS, t("new", FC, 0, 1_500 + horizon))
+		// "early" is past the horizon but behind a span inside it: kept in the map, not returned.
+		expect(r.spansOf("s", 1).map(x => x.lastSample)).toEqual([
+			2_000,
+			1_500 + horizon,
+		])
+		r.note("s", FS, t("newer", FC, 0, 2_001 + horizon))
+		expect(r.spansOf("s", 1).map(x => x.lastSample)).toEqual([
+			1_500 + horizon,
+			2_001 + horizon,
+		])
+	})
+
+	it("a returned span is a copy: later snapshots never change it", () => {
+		const r = new TrackSpans()
+		r.note("s", FS, t("a", FC, 0, 10))
+		const [before] = r.spansOf("s", 1)
+		r.note("s", FS, t("a", FC + 1_000, 0, 20))
+		expect(before?.lastSample).toBe(10)
+		expect(before?.hz).toBe(FC)
+	})
+
+	it("ignores a late snapshot of an older epoch (a close after the retune): the current ring stays", () => {
+		const r = new TrackSpans()
+		r.note("s", FS, t("a", FC, 0, 10, 2), 2)
+		r.note("s", FS, t("old-close", FC, 0, 5, 1), 2)
+		expect(r.spansOf("s", 2)).toHaveLength(1)
+		expect(r.spansOf("s", 1)).toEqual([])
+		r.note("s", FS, t("b", FC, 0, 12, 2), 2)
+		expect(r.spansOf("s", 2)).toHaveLength(2)
+	})
+
+	it("a recreated engine (epochs restart at 1) starts the ring afresh at its current epoch", () => {
+		const r = new TrackSpans()
+		r.note("s", FS, t("a", FC, 0, 10, 5), 5)
+		// The engine is recreated under the same source id: its current epoch is 1.
+		r.note("s", FS, t("b", FC + 25_000, 0, 20, 1), 1)
+		r.note("s", FS, t("c", FC + 50_000, 0, 30, 1), 1)
+		expect(r.spansOf("s", 1).map(x => x.hz)).toEqual([FC + 25_000, FC + 50_000])
+		expect(r.spansOf("s", 5)).toEqual([])
+	})
+
+	it("a late close of the old engine's newer-numbered epoch never wipes the recreated engine's ring", () => {
+		const r = new TrackSpans()
+		r.note("s", FS, t("a", FC, 0, 10, 5), 5)
+		r.note("s", FS, t("b", FC, 0, 20, 1), 1)
+		// A late close from epoch 5 (the old engine) while the current epoch is 1.
+		r.note("s", FS, t("a", FC, 0, 25, 5), 1)
+		expect(r.spansOf("s", 1)).toHaveLength(1)
+		// And a late close of an older epoch while the current one is newer.
+		r.note("s", FS, t("c", FC, 0, 30, 2), 2)
+		r.note("s", FS, t("b", FC, 0, 35, 1), 2)
+		expect(r.spansOf("s", 2)).toHaveLength(1)
+		expect(r.spansOf("s", 1)).toEqual([])
+	})
+
 	it("starts afresh on a new epoch (a retune moves every frequency)", () => {
 		const r = new TrackSpans()
 		r.note("s", FS, t("a", FC, 0, 10))
 		r.note("s", FS, t("b", FC, 0, 10, 2))
 		expect(r.spansOf("s", 1)).toEqual([])
 		expect(r.spansOf("s", 2)).toHaveLength(1)
+	})
+})
+
+describe("intermod evidence: its roots (what a copy may be of)", () => {
+	it("rule A names both parents of every pair landing on the file", () => {
+		// Two pairs land on FC: (FC + 60k, FC + 120k) and (FC + 200k, FC + 400k).
+		const tracks = [
+			span(FC + 60_000),
+			span(FC + 120_000),
+			span(FC + 200_000),
+			span(FC + 400_000),
+		]
+		const ev = intermodEvidenceOf(file, tracks, onRaster)
+		expect(ev?.rule).toBe("2f1-f2")
+		expect([...(ev?.roots ?? [])].sort((a, b) => a - b)).toEqual([
+			FC + 60_000,
+			FC + 120_000,
+			FC + 200_000,
+			FC + 400_000,
+		])
+	})
+
+	it("rule B names both fa and the mirror: the mirror is fa's mixing partner fb (2·fa − fb = fc)", () => {
+		// fb at 2·fa − fc mixes with fa onto the file; its same-audio twin is fb itself.
+		const fa = FC + 600_000
+		const fb = 2 * fa - FC
+		const ev = intermodEvidenceOf(
+			file,
+			[span(fa), span(fb, { peakDbfs: -40, snrDb: 20 })],
+			onRaster,
+		)!
+		expect(ev.rule).toBe("symmetric")
+		expect(intermodTiedTo(ev, fb)).toBe(true)
+		expect(intermodTiedTo(ev, fa)).toBe(true)
+	})
+
+	it("roots are span median centres: a parent drifting 6 kHz at its tail still ties its settled twin", () => {
+		const f1 = FC + 60_000
+		const f2 = FC + 120_000
+		// f1's latest snapshot is 6 kHz up (past the 4 kHz tolerance), its median at f1.
+		const ev = intermodEvidenceOf(
+			file,
+			[span(f1 + 6_000, { medianHz: f1 }), span(f2)],
+			onRaster,
+		)
+		expect(ev).toEqual({
+			rule: "2f1-f2",
+			parents: [{ hz: f1 }, { hz: f2 }],
+			roots: [f1, f2],
+			tolHz: 4_000,
+		})
+		expect(intermodTiedTo(ev!, f1)).toBe(true)
+		// Judged by its latest snapshot the pair would not even land on the file.
+		expect(
+			intermodEvidenceOf(file, [span(f1 + 6_000), span(f2)], onRaster),
+		).toBeNull()
+	})
+
+	it(`intermodTiedTo: within tolHz of a root ties, 1 Hz past does not`, () => {
+		const ev = intermodEvidenceOf(
+			file,
+			[span(FC + 60_000), span(FC + 120_000)],
+			onRaster,
+		)!
+		expect(intermodTiedTo(ev, FC + 60_000 + 4_000)).toBe(true)
+		expect(intermodTiedTo(ev, FC + 60_000 + 4_001)).toBe(false)
+		expect(intermodTiedTo(ev, FC + 120_000 - 4_000)).toBe(true)
+		expect(intermodTiedTo(ev, Number.NaN)).toBe(false)
 	})
 })

@@ -1805,6 +1805,12 @@ export class WidebandAnalogRecorder {
 	private readonly decisions: RecorderDecisions
 	/** Recent track spans per source and epoch (copy detection's intermod parents). */
 	private readonly spans = new TrackSpans()
+	/**
+	 * The engine each source's spans were heard from. A recreated engine restarts its epochs at
+	 * 1 and its sample clock near 0, so an equal epoch number cannot tell it apart: the spans of
+	 * the old engine are forgotten when the instance changes.
+	 */
+	private readonly spansEngine = new Map<string, object>()
 
 	constructor(private readonly deps: WidebandAnalogDeps) {
 		this.log = createComponentLogger(deps.logger, "WidebandAnalogRecorder")
@@ -3550,8 +3556,21 @@ export class WidebandAnalogRecorder {
 	): void {
 		if (this.deps.copies === undefined) return
 		try {
-			const fs = this.deps.engine(sourceId)?.currentEpoch().sampleRateHz
-			if (typeof fs === "number") this.spans.note(sourceId, fs, track)
+			const engine = this.deps.engine(sourceId)
+			if (engine !== undefined && this.spansEngine.get(sourceId) !== engine) {
+				this.spans.forgetSource(sourceId)
+				this.spansEngine.set(sourceId, engine)
+			}
+			const cur = engine?.currentEpoch()
+			// A snapshot ending past the engine's live edge counts on another clock: a late one of the
+			// engine this one replaced (same epoch number, its clock ahead) or of an earlier stream.
+			// Noted, its end would become the source's newest and expire every span of this clock.
+			if (
+				cur !== undefined &&
+				engine !== undefined &&
+				track.lastSample <= engine.liveEdge()
+			)
+				this.spans.note(sourceId, cur.sampleRateHz, track, cur.epoch)
 			const id = this.byObservation.get(observationId)
 			const s = id === undefined ? undefined : this.sessions.get(id)
 			if (s === undefined) return
