@@ -7201,7 +7201,18 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   rejects the `polarity` member (its schema is strict) and reads such a sidecar
   as no facts (fail closed; the file is still served). Null for older files, any
   other kind, and a sidecar that is missing, larger than 2 KiB, malformed or of
-  another operation; the file is served the same either way.
+  another operation; the file is served the same either way. `txId` and
+  `moreTxIds` (since 2026-11-24; absent on files kept before them): the
+  transmission id (`tx_<ULID>`) open at the file's first sample, and the 1 to 7
+  others open while the file was (never `txId` again; absent when none), so a
+  file names at most 8 transmissions. Downgrade note: a core from before them
+  rejects both members (its schema is strict) and reads such a sidecar as no
+  facts (fail closed; the file is still served, and this version reads the
+  facts again after an upgrade).
+- `txId` (scanner analog recordings only, since 2026-11-24; other kinds and older
+  cores omit it): the transmission open at the file's first sample, the facts'
+  `txId`; null when the file has no facts or its facts name none. It is also a
+  `GET /api/transmissions/:ref` ref.
 - `copyOf` (scanner analog recordings only; other kinds and older cores omit it): the
   scanner marked this file a copy (a ghost: the same audio heard again on another frequency, see
   [SCANNER.md](SCANNER.md#analog-voice-recordings)) of the listed recording `key`, with the
