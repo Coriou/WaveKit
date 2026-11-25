@@ -1535,6 +1535,85 @@ describe("a shortfall a pass's own tail created is not 'nothing removable'", () 
 		expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
 		await t.ev.stopAnalog()
 	}, 120_000)
+
+	it("B2: refused, cancelled and capacity-refused operations never bump the epoch; a finalized file does", async () => {
+		const t = await tailHarness()
+		await t.fill()
+		// Every file is the kept discovery's: nothing removable, and one more admission does not fit.
+		const keep = new Set([t.first])
+		t.ev.setCaps({
+			maxRecordingsMb: (t.analog.managedBytes! + RESERVATION - 1) / MIB,
+			maxEvidenceMb: 20,
+			maxAgeDays: 30,
+			minFreeDiskMb: 0,
+		})
+		await t.ev.retention(keep)
+		expect(t.ev.recordingsQuotaExceeded).not.toBeNull()
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
+		const epoch = t.analog.inventoryEpoch
+		// The real refusal path, repeated (each would have asked a full pass every 30 s before).
+		for (let i = 0; i < 3; i++) {
+			const refused = t.begin()
+			await expect(refused.ready).rejects.toBeDefined()
+			const receipt = await refused.settled
+			expect(receipt.outcome).not.toBe("finalized")
+			expect(t.analog.inventoryEpoch).toBe(epoch)
+			expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
+		}
+		// An audit that finds everything as it was does not count either.
+		await t.analog.audit()
+		expect(t.analog.inventoryEpoch).toBe(epoch)
+		// Room again: an admitted then cancelled operation does not count...
+		t.ev.setCaps({
+			maxRecordingsMb: 2048,
+			maxEvidenceMb: 20,
+			maxAgeDays: 30,
+			minFreeDiskMb: 0,
+		})
+		const cancelled = t.begin()
+		await cancelled.ready
+		cancelled.cancel()
+		expect((await cancelled.settled).outcome).not.toBe("finalized")
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
+		// ...nor does the capacity refusal (the active limit), never admitted at all.
+		const active = [t.begin(t.second, "o2"), t.begin(t.second, "o2")]
+		await Promise.allSettled(active.map(op => op.ready))
+		const epochActive = t.analog.inventoryEpoch
+		const over = t.begin(t.second, "o2")
+		await expect(over.ready).rejects.toBeDefined()
+		expect((await over.settled).outcome).not.toBe("finalized")
+		expect(t.analog.inventoryEpoch).toBe(epochActive)
+		for (const op of active) op.cancel()
+		await Promise.all(active.map(op => op.settled))
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(false)
+		// A finalized file counts.
+		await t.record(Date.now() - 30_000)
+		expect(t.analog.inventoryEpoch).toBeGreaterThan(epoch)
+		expect(t.ev.recordingsQuotaInventoryChanged).toBe(true)
+		await t.ev.stopAnalog()
+	}, 120_000)
+
+	it("an eviction's empty-folder removal skips a discovery with an active operation", async () => {
+		const t = await tailHarness()
+		const internals = t.ev as unknown as {
+			afterEviction(artifacts: readonly string[]): Promise<void>
+		}
+		const root = (t.ev as unknown as { root: string }).root
+		const folder = join(root, "recordings", "analog", t.second)
+		// Admitted and active: its (still empty) final folder exists.
+		const op = t.begin(t.second, "o2")
+		await op.ready
+		expect(existsSync(folder)).toBe(true)
+		const gone = `recordings/analog/${t.second}/analog-${randomUUID()}.wav`
+		await internals.afterEviction([gone])
+		// An active finalize may link into it: never rmdir'd while protected.
+		expect(existsSync(folder)).toBe(true)
+		op.cancel()
+		await op.settled
+		await internals.afterEviction([gone])
+		expect(existsSync(folder)).toBe(false)
+		await t.ev.stopAnalog()
+	}, 120_000)
 })
 
 /** A per-id promise chain, as EvidenceStore.serialise. */

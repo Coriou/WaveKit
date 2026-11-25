@@ -348,6 +348,25 @@ describe("admission eviction class (analogEvictClassOf)", () => {
 		},
 	)
 
+	it.each([
+		["measured: a whole level window (94 frames)", 94, undefined, 0],
+		["measured: past the floor", 150, undefined, 0],
+		["unmeasured: one frame under the floor, no branch", 93, undefined, 1],
+		["unmeasured: no level frames, no branch", 0, undefined, 1],
+		["measured: under the floor with the noise branch", 60, "noise", 0],
+		["measured: under the floor with the data-buzz branch", 50, "data-buzz", 0],
+	] as const)(
+		"prior-none under 0.10 is noise-like only when the noise rule measured it: %s → class %s",
+		(_label, levelFrames, branch, cls) => {
+			const admission = {
+				...admissionFacts(0.05),
+				levelFrames,
+				...(branch ? { branch } : {}),
+			}
+			expect(analogEvictClassOf("prior-none", admission, undefined)).toBe(cls)
+		},
+	)
+
 	it("prior-none under 0.10 is noise-like only while no speech was heard", () => {
 		const low = admissionFacts(0.05)
 		expect(analogEvictClassOf("prior-none", low, undefined)).toBe(0)

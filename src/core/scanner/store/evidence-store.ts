@@ -2062,6 +2062,9 @@ export class EvidenceStore {
 	 * folder written since stays (ENOTEMPTY, ignored). With a protection port, a base that is not
 	 * a real directory (or under a recordings root that is not) removes nothing. A folder emptied
 	 * by someone else after the walk is removed at the next pass, whose walk lists it empty.
+	 * A folder whose discovery has an active analog operation (protectedDiscovery) is skipped
+	 * (an admission's eviction or a pass can empty it while that operation finalizes into it);
+	 * a later pass removes it once empty and unprotected.
 	 */
 	private async removeEmptyDirs(
 		emptyDirs: ReadonlySet<string>,
@@ -2101,8 +2104,12 @@ export class EvidenceStore {
 			if (ids === undefined) continue
 			if (!recordingsReal && base !== join(this.root, "evidence")) continue
 			if (guarded && (await realDirectory(base)) === null) continue
-			for (const discoveryId of ids)
+			for (const discoveryId of ids) {
+				// A discovery with an active analog operation is never rmdir'd: its finalize may be
+				// about to link its file into this (empty) folder. Checked just before each rmdir.
+				if (this.analog?.protectedDiscovery(discoveryId) ?? false) continue
 				await rmdir(join(base, discoveryId)).catch(() => undefined)
+			}
 		}
 	}
 }

@@ -20,6 +20,7 @@ import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
 import { isTxId } from "../../transmissions/types.js"
 import { ONSET_MAX_SEARCH_MS } from "../channel/onset-trim.js"
+import { ADMISSION_MIN_FRAMES } from "../channel/speech-content.js"
 import {
 	WavFileWriter,
 	wavHeader,
@@ -229,18 +230,26 @@ export interface AnalogEvictExtra {
 	readonly speechHeard?: boolean | null | undefined
 	readonly legacy?: boolean
 }
+/** The admission facts analogEvictClassOf reads (noise-quarantine.ts NoiseQuarantineFacts). */
+export interface AnalogEvictAdmission {
+	readonly periodicShare: number
+	readonly levelFrames?: number
+	readonly branch?: string | undefined
+}
 /**
  * A finalized file's admission eviction class from its receipt's `keptBy` and its facts sidecar
  * (recording-facts.ts): voice-like (2) when it was kept for its own tone, a tone was heard
  * (an object), or its periodic share is at least EVICT_VOICE_PERIODIC_SHARE; noise-like (0) when
  * it was kept as noise evidence (`noise-evidence`), kept at once (`prior-none`) with admission
- * facts whose periodic share is under it and no speech heard (`speechHeard` not true), or its
- * receipt predates `keptBy` and it has no admission facts (`legacy`: the oldest files); every
+ * facts the noise rule measured (a `branch`, or `levelFrames` at least ADMISSION_MIN_FRAMES, one
+ * whole level window) whose periodic share is under it and no speech heard (`speechHeard` not
+ * true), or its receipt predates `keptBy` and it has no admission facts (`legacy`: the oldest
+ * files); every
  * other file is other (1), a newer file without a `keptBy` or facts included. Pure.
  */
 export function analogEvictClassOf(
 	keptBy: string | null | undefined,
-	admission: { readonly periodicShare: number } | null | undefined,
+	admission: AnalogEvictAdmission | null | undefined,
 	tone: unknown,
 	extra: AnalogEvictExtra = {},
 ): AnalogEvictClass {
@@ -253,9 +262,15 @@ export function analogEvictClassOf(
 	)
 		return 2
 	if (keptBy === "noise-evidence") return 0
+	// Measured by the noise rule (a branch named, or a whole level window): a `prior-none` file
+	// under ADMISSION_MIN_FRAMES with no branch was never judged, so its low share proves nothing.
+	const measured =
+		admission?.branch !== undefined ||
+		(admission?.levelFrames ?? 0) >= ADMISSION_MIN_FRAMES
 	if (
 		keptBy === "prior-none" &&
 		periodic !== undefined &&
+		measured &&
 		extra.speechHeard !== true
 	)
 		return 0
@@ -917,6 +932,20 @@ function dropOperation(inventory: Inventory, id: string): void {
 	inventory.cleanup.delete(id)
 	inventory.evict.delete(id)
 }
+/**
+ * `id`'s share of the inventory as one comparable value (bytes, metadata, cleanup marker,
+ * artifact, eviction row): applyScans counts an epoch change only when it differs (B2).
+ */
+function shareOf(inventory: Inventory, id: string): string {
+	const evict = inventory.evict.get(id)
+	return [
+		inventory.opBytes.get(id) ?? 0,
+		inventory.opMetadata.get(id) ?? 0,
+		inventory.cleanup.has(id) ? 1 : 0,
+		inventory.intents.get(id)?.artifact ?? "",
+		evict ? `${evict.cls}@${evict.ageMs}` : "",
+	].join("|")
+}
 /** Adds a scanned id's share (after dropOperation of the same id, or into a fresh inventory). */
 function addOperation(inventory: Inventory, scan: OperationScan): void {
 	if (scan.unknown) inventory.unknown = true
@@ -1153,9 +1182,12 @@ export class AnalogOperations {
 	/** Bytes an admission's own evictions freed, to its operation id, until its re-check. */
 	private readonly earmarked = new Map<string, number>()
 	/**
-	 * Counts inventory changes that may make bytes removable (B2): every applied scan, full scan,
-	 * published intent and settled operation (active.delete). The scanner compares it with the
-	 * value the quota-exceeded pass saw before asking an early pass while exceeded.
+	 * Counts inventory changes that may make bytes removable (B2): a full scan, an applied scan
+	 * that changed some id's share, and a finalized operation leaving `active` (its file becomes
+	 * removable). A refused, aborted or cancelled operation never bumps it (its settle applies
+	 * without counting): while the quota is exceeded with nothing removable, repeated refusals
+	 * leave it unchanged, so they never ask an early pass. The scanner compares it with the value
+	 * the quota-exceeded pass saw before asking an early pass while exceeded.
 	 */
 	private epoch = 0
 	/** Why the last recovery quarantined each operation it did not admit (closed reasons). */
@@ -1544,7 +1576,7 @@ export class AnalogOperations {
 		// Published: its intent counts toward the operation bound from here (the bytes are
 		// within its reservation). The settlement's refresh replaces this with what is on disk.
 		this.auditTouched?.add(id)
-		this.epoch++
+		// No epoch bump: a published intent is an active operation's, never removable.
 		dropOperation(this.inventory, id)
 		addOperation(this.inventory, {
 			id,
@@ -2207,7 +2239,8 @@ export class AnalogOperations {
 					cleanup = "pending"
 					error = op.foreignMarker ? "recovery-ambiguous" : "cleanup-failed"
 				}
-				await this.settleInventory(op)
+				// Not finalized: nothing became removable, so the settle does not count (B2).
+				await this.settleInventory(op, false)
 				const slot = this.available.get(op.intent.alias)
 				if (slot && !slot.available) this.available.delete(op.intent.alias)
 				op.decision = this.makeReceipt(
@@ -2244,7 +2277,9 @@ export class AnalogOperations {
 		}
 		const result = op.decision!
 		this.active.delete(op.intent.operationId)
-		this.epoch++
+		// Only a finalized file can have become removable (it left `active`); a refusal, abort or
+		// cancellation (including the capacity refusal, never in `active`) leaves the epoch alone.
+		if (result.outcome === "finalized") this.epoch++
 		op.resolve(result)
 		return result
 	}
@@ -2298,7 +2333,7 @@ export class AnalogOperations {
 	 * they are read outside the lock, then swapped into the inventory with its reservation
 	 * released in one synchronous step under it. An unknown inventory runs the full scan instead.
 	 */
-	private async settleInventory(op: Operation): Promise<void> {
+	private async settleInventory(op: Operation, counts = true): Promise<void> {
 		let scans: OperationScan[] | null
 		try {
 			scans = await this.scanIds([op.intent.operationId])
@@ -2308,7 +2343,7 @@ export class AnalogOperations {
 		await this.exclusive(async () => {
 			try {
 				if (scans === null || this.inventory.unknown) await this.scanInventory()
-				else this.applyScans(scans)
+				else this.applyScans(scans, counts)
 			} catch {
 				this.inventory.unknown = true
 			}
@@ -3183,16 +3218,21 @@ export class AnalogOperations {
 	 * doubtful scan makes the inventory unknown (only a full scan clears it); crash residue
 	 * found here stays counted until a full scan sets it aside.
 	 */
-	private applyScans(scans: readonly OperationScan[]): void {
-		if (scans.length > 0) this.epoch++
+	private applyScans(scans: readonly OperationScan[], counts = true): void {
+		let changed = false
 		for (const scan of scans) {
 			this.auditTouched?.add(scan.id)
+			const before = shareOf(this.inventory, scan.id)
 			dropOperation(this.inventory, scan.id)
 			addOperation(this.inventory, scan)
+			if (before !== shareOf(this.inventory, scan.id)) changed = true
 			if (scan.residue.length) this.residuePending = true
 			// An explicit delete removed it: no longer quarantined.
 			if (!scan.unknown && !scan.intent) this.quarantine.delete(scan.id)
 		}
+		// Only a scan that changed some id's share counts (B2): a refused operation's settle
+		// (counts false) and an audit that found everything as it was never ask an early pass.
+		if (counts && changed) this.epoch++
 		if (this.inventory.intents.size > MAX_RECOVERY_OPERATIONS)
 			this.inventory.unknown = true
 	}

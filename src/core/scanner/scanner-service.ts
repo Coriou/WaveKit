@@ -1712,7 +1712,10 @@ export class ScannerService extends EventEmitter {
 				now: this.now,
 				isDiscoveryLive: id => this.store.get(id) !== undefined,
 				// The keep retention reads (maintenance: operator.keep), live for admission eviction.
-				isDiscoveryKept: id => this.store.get(id)?.operator?.keep === true,
+				// An alias folder (a merged-away id) is its survivor's: kept when the survivor is.
+				isDiscoveryKept: id =>
+					this.store.get(this.store.aliasOwner(id) ?? id)?.operator?.keep ===
+					true,
 				aliases: {
 					aliasOwner: id => this.store.aliasOwner(id),
 					aliasesOf: id => this.store.aliasesOf(id),

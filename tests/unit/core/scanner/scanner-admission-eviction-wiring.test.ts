@@ -15,6 +15,7 @@ interface Internals {
 	evidence: { analog: { context: AnalogContext } | null }
 	store: {
 		get(id: string): unknown
+		aliasOwner(id: string): string | undefined
 		pruneHeldRecordings(...args: unknown[]): number
 	}
 }
@@ -68,5 +69,28 @@ describe("an analog admission's eviction reaches the scanner like retention's de
 		expect(kept!("d_plain")).toBe(false)
 		expect(kept!("d_none")).toBe(false)
 		expect(kept!("d_missing")).toBe(false)
+	})
+
+	it("an alias folder of a kept survivor is kept (the live keep resolves the alias owner)", async () => {
+		const h = serviceHarness({
+			patch: st => void (st.passive.enabled = false),
+		})
+		const svc = h.service as unknown as Internals
+		const kept = svc.evidence.analog?.context.discoveryKept
+		expect(kept).toBeTypeOf("function")
+		const operators = new Map<string, unknown>([
+			["d_survivor", { operator: { keep: true } }],
+			["d_other", { operator: { keep: false } }],
+		])
+		const owners = new Map([
+			["d_merged", "d_survivor"],
+			["d_mergedPlain", "d_other"],
+		])
+		vi.spyOn(svc.store, "get").mockImplementation(id => operators.get(id))
+		vi.spyOn(svc.store, "aliasOwner").mockImplementation(id => owners.get(id))
+		expect(kept!("d_merged")).toBe(true)
+		expect(kept!("d_survivor")).toBe(true)
+		expect(kept!("d_mergedPlain")).toBe(false)
+		expect(kept!("d_unknownAlias")).toBe(false)
 	})
 })
