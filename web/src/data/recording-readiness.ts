@@ -8,6 +8,12 @@
  * listed (its row's age, or the catalogue listing it, whichever comes first), and a fetch of such a file that
  * is still refused is tried again for a bounded while (RecordingsStore.file) instead of failing. A row first
  * seen older than that (history, a replay) is settled at once: a 404 then is the truth.
+ *
+ * The row's age is read against this browser's clock, which can disagree with the core's. So a link that
+ * arrives on the live socket (just linked, whatever its producedAt says: a core clock behind this one makes
+ * it look old) and a link newly found on a row already seen without one (a call file found late, which the
+ * core adds to the existing row) always get a retry window from now; only the Saving display stays
+ * age-based (a wrong guess there costs a few seconds of Saving, never an error).
  */
 import type { ActivitySummary } from "@wavekit/api-types"
 import { RECORDINGS_IN_PROGRESS_MS } from "@wavekit/api-types"
@@ -20,7 +26,7 @@ export const RECORDING_SETTLE_MS = RECORDINGS_IN_PROGRESS_MS + 2_000
 export const RECORDING_SETTLE_GRACE_MS = 20_000
 /** Between two tries of a just-linked file. */
 export const RECORDING_RETRY_STEP_MS = 1_500
-/** Sightings remembered (the newest win). */
+/** Sightings remembered (the newest win), and as many rows seen without a link. */
 const MAX_SIGHTINGS = 2_000
 
 export interface ReadinessClock {
@@ -60,6 +66,8 @@ export class RecordingReadiness {
 	/** Recording ids still being saved by the core (not served yet), with when they should be. */
 	readonly saving = new Store<ReadonlyMap<string, number>>(new Map())
 	private readonly seen = new Map<string, Sighting>()
+	/** Event ids of rows seen without a link (a late call file adds one to the same row). */
+	private readonly unlinked = new Set<string>()
 	private readonly clock: ReadinessClock
 	private timer: unknown = null
 	private timerAt = Infinity
@@ -68,18 +76,35 @@ export class RecordingReadiness {
 		this.clock = clock
 	}
 
-	/** Rows read or received: a link seen for the first time while young is saving. */
-	note(items: readonly ActivitySummary[]): void {
+	/**
+	 * Rows read or received: a link seen for the first time while young is saving. `live`: the rows came on
+	 * the live socket (just produced, whatever the core's clock says).
+	 */
+	note(
+		items: readonly ActivitySummary[],
+		{ live = false }: { live?: boolean } = {},
+	): void {
 		const now = this.clock.now()
 		let added: Map<string, number> | null = null
 		for (const item of items) {
 			const id = item.recording?.id
-			if (typeof id !== "string" || id === "" || this.seen.has(id)) continue
+			if (typeof id !== "string" || id === "") {
+				this.rememberUnlinked(item.eventId)
+				continue
+			}
+			// a link added to a row seen before without one: found just now
+			const late = this.unlinked.delete(item.eventId)
+			if (this.seen.has(id)) continue
 			const delay = settleDelay(item.producedAt, now)
 			const readyAt = now + delay
+			const fresh = live || late
 			this.remember(id, {
 				readyAt,
-				retryUntil: delay > 0 ? readyAt + RECORDING_SETTLE_GRACE_MS : 0,
+				retryUntil: fresh
+					? now + RECORDING_SETTLE_MS + RECORDING_SETTLE_GRACE_MS
+					: delay > 0
+						? readyAt + RECORDING_SETTLE_GRACE_MS
+						: 0,
 			})
 			if (delay > 0) {
 				added ??= new Map(this.saving.get())
@@ -145,12 +170,13 @@ export class RecordingReadiness {
 		})
 	}
 
-	/** Forgets everything (tests, a new pairing). */
+	/** Forgets everything (tests, a new pairing or a session that ended: data/index.ts). */
 	reset(): void {
 		if (this.timer !== null) this.clock.clearTimeout(this.timer)
 		this.timer = null
 		this.timerAt = Infinity
 		this.seen.clear()
+		this.unlinked.clear()
 		this.saving.set(new Map())
 	}
 
@@ -160,6 +186,17 @@ export class RecordingReadiness {
 			const oldest = this.seen.keys().next().value
 			if (oldest === undefined) break
 			this.seen.delete(oldest)
+		}
+	}
+
+	private rememberUnlinked(eventId: string): void {
+		if (typeof eventId !== "string" || eventId === "") return
+		this.unlinked.delete(eventId)
+		this.unlinked.add(eventId)
+		while (this.unlinked.size > MAX_SIGHTINGS) {
+			const oldest = this.unlinked.values().next().value
+			if (oldest === undefined) break
+			this.unlinked.delete(oldest)
 		}
 	}
 

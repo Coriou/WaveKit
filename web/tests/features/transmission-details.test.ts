@@ -178,6 +178,25 @@ describe("Details: numbers, frequencies and times", () => {
 			"Burst frames": "7",
 		})
 	})
+
+	it("says the admission's closed codes in words, and drops a field the contract does not name", () => {
+		const rows = admissionRows({
+			reason: "prior-none",
+			strength: "none",
+			branch: "data-buzz",
+			spreadDb: -0.04,
+			somethingNew: 3,
+		})
+		const by = Object.fromEntries(rows.map(r => [r.term, r.value]))
+		expect(by).toEqual({
+			Decision: "Kept at once",
+			Strength: "Nothing known against the channel",
+			Branch: "Data buzz",
+			"Level spread": "0.0 dB",
+		})
+		const noise = admissionRows({ reason: "noise", branch: "noise" })
+		expect(noise.map(r => r.value)).toEqual(["Measured as noise", "Noise"])
+	})
 })
 
 describe("Details: identifiers", () => {

@@ -27,7 +27,7 @@ import { JsonView } from "../messages/JsonView.tsx"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import { isTransmissionRow, openTransmission } from "../transmission/nav.ts"
-import { recordingChangeDetails } from "../transmission/words.ts"
+import { recordingChangeDetails, utcText } from "../transmission/words.ts"
 import { ActivityRow, FoldedRow } from "./ActivityList.tsx"
 import { RecordingBlock } from "./ActivityPlayback.tsx"
 import type { ActivityStack, KnownIdentity } from "./fold.ts"
@@ -481,6 +481,7 @@ function KeptRecordingDetails({
 }: {
 	record: Extract<ActivityRecord, { kind: "recording-change" }>
 }) {
+	useDisplay() // the times follow Settings › Display
 	const rows = recordingChangeDetails(record.payload)
 	return (
 		<details className="wka-expert">
@@ -490,7 +491,18 @@ function KeptRecordingDetails({
 					<div key={r.term} className="wka-field">
 						<dt>{r.term}</dt>
 						<dd>
-							<code>{r.value}</code>
+							{r.code ? (
+								<code>{r.value}</code>
+							) : r.iso !== null ? (
+								<time dateTime={r.iso} title={utcText(r.iso)}>
+									{r.value}
+								</time>
+							) : (
+								<span>{r.value}</span>
+							)}
+							{r.hint !== null && (
+								<span className="wka-field-hint">{r.hint}</span>
+							)}
 						</dd>
 					</div>
 				))}

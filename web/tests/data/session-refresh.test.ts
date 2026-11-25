@@ -9,6 +9,7 @@ import {
 	createDataLayer,
 	shouldRefreshSession,
 } from "../../src/data/index.ts"
+import { recordingReadiness } from "../../src/data/recording-readiness.ts"
 import { connectionNotice } from "../../src/features/connection/notice.ts"
 import { isReadOnly } from "../../src/app/context.ts"
 import { json } from "./fake-fetch.ts"
@@ -373,6 +374,55 @@ describe("an expired session", () => {
 		expect(storage.map.has(PAIRED_KEY)).toBe(false)
 		expect(data.access.get().sessionExpired).toBe(false)
 		expect(notice(data)?.title).toBe("Pair this browser")
+		data.dispose()
+	})
+})
+
+describe("recordings still being saved, across sessions", () => {
+	afterEach(() => {
+		recordingReadiness.reset()
+		vi.useRealTimers()
+	})
+
+	it("a sign-out forgets the links this browser saw as just linked", async () => {
+		vi.useFakeTimers({ now: T0 })
+		const { fetch: base } = core({
+			session: () => json(200, session(T0 + 10 * DAY)),
+		})
+		const fetch: FetchLike = async (url, init) =>
+			url === "/api/access/session/logout"
+				? json(200, { revoked: true })
+				: base(url, init)
+		const data = createDataLayer({
+			fetch,
+			createSocket: fakeSockets().factory,
+			now: () => T0,
+			storage: memoryStorage(),
+		})
+		await data.start()
+		await flush()
+		recordingReadiness.note([
+			{
+				eventId: "evt_1",
+				commitSeq: "1",
+				kind: "decoder-reception",
+				producedAt: new Date(T0).toISOString(),
+				receivedAt: new Date(T0).toISOString(),
+				decoderId: "dsd-fme",
+				sourceId: "src-0",
+				protocol: "ysf",
+				category: "voice",
+				frequencyHz: null,
+				entityKey: "talkgroup:1",
+				title: "TG 1",
+				fields: [],
+				recording: { id: "dsd~a.wav", durationMs: 8000 },
+			},
+		])
+		expect(recordingReadiness.isSaving("dsd~a.wav")).toBe(true)
+		await data.logout()
+		expect(recordingReadiness.isSaving("dsd~a.wav")).toBe(false)
+		expect(recordingReadiness.retryIn("dsd~a.wav")).toBeNull()
 		data.dispose()
 	})
 })

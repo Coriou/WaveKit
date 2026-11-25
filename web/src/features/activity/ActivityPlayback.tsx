@@ -1,7 +1,10 @@
 // The disc on an Activity row or card with audio, and the detail's Recording block (the waveform as a seek
 // view of the one player, Keep). Both only drive the one player; the dock stays the transport. A row whose
 // file the core is still saving (linked, not served yet: recording-readiness.ts) shows a quiet "Saving" disc
-// of the same size in the disc's place, which turns into the play disc once the file is served.
+// of the same size in the disc's place, which turns into the play disc once the file is served. Their styles
+// live in activity.css, imported here so the Transmission view (which uses them too) has them.
+import "./activity.css"
+
 import type { ActivitySummary } from "@wavekit/api-types"
 import { useMemo, useRef } from "react"
 
@@ -46,6 +49,37 @@ export function SavingDisc({
 			<span className="wkp-disc-face wka-saving-face" aria-hidden="true" />
 			<span className="wkp-disc-dur">Saving</span>
 		</span>
+	)
+}
+
+/**
+ * The waveform's place while the core saves the file: the waveform's own well and times line (the same
+ * height), holding the sentence, so the swap to the waveform moves nothing.
+ */
+export function SavingWave() {
+	return (
+		<div className="wkp-wave-wrap wka-saving-wave">
+			<div className="wkp-wave">
+				<p>{SAVING_TITLE}.</p>
+			</div>
+			<div className="wkp-wave-times" aria-hidden="true">
+				<span>{"\u00a0"}</span>
+			</div>
+		</div>
+	)
+}
+
+/**
+ * The disc column's empty slot: a stacked row (or card) without audio keeps the disc's width at its right
+ * edge, so its stack count sits where every other row's does.
+ */
+export function DiscSlot({ inline = false }: { inline?: boolean }) {
+	return (
+		<span
+			className="wkp-disc wka-disc wka-disc-slot"
+			data-inline={inline || undefined}
+			aria-hidden="true"
+		/>
 	)
 }
 
@@ -110,7 +144,7 @@ export function RecordingBlock({ item }: { item: ActivitySummary }) {
 				{saving ? (
 					<>
 						<SavingDisc />
-						<p className="wka-rec-saving">{SAVING_TITLE}.</p>
+						<SavingWave />
 					</>
 				) : (
 					<>

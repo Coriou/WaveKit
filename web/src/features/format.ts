@@ -23,6 +23,8 @@ export function formatStep(hz: number): string {
 
 export function formatDb(db: number, digits = 1): string {
 	const t = db.toFixed(digits)
+	// a value that rounds to zero is "0.0", never "−0.0"
+	if (Number(t) === 0) return t.replace("-", "")
 	return t.replace("-", "−")
 }
 

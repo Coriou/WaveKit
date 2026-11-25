@@ -644,7 +644,8 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 
 	private receive(items: readonly ActivitySummary[]): void {
 		if (items.length === 0) return
-		recordingReadiness.note(items)
+		// live rows were just produced: their links get a retry window whatever the core's clock says
+		recordingReadiness.note(items, { live: true })
 		this.inbox.push(...items)
 		if (this.timer === null)
 			this.timer = setTimeout(() => this.flush(), this.flushMs)

@@ -110,9 +110,18 @@ describe("a kept recording's event in words", () => {
 			Observation: "o_A",
 			Receiver: "rx-1",
 			Measured: "145.562753 MHz (+253 Hz)",
-			"Observation start (UTC)": "2026-11-23T17:30:21.000Z",
-			"Duration ms": "8181",
+			Duration: "8 s",
 		})
+		const started = d.find(r => r.term === "Transmission started")
+		expect(started?.iso).toBe("2026-11-23T17:30:21.000Z")
+		expect(started?.code).toBe(false)
+		expect(started?.value).not.toContain("T17")
+		expect(`${started?.value ?? ""} ${started?.hint ?? ""}`).toContain(
+			"17:30:21",
+		)
+		expect(d.some(r => r.term.includes("ms") || r.term.includes("(UTC)"))).toBe(
+			false,
+		)
 	})
 
 	it("a live analog transmission's duration and close are words", () => {

@@ -323,7 +323,38 @@ export const TONE_FROM_WORDS: Readonly<Record<string, string>> = {
 	"live-demod": "measured live while listening",
 }
 
-/** The recording admission's numbers and codes, labelled and rounded (Details only). */
+/** How the recorder decided a file (RecordingAdmissionFacts.reason: the scanner's FinishReason). */
+export const ADMISSION_REASON_WORDS: Readonly<Record<string, string>> = {
+	"no-voice": "No voice on this channel",
+	"own-tone": "Classed by its own tone",
+	"late-non-voice": "Found not to be voice late",
+	"joined-decode": "A decode of its own signal",
+	"known-non-voice": "Known not to be voice",
+	"prior-none": "Kept at once",
+	content: "Discarded by the content check",
+	noise: "Measured as noise",
+	held: "Held, then kept",
+	final: "Kept at the end of its hold",
+}
+
+/** What the channel's history said before the file (RecordingAdmissionFacts.strength). */
+export const ADMISSION_STRENGTH_WORDS: Readonly<Record<string, string>> = {
+	none: "Nothing known against the channel",
+	suspect: "Suspected of not being voice",
+	"tone-required": "Kept only with its tone",
+}
+
+/** Which admission rule fired (RecordingAdmissionFacts.branch). */
+export const ADMISSION_BRANCH_WORDS: Readonly<Record<string, string>> = {
+	noise: "Noise",
+	"data-buzz": "Data buzz",
+}
+
+/**
+ * The recording admission's numbers and codes, labelled and rounded (Details only). The contract is closed
+ * (RecordingAdmissionFacts: measured numbers and closed codes only), so a field not named here is dropped,
+ * never shown raw; a code without a sentence reads in plain words (codeText).
+ */
 export function admissionRows(
 	a: Readonly<Record<string, unknown>> | null,
 ): { term: string; value: string }[] {
@@ -342,9 +373,9 @@ export function admissionRows(
 	}
 	const hz = num("frequencyHz")
 	const rows: [string, string | null][] = [
-		["Decision", codeText(str("reason"))],
-		["Strength", codeText(str("strength"))],
-		["Branch", codeText(str("branch"))],
+		["Decision", codeText(str("reason"), ADMISSION_REASON_WORDS)],
+		["Strength", codeText(str("strength"), ADMISSION_STRENGTH_WORDS)],
+		["Branch", codeText(str("branch"), ADMISSION_BRANCH_WORDS)],
 		["Frequency", hz === null ? null : `${formatMHz(hz)} MHz`],
 		["Level spread", dbText(num("spreadDb"))],
 		["Top spread", dbText(num("topSpreadDb"))],
@@ -436,30 +467,67 @@ export function recordingRowFields(s: ActivitySummary): DecodeField[] {
 	]
 }
 
-/** The expert Details of a kept recording's record: every id and raw number, labelled, in a fixed order. */
+/** One row of a kept recording's expert Details: an id or number (code), or a time with its UTC under it. */
+export interface RecordingDetailRow {
+	term: string
+	value: string
+	/** A time's same instant in UTC (null on the UTC clock, or not a time). */
+	hint: string | null
+	/** A time's ISO instant (the <time> element's dateTime). */
+	iso: string | null
+	/** An id or raw number, shown as code. */
+	code: boolean
+}
+
+/**
+ * The expert Details of a kept recording's record, in a fixed order: every id and raw number, labelled, the
+ * times on the chosen clock with UTC under them and the duration in words (as Transmission's Details).
+ */
 export function recordingChangeDetails(
 	p: RecordingChangePayload,
-): { term: string; value: string }[] {
+): RecordingDetailRow[] {
 	const channelHz = p.channel?.frequencyHz ?? null
-	const rows: [string, string | null][] = [
-		["Recording", p.recordingId],
-		["Discovery", p.discoveryId],
-		["Owner discovery", p.channel?.discoveryId ?? null],
-		["Observation", p.observationId],
-		["Receiver", p.sourceId],
-		[
+	const code = (term: string, value: string | null): RecordingDetailRow[] =>
+		value === null || value === ""
+			? []
+			: [{ term, value, hint: null, iso: null, code: true }]
+	const time = (term: string, iso: string | null): RecordingDetailRow[] => {
+		const value = dateTimeText(iso)
+		if (value === "" || iso === null) return []
+		// on the UTC clock (Settings › Display) the value already is UTC: no second line
+		const hint = value.endsWith("Z") ? null : utcText(iso)
+		return [{ term, value, hint, iso, code: false }]
+	}
+	const duration = durationWords(p.durationMs)
+	return [
+		...code("Recording", p.recordingId),
+		...code("Discovery", p.discoveryId),
+		...code("Owner discovery", p.channel?.discoveryId ?? null),
+		...code("Observation", p.observationId),
+		...code("Receiver", p.sourceId),
+		...code(
 			"Measured",
 			p.frequencyHz !== null ? measuredText(p.frequencyHz, channelHz) : null,
-		],
-		["Channel Hz", channelHz !== null ? String(Math.round(channelHz)) : null],
-		["Observation start (UTC)", p.observationStartedAt],
-		["Kept (UTC)", p.finalizedAt],
-		["Duration ms", String(p.durationMs)],
-		["Change", p.change],
+		),
+		...code(
+			"Channel Hz",
+			channelHz !== null ? String(Math.round(channelHz)) : null,
+		),
+		...time(TRANSMISSION_STARTED, p.observationStartedAt),
+		...time("Kept", p.finalizedAt),
+		...(duration === null
+			? []
+			: [
+					{
+						term: "Duration",
+						value: duration,
+						hint: null,
+						iso: null,
+						code: false,
+					},
+				]),
+		...code("Change", p.change),
 	]
-	return rows
-		.filter((r): r is [string, string] => r[1] !== null && r[1] !== "")
-		.map(([term, value]) => ({ term, value }))
 }
 
 // ---- copies (the same audio heard again on another frequency)

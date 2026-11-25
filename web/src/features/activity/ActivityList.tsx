@@ -51,7 +51,7 @@ import {
 import { formatMHz } from "../format.ts"
 import { Icon } from "../../ui/Icon.tsx"
 import type { QueueRef } from "../playback/service.ts"
-import { ActivityDisc } from "./ActivityPlayback.tsx"
+import { ActivityDisc, DiscSlot } from "./ActivityPlayback.tsx"
 import { activityListKey, activityQueue } from "./playback.ts"
 import { recordingStarts, recordStarts, rowTimeOf } from "./row-time.ts"
 
@@ -695,8 +695,13 @@ export const ActivityRow = memo(function ActivityRow({
 					foldsId={foldsId}
 				/>
 			)}
-			{/* the disc is always last: discs line up at the item's right edge, row to row */}
-			<ActivityDisc item={item} queue={queue} />
+			{/* the disc's column is always last: discs line up at the item's right edge, and a stacked row
+			    without audio keeps the column empty so every stack count sits in the same place */}
+			{audio ? (
+				<ActivityDisc item={item} queue={queue} />
+			) : (
+				stacked && <DiscSlot />
+			)}
 		</div>
 	)
 })
@@ -792,7 +797,12 @@ export const ActivityCard = memo(function ActivityCard({
 							foldsId={foldsId}
 						/>
 					)}
-					<ActivityDisc item={item} queue={queue} inline />
+					{/* the disc's column, last and of one width (empty on a stacked card without audio) */}
+					{audio ? (
+						<ActivityDisc item={item} queue={queue} inline />
+					) : (
+						stacked && <DiscSlot inline />
+					)}
 				</div>
 			)}
 		</div>

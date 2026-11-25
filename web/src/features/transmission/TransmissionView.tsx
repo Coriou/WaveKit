@@ -16,8 +16,8 @@ import { Icon } from "../../ui/Icon.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
 import { Label } from "../../ui/Label.tsx"
 import {
-	SAVING_TITLE,
 	SavingDisc,
+	SavingWave,
 	useRecordingSaving,
 } from "../activity/ActivityPlayback.tsx"
 import { useDisplay } from "../display.ts"
@@ -491,7 +491,8 @@ function Ready({
 				{audio !== null && saving ? (
 					<div className="wkt-listen-row">
 						<SavingDisc />
-						<p className="wkt-note">{SAVING_TITLE}.</p>
+						{/* the waveform's height, held: the swap to Play moves nothing */}
+						<SavingWave />
 					</div>
 				) : audio !== null ? (
 					<div className="wkt-listen-row">
