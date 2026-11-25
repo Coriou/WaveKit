@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import {
 	type DsdFmeWavCall,
 	type DsdFmeWavEarlier,
-	dsdFmeCallWavIdentity,
 	dsdFmeCallWavPattern,
 	dsdFmeWavNotEarlierOwned,
 	dsdFmeWavStampAfterPrevious,
@@ -215,10 +214,40 @@ describe("dsd-fme per-call WAV names", () => {
 		).toBe(name(1000, "00002"))
 		fs.rmSync(root, { recursive: true, force: true })
 		fs.mkdirSync(root)
-		// Outside start - 5 s .. end + 5 s: no link.
+		// Outside start - 5 s .. the second after the end's second: no link.
 		expect(
 			await search(fields, [name(-6000, "00004"), name(8000, "00005")]),
 		).toBeUndefined()
+	})
+
+	it("an earlier call retrying for its missing file never takes a later call's file", async () => {
+		// The call ran 0 .. 2.4 s; its own file is missing. The same station keyed up again at
+		// 3.2 s: dsd-fme stamped that over's file at 3 s, the second after this call's end
+		// second (inside the old end + 5 s window).
+		const at = (ms: number) => stampOf(new Date(START.getTime() + ms))
+		const name = (ms: number, r: string) =>
+			`${at(ms)}_${r}_YSF__TGT_ALL________SRC_N0CALL____.wav`
+		const fields: DsdFmeWavCall = {
+			protocol: "ysf",
+			talkgroup: 0,
+			source: 0,
+			ysf: { callsign: "N0CALL" },
+		}
+		const later = name(3000, "00007")
+		const lookup = async (files: readonly string[]) => {
+			for (const f of files) fs.writeFileSync(path.join(root, f), "")
+			const d = createDecoder({ perCallRecordingDir: root })
+			const found = await (d as unknown as Search).searchForWavFile(
+				callOf(fields),
+				new Date(START.getTime() + 2400),
+				root,
+			)
+			return found === undefined ? undefined : path.basename(found)
+		}
+		expect(await lookup([later])).toBeUndefined()
+		// Its own file, stamped at or before its end's second, still links.
+		const own = name(2000, "00006")
+		expect(await lookup([later, own])).toBe(own)
 	})
 
 	it("malformed and foreign names never link", () => {
@@ -367,25 +396,6 @@ describe("dsd-fme per-call WAV names", () => {
 			}),
 			{ numRuns: 300 },
 		)
-	})
-
-	it("one identity per slot and protocol fields; none without a pattern", () => {
-		const p25 = {
-			protocol: "p25p1",
-			talkgroup: 56,
-			source: 1234,
-			p25: { nac: "2A5" },
-		}
-		const id = dsdFmeCallWavIdentity({ ...p25, slot: null })
-		expect(id).not.toBeNull()
-		expect(dsdFmeCallWavIdentity({ ...p25, slot: null })).toBe(id)
-		expect(dsdFmeCallWavIdentity({ ...p25, slot: 1 })).not.toBe(id)
-		expect(dsdFmeCallWavIdentity({ ...p25, source: 99, slot: null })).not.toBe(
-			id,
-		)
-		expect(
-			dsdFmeCallWavIdentity({ protocol: "dpmr", talkgroup: 1, source: 2 }),
-		).toBeNull()
 	})
 
 	it("a stamp up to the previous end second, or the second after its start second, is refused", () => {

@@ -49,6 +49,8 @@ describe("inventory: the dv call recorder directory", () => {
 		await file(dvDir, DV_B)
 		await file(dvDir, TEMP)
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [
 				{ decoderId: "dsd-fme", dir: dsdDir },
 				{ decoderId: "dv-calls", dir: dvDir, kind: "dv-call" },
@@ -81,6 +83,8 @@ describe("inventory: the dv call recorder directory", () => {
 		const dvDir = await mkdtemp(join(tmpdir(), "wk-dvinv-touch-"))
 		roots.push(dsdDir, dvDir)
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [
 				{ decoderId: "dsd-fme", dir: dsdDir },
 				{ decoderId: "dv-calls", dir: dvDir, kind: "dv-call" },
@@ -125,6 +129,8 @@ describe("inventory: the dv call recorder directory", () => {
 		for (const n of [...names, unknown]) await file(dvDir, n)
 		const make = (resolver?: () => readonly string[]) =>
 			createRecordingInventory({
+				// Not a privacy test: every call file counts as linked by a clear call row.
+				callFileLinked: () => true,
 				dsdFmeDirs: () => [
 					{ decoderId: "dv-calls", dir: dvDir, kind: "dv-call" },
 				],

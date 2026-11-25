@@ -132,7 +132,13 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   call file; `tests/mock/recordings.test.ts` checks every seed against the core's gate), and the
   call recorder's are P25 and D-STAR (the mock keeps them for the UI path; a core serves no call
   recorder file while `DV_CALL_RECORDINGS_SERVED` is off): a core lists and links no DMR call recording while DMR
-  recordings are off, so the mock seeds none.
+  recordings are off, so the mock seeds none. As the core (rule six), a call file (`dsd-fme-call`,
+  `dv-call`) is listed, counted and served only while its call row links it (`activityEventId`):
+  seeded calls older than the 45 min history have no row, so they are absent and their file
+  route answers 404 by id and by key (`tests/mock/recordings-call-link-gate.test.ts`). A Kept
+  call file (the seeded kept ones, or one kept through the mock) records its Keep's clear verdict
+  and stays without its row until it is unkept. Scanner DV files keep the scanner's own rules and
+  stay listed.
 - Channels (`activity-channel.ts`), as the core: each scanner analog recording row carries
   `channel: { discoveryId, frequencyHz }` and is titled `FM voice`; `GET /api/activity` and
   `POST /api/activity/facets` take `channelHz` or `nearHz` with `toleranceHz` (a row without

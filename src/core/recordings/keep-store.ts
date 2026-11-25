@@ -101,6 +101,7 @@ const EntrySchema = z
 			.regex(RECORDING_KEEP_KEY),
 		keptAt: z.string().datetime({ offset: true }),
 		bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+		callClear: z.literal(true).optional(),
 	})
 	.strict()
 
@@ -163,6 +164,10 @@ export function parseRecordingKeepsFile(
 		key: entry.key as RecordingKeepKey,
 		keptAt: entry.keptAt,
 		bytes: entry.bytes,
+		// Only on a per-call key: a scanner keep never carries it (dropped, not trusted).
+		...(entry.callClear === true && entry.key.startsWith("dsd~")
+			? { callClear: true as const }
+			: {}),
 	}))
 	if (!withinKeepBounds(keeps)) return null
 	return freeze({
@@ -181,6 +186,7 @@ export function serializeRecordingKeepsFile(file: RecordingKeepsFile): string {
 				key: e.key,
 				keptAt: e.keptAt,
 				bytes: e.bytes,
+				...(e.callClear === true ? { callClear: true } : {}),
 			})),
 		},
 		null,

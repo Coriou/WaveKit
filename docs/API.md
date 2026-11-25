@@ -7252,6 +7252,28 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   `TEMP_` files, live probe folders (`probe-*`), names that match neither the
   dsd-fme call pattern nor the scanner recording id, symbolic links and
   non-regular files. Files that vanish during a scan are skipped.
+- Digital call files (since 2026-11-25): a `dsd-fme-call` or `dv-call` file
+  (a YSF or D-STAR call; DMR, P25, NXDN, dPMR, ProVoice, EDACS and M17 names
+  are refused by name) is listed, counted and served only while a stored call row
+  whose own trust fields prove the call clear links that exact file (the
+  transmissions route's rule: an unproven or encrypted call, a file no row
+  links, a pruned row and Activity off all leave it out). Its `id`, its `key`
+  and the file route then answer 404 `RECORDING_NOT_FOUND`, as an unknown
+  recording, and `counts` and `scannedFiles` leave it out. The answer is read
+  from the Activity store's link index in memory (one map read per item) at
+  every listing and download, so a call's file appears once its row is linked:
+  a link that comes, goes or changes for an indexed call file raises
+  `revision` and sends a `recordings:changed` notice. The same rule holds for a
+  link stored with the row, for a file found after the row (a late file) and
+  for links an older store gains at open, before and after a restart. Keep and
+  delete of such a file answer 404 too; it stays on disk under the usual
+  retention. A Keep of a listed call file records that its call was proven
+  clear, so a Kept call file stays listed and served once its row is pruned
+  (until it is unkept); a file kept before 2026-11-25 has no such record, shows
+  only while linked, and gains it once the Activity links load while a clear
+  call row still links it (one keep store write). Scanner
+  probe call files (`scanner-dv`) keep their own rules
+  ([SCANNER](SCANNER.md#digital-voice-recordings)).
 - Catalogue: the list is served from memory, never from a walk of the disk per
   request, and kept sorted as it changes (a listing never sorts). The core
   builds the catalogue in the background at start, newest folders first; until
@@ -7978,11 +8000,13 @@ unlinked (DMR files and files whose name says no known protocol) stay without
 `recording` (a row is linked only at its `call_end`, and the one-time link
 backfill of older stores does not run again).
 Files dsd-fme already wrote stay on disk under the usual retention.
-Scanner DMR call files are not listed or served yet either: a probe's dsd-fme
-call file in a discovery's `dv` folder whose name says DMR (or no known
-protocol) is not in `GET /api/recordings`, answers 404 from
+No scanner probe call file is listed or served yet, whatever its protocol: a
+probe parks a call file that matches a call not known to be encrypted in its discovery's `dv`
+folder when it stops (on disk, under the scanner retention) and deletes the
+others, and a parked file, like one an older core moved into that folder, is
+not in `GET /api/recordings`, answers 404 from
 `GET /api/scanner/recordings/:recordingId` and is not among an observation's
-`recordingIds`. `dv-call` files a core wrote before this change are not
+`recordingIds` (see [SCANNER.md](SCANNER.md#digital-voice-recordings)). `dv-call` files a core wrote before this change are not
 filtered by protocol: their names carry no protocol.
 
 A link goes when its file goes (pruned, deleted, retention, a removed

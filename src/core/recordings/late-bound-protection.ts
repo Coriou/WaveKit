@@ -28,5 +28,22 @@ export function lateBoundRecordingProtection(
 			ask(p => p.isScannerFileProtected(discoveryId, basename)),
 		discoveryHoldsKept: discoveryId =>
 			ask(p => p.discoveryHoldsKept(discoveryId)),
+		// Visibility fails the other way: unbound or throwing answers false (not shown).
+		isCallClearKept: key => {
+			try {
+				return current()?.isCallClearKept?.(key) === true
+			} catch {
+				return false
+			}
+		},
+		// The stamp needs the bound service; unbound or throwing, nothing is stamped.
+		stampCallClear: (admitted, keys) => {
+			try {
+				const run = current()?.stampCallClear?.(admitted, keys)
+				return run === undefined ? Promise.resolve(0) : run.catch(() => 0)
+			} catch {
+				return Promise.resolve(0)
+			}
+		},
 	}
 }

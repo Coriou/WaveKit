@@ -184,6 +184,8 @@ describe("recording Keep and delete through the API server", () => {
 		await fs.utimes(file, old, old)
 		let bound: RecordingKeepService | undefined
 		const inventory = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [{ decoderId: "zeta", dir: calls }],
 			scannerRecordingsDir: () => null,
 			logger,

@@ -42,8 +42,8 @@ import {
 } from "../../recordings/verified-unlink.js"
 import type { RecordingDeleteFs } from "../../recordings/verified-unlink.js"
 import {
+	DSD_FME_CALL_WAV,
 	RECORDING_IN_PROGRESS_MS,
-	dsdFmeNameServable,
 } from "../../../decoders/builtin/call-recordings.js"
 import { ScannerApiError } from "../errors.js"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -288,6 +288,16 @@ export function probeLinkCandidates(
 		0,
 		observations.length + MAX_PROBE_CALL_CANDIDATES,
 	)
+}
+
+/**
+ * Whether a scanner recording file name may be linked, listed or served. Never a dsd-fme per-call
+ * name: a probe's call_end does not prove its call clear for every protocol (P25 phase 1 and NXDN
+ * need clearEvidence, P25 phase 2, dPMR, ProVoice, EDACS and M17 never prove it, DMR is parked),
+ * and the file keeps no record of the call that matched it. Fail closed until it does.
+ */
+export function scannerRecordingNameServable(name: string): boolean {
+	return !DSD_FME_CALL_WAV.test(name)
 }
 
 function errorCode(err: unknown): string | undefined {
@@ -1092,6 +1102,11 @@ export class EvidenceStore {
 					)
 					return
 				}
+				// Parked, not linked: a dsd-fme call file stays in its discovery's folder under the
+				// scanner retention (maxAgeDays, maxRecordingsMb, the discovery's removal), but no
+				// observation names it and no route lists or serves it (scannerRecordingNameServable):
+				// nothing on disk says a clear call matched it.
+				if (!scannerRecordingNameServable(name)) return
 				linked.push({
 					observationId: c.observationId,
 					recordingId: `${c.discoveryId}~${name}`,
@@ -1215,9 +1230,9 @@ export class EvidenceStore {
 		const file = m?.[2]
 		if (discoveryId === undefined || file === undefined || file.includes(".."))
 			return null
-		// A probe's dsd-fme call file of a protocol that is not recordable (DMR) is never served
-		// or linked; it stays on disk under the usual retention.
-		if (!dsdFmeNameServable(file)) return null
+		// A probe's dsd-fme call file is never served: nothing on disk says a clear call
+		// (callTrustAdmits) matched it, so an encrypted or unproven call's audio could pass.
+		if (!scannerRecordingNameServable(file)) return null
 		// An analog file is admitted per file: through its folder, or through the live discovery
 		// owning it after a split (AnalogOperations.path).
 		if (/^analog-[0-9a-f-]{36}\.wav$/i.test(file))

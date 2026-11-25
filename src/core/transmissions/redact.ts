@@ -8,6 +8,7 @@ import {
 	callTrustAdmits,
 	dsdFmeCallRecordable,
 } from "../../decoders/builtin/dmr-recording-gate.js"
+import type { CallTrustFields } from "../../decoders/builtin/dmr-recording-gate.js"
 
 /** The dsd-fme keep key of a call file name (`dsd~<name>`), as the catalogue and links name it. */
 export const dsdKeyOf = (name: string): string => `dsd~${name}`
@@ -87,9 +88,23 @@ export function callRowKeepsRecording(
 	const decoded = record.payload.decodedData
 	if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded))
 		return false
-	if (!key.startsWith("dsd~")) return false
 	const data = decoded as { readonly [key: string]: JsonValue | undefined }
-	const protocol = data["protocol"] ?? record.payload.protocol
+	return callLinkAdmits(data["protocol"] ?? record.payload.protocol, data, key)
+}
+
+/**
+ * The one digital call recording gate: a call row's own trust fields prove its call clear
+ * (callTrustAdmits) and its link names a `dsd~` call file the gate lets out
+ * (dsdFmeCallRecordable). The transmissions DTO, the Activity detail and the Activity store's
+ * link index (which the recordings list and file route read) all answer through it. Anything
+ * unknown or malformed: false.
+ */
+export function callLinkAdmits(
+	protocol: unknown,
+	data: CallTrustFields,
+	key: string,
+): boolean {
+	if (typeof key !== "string" || !key.startsWith("dsd~")) return false
 	return (
 		callTrustAdmits(protocol, data) &&
 		dsdFmeCallRecordable(key.slice("dsd~".length))

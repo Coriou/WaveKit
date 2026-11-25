@@ -51,6 +51,8 @@ describe("recordings: the dv call recorder's files while it has no call tap", ()
 		await wav(dsdDir, DSD)
 		await wav(dvDir, DV)
 		const inventory = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [
 				{ decoderId: "dsd-fme", dir: dsdDir },
 				{ decoderId: "dv-calls", dir: dvDir, kind: "dv-call" },

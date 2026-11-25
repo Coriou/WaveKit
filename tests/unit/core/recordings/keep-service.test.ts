@@ -144,6 +144,8 @@ async function fixture(): Promise<Fixture> {
 	await put(path.join(scan, "dv", "d_x", "call.wav"))
 	const logs = spyLogger()
 	const base = createRecordingInventory({
+		// Not a privacy test: every call file counts as linked by a clear call row.
+		callFileLinked: () => true,
 		dsdFmeDirs: () => [{ decoderId: "a", dir: dsd }],
 		scannerRecordingsDir: () => scan,
 		now: () => now,
@@ -476,6 +478,8 @@ describe("recording keep service", () => {
 		const f = await fixture()
 		let svc: RecordingKeepServiceInternal | null = null
 		const inv = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [{ decoderId: "a", dir: f.dsd }],
 			scannerRecordingsDir: () => f.scan,
 			now: () => f.now,

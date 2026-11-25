@@ -111,6 +111,8 @@ describe("recordings catalogue writers (production wiring)", () => {
 		}
 		let keeps: RecordingKeepService | undefined
 		const inventory = createRecordingInventory({
+			// Not a privacy test: every call file counts as linked by a clear call row.
+			callFileLinked: () => true,
 			dsdFmeDirs: () => [{ decoderId: "dsd-a", dir: dsd }],
 			scannerRecordingsDir: () => scan,
 			// The production lambdas in src/index.ts.

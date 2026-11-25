@@ -554,7 +554,10 @@ class ActivityStore implements ActivityStoreHandle {
 	private linkOpsInFlight: ActivityLinkOp[] = []
 	private linkOpsDropped = 0
 	/** Recording key → its newest linked row, at most ACTIVITY_LINKS_MAX (oldest seq out). */
-	private readonly links = new Map<string, { eventId: string; seq: bigint }>()
+	private readonly links = new Map<
+		string,
+		{ eventId: string; seq: bigint; refused: boolean }
+	>()
 	/** Smallest seq in `links` (a prune past it drops entries). */
 	private linksMinSeq: bigint | null = null
 	private readonly linkListeners = new Set<
@@ -655,14 +658,24 @@ class ActivityStore implements ActivityStoreHandle {
 			if (event.linked) {
 				if (known !== undefined && known.seq > seq) continue
 				this.links.delete(event.recordingId)
-				this.links.set(event.recordingId, { eventId: event.eventId, seq })
+				this.links.set(event.recordingId, {
+					eventId: event.eventId,
+					seq,
+					refused: event.refused === true,
+				})
 				if (this.linksMinSeq === null || seq < this.linksMinSeq)
 					this.linksMinSeq = seq
 			} else if (event.eventId === "" || known?.eventId === event.eventId) {
 				this.links.delete(event.recordingId)
 			}
 		}
-		this.boundLinks()
+		const forgotten = this.boundLinks()
+		this.notifyLinks(forgotten.length > 0 ? [...events, ...forgotten] : events)
+	}
+
+	/** Link listeners hear every change of the index, the links it forgets on its own included. */
+	private notifyLinks(events: readonly ActivityLinkEvent[]): void {
+		if (events.length === 0) return
 		for (const listener of [...this.linkListeners]) {
 			try {
 				listener(events)
@@ -672,9 +685,26 @@ class ActivityStore implements ActivityStoreHandle {
 		}
 	}
 
-	/** Past ACTIVITY_LINKS_MAX, the links of the oldest rows are forgotten (5 % at once). */
-	private boundLinks(): void {
-		if (this.links.size <= ACTIVITY_LINKS_MAX) return
+	/** The unlink event of a link the index forgot without a writer change (bound, prune). */
+	private static forgottenLink(
+		recordingId: string,
+		entry: { eventId: string; seq: bigint },
+	): ActivityLinkEvent {
+		return {
+			recordingId,
+			eventId: entry.eventId,
+			seq: entry.seq.toString(10),
+			linked: false,
+		}
+	}
+
+	/**
+	 * Past ACTIVITY_LINKS_MAX, the links of the oldest rows are forgotten (5 % at once). Returns
+	 * their unlink events (at most 5 % of ACTIVITY_LINKS_MAX plus the overflow), so the listeners
+	 * (the recordings catalogue's revision) hear the links that went.
+	 */
+	private boundLinks(): ActivityLinkEvent[] {
+		if (this.links.size <= ACTIVITY_LINKS_MAX) return []
 		const keep = Math.floor(ACTIVITY_LINKS_MAX * 0.95)
 		const sorted = [...this.links].sort((a, b) =>
 			a[1].seq > b[1].seq ? -1 : a[1].seq < b[1].seq ? 1 : 0,
@@ -682,24 +712,35 @@ class ActivityStore implements ActivityStoreHandle {
 		this.links.clear()
 		for (const [key, entry] of sorted.slice(0, keep)) this.links.set(key, entry)
 		this.linksMinSeq = sorted[keep - 1]?.[1].seq ?? null
+		return sorted
+			.slice(keep)
+			.map(([key, entry]) => ActivityStore.forgottenLink(key, entry))
 	}
 
-	/** A prefix prune removed every row up to the watermark: their links go with them. */
+	/**
+	 * A prefix prune removed every row up to the watermark: their links go with them, and the
+	 * link listeners hear them go (one notice per write; at most ACTIVITY_LINKS_MAX events).
+	 */
 	private dropPrunedLinks(): void {
 		const min = this.linksMinSeq
 		if (min === null) return
 		const watermark = BigInt(this.identityCache.pruneWatermark)
 		if (watermark < min) return
 		let next: bigint | null = null
+		const dropped: ActivityLinkEvent[] = []
 		for (const [key, entry] of this.links) {
-			if (entry.seq <= watermark) this.links.delete(key)
-			else if (next === null || entry.seq < next) next = entry.seq
+			if (entry.seq <= watermark) {
+				this.links.delete(key)
+				dropped.push(ActivityStore.forgottenLink(key, entry))
+			} else if (next === null || entry.seq < next) next = entry.seq
 		}
 		this.linksMinSeq = next
+		this.notifyLinks(dropped)
 	}
 
 	recordingEventId(recordingId: string): string | null {
-		return this.links.get(recordingId)?.eventId ?? null
+		const link = this.links.get(recordingId)
+		return link === undefined || link.refused ? null : link.eventId
 	}
 
 	linkedRecordings(): readonly string[] {

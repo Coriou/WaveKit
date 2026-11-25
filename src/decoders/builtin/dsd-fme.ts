@@ -2021,10 +2021,6 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.drainOutbox()
 	}
 
-	/**
-	 * The lookup's answer for a held end: a file found before the end went out rides on the end
-	 * itself (true); after it, the caller reports it in an update (false).
-	 */
 	/** Records a linked file name (WAV_LINKED_NAMES_MAX): it is never linked to another call. */
 	private claimWavName(name: string): void {
 		this.wavLinkedNames.add(name)
@@ -2034,6 +2030,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 	}
 
+	/**
+	 * The lookup's answer for a held end: a file found before the end went out rides on the end
+	 * itself (true); after it, the caller reports it in an update (false).
+	 */
 	private settleEnd(end: WavHeldEnd, wavFile: string | undefined): boolean {
 		if (end.released) return false
 		if (wavFile !== undefined) end.data.wavFile = wavFile
@@ -5889,12 +5889,18 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const pattern = dsdFmeCallWavPattern(call)
 		if (pattern === null) return undefined
 
-		// Time window for matching (call start - 5s to call end + 5s), in wall
-		// time: the filenames carry wall time.
+		// Time window for matching, in wall time (the filenames carry wall time): from the call's
+		// start - 5 s up to, not into, the second after its end's second (stamps are whole
+		// seconds). dsd-fme stamps a file at its own call's start, which precedes that call's end
+		// (the adapter sees both after dsd-fme), so a stamp in a later second is a later call's
+		// file: an earlier call retrying for its missing file never takes it (the reverse of the
+		// earlier-owned rule below). A later call stamped in this call's own end second cannot be
+		// told apart from a short call's own file; that one second stays a candidate.
 		const startWallMs = call.startWallMs
 		const windowStartMs = startWallMs - 5000
-		const windowEndMs =
-			startWallMs + (callEndTime.getTime() - call.startTime.getTime()) + 5000
+		const endWallMs =
+			startWallMs + (callEndTime.getTime() - call.startTime.getTime())
+		const windowEndMs = Math.floor(endWallMs / 1000) * 1000 + 1000
 
 		let directory: fs.Dir
 		try {
@@ -5945,7 +5951,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// earlier call's file, never this one's.
 				if (
 					fileMs >= windowStartMs &&
-					fileMs <= windowEndMs &&
+					fileMs < windowEndMs &&
 					!this.wavLinkedNames.has(file) &&
 					dsdFmeWavNotEarlierOwned(file, fileMs, earlier)
 				) {

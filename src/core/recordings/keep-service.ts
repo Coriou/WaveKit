@@ -180,6 +180,27 @@ export async function openRecordingKeepService(
 	}
 	if (store && ready()) for (const e of store.snapshot().keeps) protect(e.key)
 
+	/**
+	 * Committed keeps of per-call files whose Keep recorded a clear call verdict
+	 * (RecordingKeepEntry.callClear): what isCallClearKept answers. Rebuilt per write.
+	 */
+	let callClear = new Set<string>()
+	/**
+	 * Committed `dsd~` keeps without that verdict: made before it was recorded. Only the one-time
+	 * stamp (stampCallClear) and a re-Keep remove them from here; a new Keep always records it.
+	 */
+	let unstamped = new Set<string>()
+	function setCallClear(file: RecordingKeepsFile): void {
+		const next = new Set<string>()
+		const legacy = new Set<string>()
+		for (const e of file.keeps)
+			if (e.callClear === true) next.add(e.key)
+			else if (e.key.startsWith("dsd~")) legacy.add(e.key)
+		callClear = next
+		unstamped = legacy
+	}
+	if (store && ready()) setCallClear(store.snapshot())
+
 	/** WG10 req 1.8: count and byte sum of the committed keeps (recomputed per write, O(1) read). */
 	let totals: RecordingKeepTotals = { recordings: 0, bytes: 0 }
 	function setTotals(file: RecordingKeepsFile): void {
@@ -223,9 +244,13 @@ export async function openRecordingKeepService(
 		const run = async (): Promise<void> => {
 			const s = store
 			if (!s || !ready()) throw unavailable()
-			const next = change(s.snapshot())
+			const current = s.snapshot()
+			const next = change(current)
+			// Nothing changed: nothing is written (the stamp and a repeated Keep rely on it).
+			if (next === current) return
 			await s.write(next)
 			setTotals(next)
+			setCallClear(next)
 		}
 		const result = commitChain.then(run)
 		commitChain = result.catch(() => undefined)
@@ -257,6 +282,94 @@ export async function openRecordingKeepService(
 		const n = (deleting.get(key) ?? 1) - 1
 		if (n <= 0) deleting.delete(key)
 		else deleting.set(key, n)
+	}
+
+	/**
+	 * The one-time stamp of keeps made before the clear call verdict was recorded: every
+	 * unstamped `dsd~` keep (of `keys` when given, else all) whose link `admitted` answers true
+	 * when the write runs gains `callClear`, as a Keep would record it now. Calls made while one
+	 * waits for the commit chain share its write.
+	 *
+	 * Bound: at most RECORDING_KEEPS_MAX_ENTRIES (2 000) O(1) `admitted` reads and one store write
+	 * per run; nothing is read or written while no unstamped keep exists (O(1)), nor when no
+	 * candidate is admitted. Fail closed: a store not ready, a throwing `admitted` (that key) or a
+	 * failed write stamps nothing (logged with fixed text); never rejects.
+	 */
+	let stampWaiting: { all: boolean; keys: Set<string> } | null = null
+	let stampRun: Promise<number> = Promise.resolve(0)
+	let stampAdmitted: (key: string) => boolean = () => false
+	function stampCallClear(
+		admitted: (key: string) => boolean,
+		keys?: readonly string[],
+	): Promise<number> {
+		if (!ready() || unstamped.size === 0) return Promise.resolve(0)
+		const wanted: string[] = []
+		if (keys !== undefined) {
+			// Every named key is looked at (a links reset names up to ACTIVITY_LINKS_MAX, newest
+			// first, and an old keep's link sits deep in it): one O(1) Set read each, stopping once
+			// every unstamped keep (at most RECORDING_KEEPS_MAX_ENTRIES) is wanted.
+			for (const key of keys) {
+				if (typeof key === "string" && unstamped.has(key)) wanted.push(key)
+				if (wanted.length >= unstamped.size) break
+			}
+			if (wanted.length === 0) return Promise.resolve(0)
+		}
+		stampAdmitted = admitted
+		if (stampWaiting !== null) {
+			if (keys === undefined) stampWaiting.all = true
+			else for (const key of wanted) stampWaiting.keys.add(key)
+			return stampRun
+		}
+		const waiting = { all: keys === undefined, keys: new Set(wanted) }
+		stampWaiting = waiting
+		let stamped: string[] = []
+		const run = commit(file => {
+			stampWaiting = null
+			const isAdmitted = (key: string): boolean => {
+				try {
+					return stampAdmitted(key) === true
+				} catch {
+					return false
+				}
+			}
+			const marks = new Set<string>()
+			for (const e of file.keeps)
+				if (
+					e.callClear !== true &&
+					e.key.startsWith("dsd~") &&
+					(waiting.all || waiting.keys.has(e.key)) &&
+					isAdmitted(e.key)
+				)
+					marks.add(e.key)
+			if (marks.size === 0) return file
+			stamped = [...marks]
+			return {
+				schemaVersion: file.schemaVersion,
+				revision: nextRevision(file),
+				keeps: file.keeps.map(e =>
+					marks.has(e.key) ? { ...e, callClear: true as const } : e,
+				),
+			}
+		}).then(
+			() => {
+				if (stamped.length > 0)
+					log.info(
+						{ stamped: stamped.length },
+						"Kept call recordings marked clear",
+					)
+				return stamped.length
+			},
+			(error: unknown) => {
+				if (stampWaiting === waiting) stampWaiting = null
+				log.warn(
+					{ err: safeErrorFields(error) },
+					"Kept call recordings could not be marked clear",
+				)
+				return 0
+			},
+		)
+		stampRun = run
+		return run
 	}
 
 	/** The catalogue re-checks this recording (a Keep changes `kept`, a delete the file). */
@@ -304,7 +417,31 @@ export async function openRecordingKeepService(
 				log.warn({ err: safeErrorFields(error) }, "Recording Keep failed")
 				throw unavailable()
 			}
-			if (alreadyKept) return { id: inventoryId, kept: true, changed: false }
+			// A per-call file opens only while the clear call gate admits it (the inventory's
+			// callFileLinked), so its Keep records that verdict: the file stays listed and served
+			// once its call's Activity row is pruned.
+			const clearCall = key.startsWith("dsd~")
+			if (alreadyKept) {
+				// A keep made before the verdict was recorded gains it now, while admitted.
+				if (clearCall && !callClear.has(key))
+					try {
+						await commit(file => {
+							if (!file.keeps.some(e => e.key === key && e.callClear !== true))
+								return file
+							return {
+								schemaVersion: file.schemaVersion,
+								revision: nextRevision(file),
+								keeps: file.keeps.map(e =>
+									e.key === key ? { ...e, callClear: true as const } : e,
+								),
+							}
+						})
+					} catch (error: unknown) {
+						log.warn({ err: safeErrorFields(error) }, "Recording Keep failed")
+						throw unavailable()
+					}
+				return { id: inventoryId, kept: true, changed: false }
+			}
 			try {
 				await commit(file => {
 					if (file.keeps.some(e => e.key === key)) return file
@@ -316,6 +453,7 @@ export async function openRecordingKeepService(
 						key,
 						keptAt: keptAtNow(),
 						bytes,
+						...(clearCall ? { callClear: true as const } : {}),
 					}
 					return {
 						schemaVersion: file.schemaVersion,
@@ -488,6 +626,10 @@ export async function openRecordingKeepService(
 			if (!ready()) return true
 			return (discoveryCounts.get(discoveryId) ?? 0) > 0
 		},
+		isCallClearKept(key) {
+			return ready() && typeof key === "string" && callClear.has(key)
+		},
+		stampCallClear,
 		keep,
 		unkeep,
 		remove,

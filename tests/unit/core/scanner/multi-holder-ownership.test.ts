@@ -806,6 +806,8 @@ describe("a merge keeps a listing that left the window", () => {
 	})
 })
 
+// A probe call file is parked, never linked (nothing on disk says a clear call matched it): it
+// joins the folder under a fresh name, never replacing a file there, and no observation names it.
 describe("a probe publication never replaces a file in the folder", () => {
 	const NAME = "20261009_120000_00001_x_GROUP_TGT_100_SRC_200.wav"
 	for (const exdev of [false, true])
@@ -843,9 +845,7 @@ describe("a probe publication never replaces a file in the folder", () => {
 				await readFile(join(root, "recordings", "dv", a.id, dup1), "utf8"),
 			).toBe("taken")
 			const fresh = NAME.replace("_00001_", "_00001_dup2_")
-			expect(out.linked).toEqual([
-				{ observationId: "o1", recordingId: `${a.id}~${fresh}` },
-			])
+			expect(out.linked).toEqual([])
 			expect(
 				await readFile(join(root, "recordings", "dv", a.id, fresh), "utf8"),
 			).toBe("probe")
@@ -888,7 +888,7 @@ describe("a probe publication never replaces a file in the folder", () => {
 		expect(existsSync(probe)).toBe(false)
 	})
 
-	it("a free name publishes as itself and the probe file goes", async () => {
+	it("a free name parks the file as itself, unlinked, and the probe folder goes", async () => {
 		const root = await tempRoot()
 		const store = newStore()
 		const ev = evidenceFor(root, () => store, undefined)
@@ -906,11 +906,10 @@ describe("a probe publication never replaces a file in the folder", () => {
 				encrypted: false,
 			},
 		])
-		expect(out.linked).toEqual([
-			{ observationId: "o1", recordingId: `${a.id}~${NAME}` },
-		])
+		expect(out.linked).toEqual([])
 		expect(
 			await readFile(join(root, "recordings", "dv", a.id, NAME), "utf8"),
 		).toBe("probe")
+		expect(existsSync(probe)).toBe(false)
 	})
 })

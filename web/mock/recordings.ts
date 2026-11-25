@@ -284,6 +284,11 @@ const SEEDS: readonly Seed[] = [
 interface Rec {
 	item: RecordingInventoryItem
 	seed: number
+	/**
+	 * A Kept call file whose Keep recorded its clear call verdict (the core's keep entry
+	 * `callClear`): listed and served without its call's row. Seeded kept call files have it.
+	 */
+	callClear?: boolean
 }
 
 const pad = (n: number, w = 2) => String(n).padStart(w, "0")
@@ -309,6 +314,7 @@ function makeRec(s: Seed, at: Date): Rec {
 				: `${localStamp(at)}_${pad(n, 5)}_YSF_${type}_TGT_${s.talkgroup ?? "0"}_SRC_${s.source ?? "0"}.wav`
 		return {
 			seed: n,
+			callClear: s.kept === true,
 			item: {
 				// The recorder's directory is the core's last dsd source.
 				id: `dsd:${s.kind === "dv-call" ? 1 : 0}~${name}`,
@@ -597,6 +603,21 @@ export function recordingSeeds(
 		.sort((a, b) => a.modifiedAt.localeCompare(b.modifiedAt))
 }
 
+/**
+ * Rule six, as the core: a per-call file (dsd-fme's or the call recorder's) is listed, counted
+ * and served only while its call's Activity row links it (`activityEventId`; the core's link
+ * index answers only a call row that proves its call clear), or while it is Kept with the clear
+ * verdict its Keep recorded (`callClear`). Otherwise: absent, 404.
+ */
+function callFileShown(r: Rec): boolean {
+	const item = r.item
+	if (item.kind !== "dsd-fme-call" && item.kind !== "dv-call") return true
+	if (item.kept && r.callClear === true) return true
+	return (
+		typeof item.activityEventId === "string" && item.activityEventId.length > 0
+	)
+}
+
 /** As the core's link index: the recording's Activity row (`activityEventId`). */
 export function linkRecordingActivity(
 	state: RecordingsState,
@@ -621,7 +642,11 @@ export function registerRecordingsMock(
 	const state = options.state ?? createRecordingsState(now)
 	const recs = state.recs
 	const files = new Map<string, Buffer>()
-	const sorted = () => [...recs.values()].map(r => r.item).sort(compare)
+	const sorted = () =>
+		[...recs.values()]
+			.filter(callFileShown)
+			.map(r => r.item)
+			.sort(compare)
 
 	const NEW_CALLS: readonly Seed[] = [
 		{
@@ -662,18 +687,23 @@ export function registerRecordingsMock(
 	const timer = setInterval(addCall, options.newCallMs ?? NEW_CALL_MS)
 	timer.unref()
 
-	const lookup = (id: unknown): Rec | null =>
-		typeof id === "string" &&
-		id.length <= 100 &&
-		RECORDING_INVENTORY_ID.test(id)
-			? (recs.get(id) ?? null)
-			: null
+	const lookup = (id: unknown): Rec | null => {
+		if (
+			typeof id !== "string" ||
+			id.length > 100 ||
+			!RECORDING_INVENTORY_ID.test(id)
+		)
+			return null
+		const r = recs.get(id)
+		return r !== undefined && callFileShown(r) ? r : null
+	}
 	/** The file route also takes a dsd-fme call's stable key (an Activity row's recording id). */
 	const lookupFile = (id: unknown): Rec | null => {
 		const r = lookup(id)
 		if (r !== null || typeof id !== "string" || !RECORDING_DSD_KEY.test(id))
 			return r
-		for (const x of recs.values()) if (x.item.key === id) return x
+		for (const x of recs.values())
+			if (x.item.key === id) return callFileShown(x) ? x : null
 		return null
 	}
 	const notFound = (reply: FastifyReply) =>
@@ -803,7 +833,7 @@ export function registerRecordingsMock(
 							JSON.stringify({ m: last.modifiedAt, i: last.id }),
 						).toString("base64url")
 					: null,
-			scannedFiles: recs.size,
+			scannedFiles: all.length,
 			truncated: false,
 			scannedAt: new Date(now()).toISOString(),
 			revision: recs.size,
@@ -858,6 +888,8 @@ export function registerRecordingsMock(
 			if (!r) return notFound(reply)
 			const changed = r.item.kept !== kept
 			r.item = { ...r.item, kept }
+			// A Keep is reached only while the file is shown (lookup): it records the verdict.
+			r.callClear = kept
 			return reply
 				.header("Cache-Control", "no-store")
 				.send({ id: r.item.id, kept, changed })
