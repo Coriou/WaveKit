@@ -989,7 +989,7 @@ describe("what counts in the noise-read rate (FinishPath.noiseCounted, noiseRate
 	it("a voice-like file (quieted share at or over 0.10, or a quieted run) is not counted; its verdict is unchanged", () => {
 		for (const reads of [0, DISCOVERY_NOISE_GATE])
 			for (const room of [true, false]) {
-				const at = (admission: FinishInput["admission"]) =>
+				const at = (admission: NonNullable<FinishInput["admission"]>) =>
 					finishPath({
 						...base,
 						prior: proven,
