@@ -444,11 +444,12 @@ When every recording left is protected (kept, recent for a recording outside ana
 
 The state format backup (**Upgrade and rollback** above) covers a change of the scanner state format. Three later changes did not change that format, so no backup is taken for them and an older core started on the newer state meets each one. Each needs its own steps, taken with the core stopped (`docker compose stop` or the equivalent). A core from after a change needs nothing for it. If the older core also predates a format change, restoring that backup replaces `journal/` and `.analog-operations/` too, so only step 3 (operator data, outside `<scanner.storage.dir>`) still applies. Below, `<scanner.storage.dir>` defaults to `<stateDir>/scanner` and `<stateDir>` is `WAVEKIT_STATE_DIR` (`/app/data` in the compose profiles).
 
-1. **Facts sidecars (`facts.json`, since 2026-11-23).** An older core's analog store does not know `facts.json`. Its startup scan finds a name it does not expect in a kept file's operation folder and fails closed: the whole analog inventory reads unknown. Every kept analog recording is then quarantined (`inventory-unknown`), no new analog recording is admitted (`recovery-incomplete`), retention removes none of them, and deleting a discovery that owns one fails. Nothing is deleted. Before you start the older core, take the sidecars out of the operation folders. Delete them, and this version serves the files without facts after an upgrade, or keep them by moving them to a folder outside `<scanner.storage.dir>` (here `$BACKUP`). Run each block below as a script (`sh -s`, then paste it, or a file), not line by line in your login shell: it starts with `set -eu`, so the first failing command stops it, and it refuses to run while `BACKUP` is unset or empty:
+1. **Facts sidecars (`facts.json`, since 2026-11-23).** An older core's analog store does not know `facts.json`. Its startup scan finds a name it does not expect in a kept file's operation folder and fails closed: the whole analog inventory reads unknown. Every kept analog recording is then quarantined (`inventory-unknown`), no new analog recording is admitted (`recovery-incomplete`), retention removes none of them, and deleting a discovery that owns one fails. Nothing is deleted. Before you start the older core, take the sidecars out of the operation folders. Delete them, and this version serves the files without facts after an upgrade, or keep them by moving them to a folder outside `<scanner.storage.dir>` (here `$BACKUP`). Save each block below to a file and run it with `sh <file>`, not line by line in your login shell and not pasted into `sh -s` (an interactive shell does not stop on the `BACKUP` check): it starts with `set -eu`, so the first failing command stops it, and it refuses to run while `BACKUP` is unset, empty or not an absolute path:
 
    ```sh
    set -eu
    : "${BACKUP:?set BACKUP first}"
+   case $BACKUP in /*) ;; *) echo "BACKUP must be an absolute path outside the storage and state folders" >&2; exit 1 ;; esac
    cd "<scanner.storage.dir>/.analog-operations"
    find . -mindepth 2 -maxdepth 2 -type f -name facts.tmp -exec rm -f {} +
    find . -mindepth 2 -maxdepth 2 -type f -name facts.json | while read -r f; do
@@ -461,6 +462,7 @@ The state format backup (**Upgrade and rollback** above) covers a change of the 
    ```sh
    set -eu
    : "${BACKUP:?set BACKUP first}"
+   case $BACKUP in /*) ;; *) echo "BACKUP must be an absolute path outside the storage and state folders" >&2; exit 1 ;; esac
    cd "$BACKUP"
    find . -type f -name facts.json | while read -r f; do
      d="<scanner.storage.dir>/.analog-operations/$(dirname "$f")"
@@ -484,6 +486,7 @@ The state format backup (**Upgrade and rollback** above) covers a change of the 
    ```sh
    set -eu
    : "${BACKUP:?set BACKUP first}"
+   case $BACKUP in /*) ;; *) echo "BACKUP must be an absolute path outside the storage and state folders" >&2; exit 1 ;; esac
    cd "<stateDir>/operator-data"
    mkdir -p "$BACKUP"
    cp -p state.json "$BACKUP/operator-data-state.json"
