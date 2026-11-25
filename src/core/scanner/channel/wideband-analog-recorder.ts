@@ -1805,6 +1805,12 @@ export class WidebandAnalogRecorder {
 	private readonly decisions: RecorderDecisions
 	/** Recent track spans per source and epoch (copy detection's intermod parents). */
 	private readonly spans = new TrackSpans()
+	/**
+	 * The engine each source's spans were heard from. A recreated engine restarts its epochs at
+	 * 1 and its sample clock near 0, so an equal epoch number cannot tell it apart: the spans of
+	 * the old engine are forgotten when the instance changes.
+	 */
+	private readonly spansEngine = new Map<string, object>()
 
 	constructor(private readonly deps: WidebandAnalogDeps) {
 		this.log = createComponentLogger(deps.logger, "WidebandAnalogRecorder")
@@ -3550,7 +3556,12 @@ export class WidebandAnalogRecorder {
 	): void {
 		if (this.deps.copies === undefined) return
 		try {
-			const cur = this.deps.engine(sourceId)?.currentEpoch()
+			const engine = this.deps.engine(sourceId)
+			if (engine !== undefined && this.spansEngine.get(sourceId) !== engine) {
+				this.spans.forgetSource(sourceId)
+				this.spansEngine.set(sourceId, engine)
+			}
+			const cur = engine?.currentEpoch()
 			if (cur !== undefined)
 				this.spans.note(sourceId, cur.sampleRateHz, track, cur.epoch)
 			const id = this.byObservation.get(observationId)
