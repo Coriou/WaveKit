@@ -170,6 +170,28 @@ function isReset(err: Error | undefined): err is Error {
 	)
 }
 
+/**
+ * Errors Node itself destroys a socket with when an operation on a reset connection fails (a read,
+ * a write, a shutdown). While a reset is held (holdResets) they are its echoes, not news.
+ */
+const NODE_SOCKET_FAILURES: ReadonlySet<string> = new Set([
+	"ECONNRESET",
+	"EPIPE",
+	"ENOTCONN",
+	"ECONNABORTED",
+	"ECANCELED",
+	"ETIMEDOUT",
+])
+
+/** A failure Node raised on the socket itself, never a labelled one (WaveKitError). */
+function isNodeSocketFailure(err: Error | undefined): err is Error {
+	return (
+		err !== undefined &&
+		!(err instanceof WaveKitError) &&
+		NODE_SOCKET_FAILURES.has((err as NodeJS.ErrnoException).code ?? "")
+	)
+}
+
 /** The end wait expired and the hub, alive, gave no account of the stream. */
 const END_WITHOUT_ACCOUNT: EndDecision = {
 	kind: "destroy",
@@ -395,20 +417,25 @@ export class Supervisor {
 	 * lives. A killed hub resets it too (the kernel closes a front with unread commands that way),
 	 * and its exit report (S16) may arrive after the reset. So the reset's destroy, with its
 	 * `error` and `close`, waits until the hub settles which it was: its exit (markGone: IQHUB_EXITED
-	 * or IQHUB_HUNG) or its answer to a liveness probe sent after the reset (the reset itself). A
-	 * hub that answers nothing is killed by the watchdog (M1), whose exit ends the wait.
+	 * or IQHUB_HUNG) or its answer to a liveness probe sent after the reset (the reset itself, or
+	 * the hub's account of the stream if one arrived meanwhile).
+	 *
+	 * The hold is bounded by work, not a timer: one probe round trip for a live hub; else the
+	 * watchdog (M1: no event for hungAfterMs kills the child); else the child's exit (S16), which
+	 * also ends a wait whose probe could not be sent (a closed control pipe).
 	 */
 	private holdResets(dial: Dial): void {
 		const socket = dial.socket
 		const destroyNow = socket.destroy.bind(socket)
 		// Node destroys a socket whose read fails through its public destroy (onStreamRead).
-		// Intercepted there, the socket is not destroyed while held: a read that still completes
-		// lands in its buffer, never on a destroyed stream.
+		// Intercepted there, only the socket's `error` and `close` are held back: after the failed
+		// read libuv reads nothing more, and the socket is paused so no buffered data flows on.
 		socket.destroy = (err?: Error) => {
 			if (dial.heldReset !== null) {
-				// A further failed read: the held reset still settles the socket.
-				if (isReset(err) && !dial.failed) return socket
-				// Any other destroy (the supervisor's own fail, SourceManager's) goes ahead.
+				// Node's own echo of the reset (a further failed read, a write's EPIPE, a shutdown's
+				// ENOTCONN): the held reset still settles the socket.
+				if (isNodeSocketFailure(err) && !dial.failed) return socket
+				// Any other destroy (the supervisor's own fail, the consumer's plain destroy) goes ahead.
 				dial.heldReset = null
 				return destroyNow(err)
 			}
@@ -436,8 +463,16 @@ export class Supervisor {
 			this.releaseReset(dial, reset)
 			return
 		}
+		// An unsent probe (closed control pipe) leaves the wait to the hub's exit (markGone).
 		this.probe(hub, alive => {
-			if (alive) this.releaseReset(dial, reset)
+			if (!alive) return
+			// The hub's account of the stream that arrived while the reset was held (front-ended,
+			// sink-closed reconfigured or request) is recorded by decide and names the end.
+			const held = dial.decision
+			this.releaseReset(
+				dial,
+				held?.kind === "destroy" ? hubError(held.message, held.code) : reset,
+			)
 		})
 	}
 
@@ -1220,6 +1255,8 @@ export class Supervisor {
 			if (dial.decision === null) {
 				// D6: no account of the stream may mean a hub that died and has not reported its
 				// exit yet: the hub's exit (markGone) or its answer to a probe decides, not the wait.
+				// A probe that cannot be sent (closed control pipe: the hub is exiting) never
+				// answers; its exit (S16, markGone) ends the wait then.
 				const hub = this.hub
 				if (hub !== null && !hub.gone) {
 					if (dial.probing) return

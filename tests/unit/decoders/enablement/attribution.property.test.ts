@@ -89,8 +89,11 @@ describe("attributeInterval", () => {
 							shortfall === false
 						)
 							expected = "link"
-						// One branch, its only drop, every other figure clean: the consumer
-						// (attribution.ts, since 4902ca7b2).
+						// Spec row 7 (docs/specs/link-burst-resilience/design.md:245): one branch, its
+						// only drop, every other figure clean is the consumer. The product
+						// (attribution.ts, since 4902ca7b2), and this model with it, is stricter than
+						// the spec's "no qualifying gap" (gap − loop delay ≥ LINK_GAP_MS): it needs
+						// the raw gap below LINK_GAP_MS.
 						else if (
 							drops.length === 1 &&
 							positive === 1 &&
