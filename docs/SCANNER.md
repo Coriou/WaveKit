@@ -444,9 +444,11 @@ When every recording left is protected (kept, recent for a recording outside ana
 
 The state format backup (**Upgrade and rollback** above) covers a change of the scanner state format. Three later changes did not change that format, so no backup is taken for them and an older core started on the newer state meets each one. Each needs its own steps, taken with the core stopped (`docker compose stop` or the equivalent). A core from after a change needs nothing for it. If the older core also predates a format change, restoring that backup replaces `journal/` and `.analog-operations/` too, so only step 3 (operator data, outside `<scanner.storage.dir>`) still applies. Below, `<scanner.storage.dir>` defaults to `<stateDir>/scanner` and `<stateDir>` is `WAVEKIT_STATE_DIR` (`/app/data` in the compose profiles).
 
-1. **Facts sidecars (`facts.json`, since 2026-11-23).** An older core's analog store does not know `facts.json`. Its startup scan finds a name it does not expect in a kept file's operation folder and fails closed: the whole analog inventory reads unknown. Every kept analog recording is then quarantined (`inventory-unknown`), no new analog recording is admitted (`recovery-incomplete`), retention removes none of them, and deleting a discovery that owns one fails. Nothing is deleted. Before you start the older core, take the sidecars out of the operation folders. Delete them, and this version serves the files without facts after an upgrade, or keep them by moving them to a folder outside `<scanner.storage.dir>` (here `$BACKUP`):
+1. **Facts sidecars (`facts.json`, since 2026-11-23).** An older core's analog store does not know `facts.json`. Its startup scan finds a name it does not expect in a kept file's operation folder and fails closed: the whole analog inventory reads unknown. Every kept analog recording is then quarantined (`inventory-unknown`), no new analog recording is admitted (`recovery-incomplete`), retention removes none of them, and deleting a discovery that owns one fails. Nothing is deleted. Before you start the older core, take the sidecars out of the operation folders. Delete them, and this version serves the files without facts after an upgrade, or keep them by moving them to a folder outside `<scanner.storage.dir>` (here `$BACKUP`). Run each block below as a script (`sh -s`, then paste it, or a file), not line by line in your login shell: it starts with `set -eu`, so the first failing command stops it, and it refuses to run while `BACKUP` is unset or empty:
 
    ```sh
+   set -eu
+   : "${BACKUP:?set BACKUP first}"
    cd "<scanner.storage.dir>/.analog-operations"
    find . -mindepth 2 -maxdepth 2 -type f -name facts.tmp -exec rm -f {} +
    find . -mindepth 2 -maxdepth 2 -type f -name facts.json | while read -r f; do
@@ -457,6 +459,8 @@ The state format backup (**Upgrade and rollback** above) covers a change of the 
    Operation folders are named by their uuid, so the names hold no spaces. To restore the sidecars after upgrading again (with the newer core stopped), move each one back only into a folder that still has its `intent.json`. The older core may have removed recordings meanwhile, and an operation folder holding only a `facts.json` makes this version's inventory unknown too:
 
    ```sh
+   set -eu
+   : "${BACKUP:?set BACKUP first}"
    cd "$BACKUP"
    find . -type f -name facts.json | while read -r f; do
      d="<scanner.storage.dir>/.analog-operations/$(dirname "$f")"
@@ -475,15 +479,20 @@ The state format backup (**Upgrade and rollback** above) covers a change of the 
 
    Leave the later parts in place. The older core never prunes or reads them, but they hold the merge alias listings this version's startup folder check reads again after an upgrade. They cost their disk space until this version's journal cap or `maxAgeDays` prunes them.
 
-3. **Saved frequency `centre` ("Tune as centre", since 2026-11-24).** The operator data schema is strict and its version did not change, so an older core refuses the whole store when one saved frequency holds `centre`. Operator data is then unavailable on it: saved frequencies, preferences and command usage answer `OPERATOR_DATA_UNAVAILABLE`. Nothing is deleted. Before you roll back, while the newer core still runs, turn **Tune as centre** off on every saved frequency in the web app, which leaves the field out. A `centre: false` stored through the API is still a member the older core refuses, so replace such a frequency without the field (`PUT /api/operator-data/saved-frequencies/:id`). If the older core already runs, stop it and edit the file by hand. Keep a copy, then rewrite the file in place so that its owner and its `0600` mode stay as they are (the store refuses the file otherwise). The file's owner must be the user the core runs as, so run these commands as that user, or as root, which keeps the owner because the file is rewritten in place:
+3. **Saved frequency `centre` ("Tune as centre", since 2026-11-24).** The operator data schema is strict and its version did not change, so an older core refuses the whole store when one saved frequency holds `centre`. Operator data is then unavailable on it: saved frequencies, preferences and command usage answer `OPERATOR_DATA_UNAVAILABLE`. Nothing is deleted. Before you roll back, while the newer core still runs, turn **Tune as centre** off on every saved frequency in the web app, which leaves the field out. A `centre: false` stored through the API is still a member the older core refuses, so replace such a frequency without the field (`PUT /api/operator-data/saved-frequencies/:id`). If the older core already runs, stop it and edit the file by hand. Keep a copy, then rewrite the file in place so that its owner and its `0600` mode stay as they are (the store refuses the file otherwise). The file's owner must be the user the core runs as, so run these commands as that user, or as root, which keeps the owner because the file is rewritten in place. Run the block as a script, as in step 1: it stops at the first failure, refuses to run without `BACKUP`, and rewrites `state.json` only once `jq` wrote a non-empty result, so a missing `jq` or a failed rewrite leaves the file as it was:
 
    ```sh
+   set -eu
+   : "${BACKUP:?set BACKUP first}"
    cd "<stateDir>/operator-data"
    mkdir -p "$BACKUP"
    cp -p state.json "$BACKUP/operator-data-state.json"
-   jq -c 'del(.savedFrequencies[].centre)' state.json > "$BACKUP/state.json.new"
-   cat "$BACKUP/state.json.new" > state.json
+   jq -c 'del(.savedFrequencies[].centre)' state.json > "$BACKUP/state.json.new" &&
+     [ -s "$BACKUP/state.json.new" ] &&
+     cat "$BACKUP/state.json.new" > state.json
    ```
+
+   To undo it (with the core stopped), copy the backup back in place the same way, as the same user, so the owner and mode stay: `cat "$BACKUP/operator-data-state.json" > "<stateDir>/operator-data/state.json"`.
 
    Then start the older core. Removing the member only drops the preference: each frequency tunes the usual way after an upgrade until you turn it on again.
 

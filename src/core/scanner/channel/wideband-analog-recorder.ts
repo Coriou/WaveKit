@@ -3562,7 +3562,14 @@ export class WidebandAnalogRecorder {
 				this.spansEngine.set(sourceId, engine)
 			}
 			const cur = engine?.currentEpoch()
-			if (cur !== undefined)
+			// A snapshot ending past the engine's live edge counts on another clock: a late one of the
+			// engine this one replaced (same epoch number, its clock ahead) or of an earlier stream.
+			// Noted, its end would become the source's newest and expire every span of this clock.
+			if (
+				cur !== undefined &&
+				engine !== undefined &&
+				track.lastSample <= engine.liveEdge()
+			)
 				this.spans.note(sourceId, cur.sampleRateHz, track, cur.epoch)
 			const id = this.byObservation.get(observationId)
 			const s = id === undefined ? undefined : this.sessions.get(id)

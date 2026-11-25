@@ -428,7 +428,9 @@ export class TrackSpans {
 		src.spans.set(track.trackId, entry)
 		if (entry.lastSample > src.newest) src.newest = entry.lastSample
 		const cutoff = src.newest - (COPY_HORIZON_MS * src.fs) / 1000
-		// From the front only, stopping at the first span inside the horizon (O(1) amortised).
+		// From the front only, stopping at the first span inside the horizon: O(1) amortised in
+		// the JS work (each span is visited and deleted once). Iterating from the front after
+		// deletes costs no extra JS either: V8 skips a Map's deleted slots natively.
 		for (const [id, s] of src.spans) {
 			if (s.lastSample >= cutoff) break
 			src.spans.delete(id)

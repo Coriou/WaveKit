@@ -29,6 +29,7 @@ import {
 import type { PcmQueue } from "../../../../src/core/scanner/channel/pcm-queue.js"
 import {
 	CENTRE,
+	FakeEngine,
 	HARNESS_T0,
 	LOW,
 	LOW_FS,
@@ -187,6 +188,66 @@ describe("WidebandAnalogRecorder: copy detection", () => {
 		expect(copies.kept[0]!.fp.intermod).toBeNull()
 		expect(copies.kept[0]!.fp.raster).toBe("unknown")
 	}, 120_000)
+})
+
+describe("WidebandAnalogRecorder: copy spans across an engine swap", () => {
+	const strong = { peakDbfs: -5, snrDb: 45 }
+	/**
+	 * A source's engine recreated: the old one (epoch 1, its clock past the copy horizon) heard two strong
+	 * tracks; the new one restarts at epoch 1 with its clock at 0, and its own parents must mark
+	 * the file it records. `late`: the old tracks close only after the swap (a late close).
+	 */
+	async function swapScene(late: boolean) {
+		const copies = fakeCopies()
+		const old = new FakeEngine(LOW_FS)
+		let swapped = false
+		const h = harness({
+			fs: LOW_FS,
+			offset: LOW_OFFSET,
+			source: { ctcssHz: null, syllables: true },
+			decodedLabel: () => null,
+			voicePrior: () => suspect,
+			admission: false,
+			copies: copies.det,
+			engine: (_sourceId, fake) => (swapped ? fake : old),
+		})
+		old.write(new Uint8Array(2 * 64), 400 * LOW_FS)
+		const oldEnd = old.liveEdge()
+		const oldTracks = [
+			["q1", F1 + 7_000],
+			["q2", F2 + 7_000],
+		] as const
+		const oldSnap = (id: string, hz: number) =>
+			snapshot(id, oldEnd - 5 * LOW_FS, oldEnd, { centreHz: hz, ...strong })
+		for (const [id, hz] of oldTracks)
+			h.rec.track(input(id, oldSnap(id, hz), { recordAllowed: false }))
+		if (!late)
+			for (const [id, hz] of oldTracks) h.rec.closed(id, oldSnap(id, hz), null)
+		swapped = true
+		expect(h.engine.currentEpoch().epoch).toBe(old.currentEpoch().epoch)
+		expect(h.engine.liveEdge()).toBe(0)
+		if (late)
+			for (const [id, hz] of oldTracks) h.rec.closed(id, oldSnap(id, hz), null)
+		await h.feed(1, false)
+		await overWithParents(h, 5, true)
+		await h.feed(12, false)
+		await h.fire()
+		await h.rec.idle()
+		return { h, copies }
+	}
+
+	for (const late of [false, true])
+		it(`the new engine's own parents mark the file (same epoch number, clock restarted near 0${late ? ", the old tracks closing late" : ""})`, async () => {
+			const { h, copies } = await swapScene(late)
+			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+			expect(copies.kept).toHaveLength(1)
+			expect(copies.kept[0]!.fp.intermod).toEqual({
+				rule: "2f1-f2",
+				parents: [{ hz: F1 }, { hz: F2 }],
+				roots: [F1, F2],
+				tolHz: 4_000,
+			})
+		}, 120_000)
 })
 
 /** A shadow whose spectrum reads `carrier`: classed only by its own speech (toneOnly, speechOnly). */

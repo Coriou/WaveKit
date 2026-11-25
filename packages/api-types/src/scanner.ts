@@ -1285,6 +1285,8 @@ export interface ScannerRecorderCopyStatus {
 	copyRingOverflow: number
 	/** Jobs dropped by the queue bound. */
 	copyQueueDropped: number
+	/** Copy marks the store skipped or failed to write (the file went back to its previous state). */
+	copyWriteSkipped: number
 	/** The slowest comparison (ms of one core). */
 	copyComparisonMsMax: number
 	/** Track spans dropped by the intermod ring's count bound. */

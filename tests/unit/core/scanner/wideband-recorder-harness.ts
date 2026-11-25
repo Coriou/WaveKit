@@ -280,6 +280,14 @@ export function harness(
 		copies?: CopyDetector
 		/** The raster fit of a frequency (WidebandAnalogDeps.rasterOf); default absent. */
 		rasterOf?: (sourceId: string, hz: number) => RasterFit
+		/**
+		 * The engine the recorder sees for a source (WidebandAnalogDeps.engine), given the harness's
+		 * fake (which `feed` writes); default that fake. An engine swap returns another view.
+		 */
+		engine?: (
+			sourceId: string,
+			fake: FakeEngine,
+		) => WidebandEngineView | undefined
 		/** Wraps the fake store's beginAnalog (failure injection: a throw, a rejected push). */
 		beginWrap?: (
 			begin: (input: AnalogInput) => AnalogHandle,
@@ -288,6 +296,7 @@ export function harness(
 ) {
 	const fs = opts.fs ?? FS
 	const engine = new FakeEngine(fs, opts.ringSeconds ?? 3)
+	const engineOf = opts.engine
 	let rec!: WidebandAnalogRecorder
 	const { ops, begin } = fakeOps(b => rec.bindingLive(b), opts)
 	const queue: (() => void)[] = []
@@ -317,7 +326,7 @@ export function harness(
 							}
 				})
 	rec = new WidebandAnalogRecorder({
-		engine: () => engine,
+		engine: engineOf ? sourceId => engineOf(sourceId, engine) : () => engine,
 		settings: () => ({
 			preRollMs: 300,
 			hangMs: 2000,

@@ -4425,7 +4425,8 @@ holds copy (ghost) detection's counters since the core started
 (same audio, but the weaker file had no evidence of its own: nothing marked), `copyIneligible` (a
 file too flat or unvoiced to compare), `copyMultiRoot` (a file matched more than one original:
 attached to the strongest), `copyUnlinked` (copies shown again), `copyRingOverflow`,
-`copyQueueDropped` and `copyTrackSpansDropped` (bounds reached) and `copyComparisonMsMax` (the
+`copyQueueDropped` and `copyTrackSpansDropped` (bounds reached), `copyWriteSkipped` (copy marks the
+store skipped or failed to write: the file went back to its previous state) and `copyComparisonMsMax` (the
 slowest comparison, ms). The codes are listed in
 `SCANNER_RECORDER_DECISIONS` and explained in
 [SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings). Newer cores add the
