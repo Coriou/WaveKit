@@ -89,6 +89,19 @@ describe("attributeInterval", () => {
 							shortfall === false
 						)
 							expected = "link"
+						// One branch, its only drop, every other figure clean: the consumer
+						// (attribution.ts, since 4902ca7b2).
+						else if (
+							drops.length === 1 &&
+							positive === 1 &&
+							overflow === 0 &&
+							gap !== null &&
+							gap < LINK_GAP_MS &&
+							shortfall === false &&
+							loop !== null &&
+							cpu !== null
+						)
+							expected = "consumer"
 					}
 					expect(attributeInterval(input)).toBe(expected)
 					expect(attributeInterval(input)).toBe(expected)
@@ -115,6 +128,23 @@ describe("attributeInterval", () => {
 		],
 		[{ upstreamDropDelta: null }, "link"],
 		[{ upstreamDropDelta: 1, cpuPercent: 100 }, "unknown"],
+		// fast-check seed -2085592897: one branch with the only drop and no upstream figure.
+		[
+			{
+				branchDrops: new Map([["0", 1]]),
+				maxGapMs: 0,
+				upstreamDropDelta: null,
+			},
+			"consumer",
+		],
+		[
+			{
+				branchDrops: new Map([["0", 1]]),
+				maxGapMs: 0,
+				cpuPercent: null,
+			},
+			"unknown",
+		],
 		[{ maxGapMs: LINK_GAP_MS - 1 }, "unknown"],
 		[{ maxGapMs: LINK_GAP_MS + 1 }, "link"],
 		[{ maxGapMs: LINK_GAP_MS + 10, loopDelayMaxMs: 10 }, "link"],
