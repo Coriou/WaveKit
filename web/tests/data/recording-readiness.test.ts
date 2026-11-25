@@ -349,6 +349,15 @@ describe("the file of a recording still being saved", () => {
 		expect(r.retryIn("k.wav")).toBeNull()
 	})
 
+	it("a forgotten id read again on a young row stays settled", () => {
+		const r = new RecordingReadiness(fakeClock(T0))
+		r.note([row(iso(T0), "rec-1", "e1")])
+		r.forget(["rec-1"])
+		r.note([row(iso(T0), "rec-1", "e1")])
+		expect(r.isSaving("rec-1")).toBe(false)
+		expect(r.retryIn("rec-1")).toBeNull()
+	})
+
 	it("a file never linked here still fails at once with the core's answer", async () => {
 		const r = new RecordingReadiness()
 		const { api, calls } = scripted(() =>

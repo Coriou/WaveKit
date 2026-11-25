@@ -177,8 +177,10 @@ export class RecordingReadiness {
 	forget(ids: Iterable<string>): void {
 		const current = this.saving.get()
 		let next: Map<string, number> | null = null
+		const now = this.clock.now()
 		for (const id of ids) {
-			this.seen.delete(id)
+			// a tombstone, not a delete: a later read of a row still linking it must not start it saving again
+			this.remember(id, { readyAt: now, retryUntil: 0 })
 			if (!current.has(id)) continue
 			next ??= new Map(current)
 			next.delete(id)
