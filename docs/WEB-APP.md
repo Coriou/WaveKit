@@ -703,7 +703,7 @@ signal flags (such as `Off the channel raster`), the file size, and how the reco
 (its decision, what the channel's history said and the rule that fired, in words, then its
 measured levels, rounded). A code WaveKit has no sentence for shows in plain words (a newer
 code such as `carrierDrop` would read `Carrier drop`), never as the raw code. **Identifiers**, collapsed under it, lists
-every id (recording key, observation, discovery, Activity event, operation, receiver), each with a
+every id (transmission, recording key, observation, discovery, Activity event, operation, receiver), each with a
 copy icon; a long id wraps between its parts. **Download WAV** and the stored JSON close it. Copy
 says `Copied`, or that the browser blocked it.
 
@@ -711,7 +711,7 @@ A scanner recording's event detail in Activity speaks the same way: **Channel** 
 **Transmission started** (when the transmission it belongs to began: a later part or a second over
 of the same session shares it, so it is not the file's own start), **Duration** in seconds and
 **Kept at**, never its ids or ISO times; those, the measured frequency in
-whole Hz and the stored JSON are under **Ids and raw values**, collapsed, where the times too
+MHz and the stored JSON are under **Ids and raw values**, collapsed, where the times too
 read on your clock with the same time in UTC under them, and the duration in words. A live analog
 transmission's detail says its length in seconds and how it ended in words.
 

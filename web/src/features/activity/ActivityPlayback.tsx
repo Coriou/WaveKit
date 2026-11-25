@@ -166,7 +166,8 @@ export function RecordingBlock({ item }: { item: ActivitySummary }) {
 				)}
 			</div>
 			<div className="wka-rec-actions">
-				<KeepButton id={rec.id} title={title} />
+				{/* a file still being saved is not listed yet: a Keep then would be refused */}
+				{!saving && <KeepButton id={rec.id} title={title} />}
 			</div>
 		</section>
 	)

@@ -213,7 +213,7 @@
 	}
 	.wkt-id-row {
 		display: grid;
-		grid-template-columns: 112px minmax(0, 1fr) auto;
+		grid-template-columns: 112px minmax(0, 1fr);
 		align-items: center;
 		gap: 10px;
 		font-size: var(--wk-fs-sm);
@@ -224,6 +224,10 @@
 	.wkt-id-row dd {
 		margin: 0;
 		min-width: 0;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 10px;
 	}
 	.wkt-id {
 		font-size: var(--wk-fs-xs);

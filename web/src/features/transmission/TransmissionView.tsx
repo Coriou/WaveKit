@@ -342,6 +342,8 @@ export function TransmissionView({
 	const host = open.origin.host
 	const audioId =
 		state.status === "ready" ? (state.t.artefacts[0]?.id ?? null) : null
+	// a file the core still saves is not listed yet: a Keep then would be refused
+	const audioSaving = useRecordingSaving(audioId)
 
 	// the player's Next, Prev, Auto-next or Play all moved on from the recording shown here: the view follows
 	// (its content replaced, its origin kept)
@@ -371,7 +373,7 @@ export function TransmissionView({
 					‹ {open.origin.label}
 				</Button>
 				<span className="wkt-gap" />
-				{audioId !== null && state.status === "ready" && (
+				{audioId !== null && !audioSaving && state.status === "ready" && (
 					<KeepButton
 						id={audioId}
 						title={transmissionHeading(state.t)}
@@ -969,16 +971,16 @@ export function Details({
 								<dt>{term}</dt>
 								<dd>
 									<IdText value={value} />
+									<IconButton
+										label={`Copy ${term.toLowerCase()}`}
+										title="Copy"
+										size="xs"
+										className="wkt-copy"
+										onClick={() => copy(value)}
+									>
+										<Icon name="copy" />
+									</IconButton>
 								</dd>
-								<IconButton
-									label={`Copy ${term.toLowerCase()}`}
-									title="Copy"
-									size="xs"
-									className="wkt-copy"
-									onClick={() => copy(value)}
-								>
-									<Icon name="copy" />
-								</IconButton>
 							</div>
 						))}
 					</dl>

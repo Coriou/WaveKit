@@ -404,7 +404,7 @@
 	.wkp-disc[data-saving]:hover .wkp-disc-face {
 		background: none;
 	}
-	.wka-saving-face {
+	.wkp-disc-face.wka-saving-face {
 		box-sizing: border-box;
 		border-style: dashed;
 		border-color: var(--wk-text-3);
